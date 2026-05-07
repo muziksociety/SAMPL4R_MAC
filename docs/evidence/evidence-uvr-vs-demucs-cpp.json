@@ -1,0 +1,228 @@
+{
+  "session_id": "uvr-vs-demucs-cpp-investigation",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T00:00:00Z",
+  "status": "complete",
+  "investigation_question": "What does UVR/audio-separator have that demucs.cpp doesn't?",
+
+  "executive_summary": {
+    "primary_reason_for_uvr": "Model variety and specialized drums-only models (kuielab) that are FASTER for drums extraction",
+    "can_demucs_cpp_replace_uvr": "PARTIALLY - demucs.cpp can match quality but lacks drums-only models and auto-downloading",
+    "recommendation": "Keep UVR as primary when available (fastest for drums), use demucs.cpp as fallback"
+  },
+
+  "comparison_table": {
+    "feature": [
+      "Installation",
+      "Model Auto-Download",
+      "GPU Acceleration",
+      "Drums-Only Model",
+      "Processing Speed (5-min song)",
+      "Model Quality (SDR)",
+      "Supported Architectures",
+      "Single Stem Extraction",
+      "Multiple Output Formats",
+      "Portability",
+      "Python Dependency"
+    ],
+    "audio_separator_uvr": [
+      "pip install audio-separator",
+      "YES - auto-downloads from HuggingFace",
+      "YES (CUDA/GPU via PyTorch)",
+      "YES (kuielab_b_drums.onnx - SDR 7.1)",
+      "2-3 min (GPU with htdemucs)",
+      "htdemucs_ft: drums SDR 10.0 (best)",
+      "Demucs, MDX-Net, VR Arch, MDXC",
+      "YES (--single_stem Drums)",
+      "YES (WAV, FLAC, MP3, etc.)",
+      "Requires Python + PyTorch",
+      "YES - Python 3.x required"
+    ],
+    "demucs_cpp": [
+      "Build from source / pre-built CLI",
+      "NO - manual model download",
+      "PARTIAL (ONNX GPU backend exists but unverified)",
+      "NO - always processes all 4 stems",
+      "25-30 min (CPU), ~3 min (GPU if working)",
+      "htdemucs: drums SDR 9.4",
+      "Demucs v3/v4 only",
+      "NO - must process all stems, extract drums after",
+      "WAV only",
+      "Standalone .exe + DLLs",
+      "NO - pure C++"
+    ]
+  },
+
+  "detailed_analysis": {
+    "model_support": {
+      "audio_separator": {
+        "total_models": "50+ models available",
+        "architectures": [
+          "Demucs v4 (htdemucs, htdemucs_ft, htdemucs_6s, hdemucs_mmi)",
+          "MDX-Net (vocal/instrumental separation, drums-specific)",
+          "VR Arch (various separation types, de-echo, de-reverb, de-noise)",
+          "MDXC (newest architecture)"
+        ],
+        "drums_specific_models": [
+          "kuielab_b_drums.onnx (MDX, drums SDR 7.1)",
+          "kuielab_a_drums.onnx (MDX, drums SDR 7.0)"
+        ],
+        "best_for_drums": "htdemucs_ft.yaml (Demucs, drums SDR 10.0)"
+      },
+      "demucs_cpp": {
+        "total_models": "7 models (ggml format)",
+        "architectures": ["Demucs v3 (hdemucs_mmi)", "Demucs v4 (htdemucs variants)"],
+        "models": [
+          "ggml-model-htdemucs-4s-f16.bin (81MB, 4-stem)",
+          "ggml-model-htdemucs-6s-f16.bin (53MB, 6-stem)",
+          "ggml-model-htdemucs_ft_drums-4s-f16.bin (81MB, ft drums)",
+          "ggml-model-htdemucs_ft_vocals-4s-f16.bin (81MB, ft vocals)",
+          "ggml-model-htdemucs_ft_bass-4s-f16.bin (81MB, ft bass)",
+          "ggml-model-htdemucs_ft_other-4s-f16.bin (81MB, ft other)",
+          "ggml-model-hdemucs_mmi-v3-f16.bin (160MB, v3)"
+        ],
+        "drums_specific_models": "NONE - all models process all stems"
+      }
+    },
+
+    "speed_comparison": {
+      "5_min_song_benchmarks": {
+        "audio_separator_gpu": "2-3 minutes (htdemucs with CUDA)",
+        "audio_separator_drums_only": "FASTER with kuielab models (~1-2 min estimated)",
+        "demucs_cpp_cpu": "25-30 minutes (OpenBLAS multi-threaded)",
+        "demucs_cpp_onnx_gpu": "2-3 minutes (UNVERIFIED - model placeholder)",
+        "current_optimization": "demucs.cpp kills process after drums written (4x speedup)"
+      },
+      "key_insight": "audio-separator with kuielab drums-only model skips 3/4 of processing"
+    },
+
+    "gpu_acceleration": {
+      "audio_separator": {
+        "works": true,
+        "provider": "PyTorch CUDA",
+        "requirements": "NVIDIA GPU + CUDA drivers",
+        "verified": true
+      },
+      "demucs_cpp_onnx": {
+        "works": "UNVERIFIED",
+        "provider": "ONNX Runtime CUDA",
+        "requirements": "demucs_onnx.exe + CUDA DLLs + htdemucs.ort model",
+        "current_state": {
+          "demucs_onnx_exe": "MISSING (bin/ has only DLLs)",
+          "onnxruntime_dlls": "PRESENT",
+          "htdemucs_ort_model": "MISSING (models/ has demucs.onnx not htdemucs.ort)",
+          "issue": "No CLI executable to actually run GPU inference"
+        }
+      }
+    },
+
+    "single_stem_extraction": {
+      "audio_separator": {
+        "supported": true,
+        "command": "audio-separator input.wav --single_stem Drums",
+        "benefit": "Skips processing other stems entirely = faster"
+      },
+      "demucs_cpp": {
+        "supported": false,
+        "workaround": "Process all 4 stems, only use drums output",
+        "current_optimization": "Kill process after drums file written (lines 887-923 in FullSongService.cpp)",
+        "limitation": "Still computes all stems up to drums output point"
+      }
+    }
+  },
+
+  "code_evidence": {
+    "backend_priority_order": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+      "lines": "78-79",
+      "code": "// BACKEND SELECTION WITH UVR PRIORITY\n// Auto mode: UVR (fastest) > ONNX GPU > demucs.cpp CPU"
+    },
+    "uvr_config_options": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.h",
+      "lines": "78-88",
+      "models_supported": [
+        "htdemucs_6s.yaml (6-stem, default)",
+        "htdemucs_ft.yaml (4-stem, best quality)",
+        "kuielab_b_drums.onnx (drums-only, fastest)"
+      ]
+    },
+    "demucs_cpp_models": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.h",
+      "line": 60,
+      "default_model": "models/ggml-model-htdemucs-4s-f16.bin"
+    },
+    "onnx_gpu_status": {
+      "directory": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\onnxruntime",
+      "files_present": [
+        "bin/onnxruntime.dll",
+        "bin/onnxruntime_providers_cuda.dll",
+        "bin/onnxruntime_providers_shared.dll",
+        "models/demucs.onnx"
+      ],
+      "files_missing": [
+        "bin/demucs_onnx.exe (THE CLI EXECUTABLE!)",
+        "models/htdemucs.ort (expected .ort format, have .onnx)"
+      ],
+      "conclusion": "ONNX GPU backend is INCOMPLETE - cannot actually run"
+    }
+  },
+
+  "why_uvr_was_added": {
+    "explicit_comment": "Line 79: 'Auto mode: UVR (fastest) > ONNX GPU > demucs.cpp CPU'",
+    "inferred_reasons": [
+      "1. UVR has drums-only models (kuielab) = skip 75% of processing",
+      "2. UVR works out-of-box with pip install = easier deployment",
+      "3. UVR auto-downloads models = no manual setup",
+      "4. UVR GPU already verified working vs demucs.cpp ONNX incomplete",
+      "5. UVR supports multiple architectures beyond Demucs (MDX, VR)"
+    ]
+  },
+
+  "can_demucs_cpp_replace_uvr": {
+    "answer": "PARTIALLY",
+    "what_demucs_cpp_CAN_do": [
+      "Same Demucs v4 model quality (htdemucs, htdemucs_ft)",
+      "Portable standalone executable (no Python)",
+      "Multi-threaded CPU inference",
+      "GPU inference via ONNX (if properly configured)"
+    ],
+    "what_demucs_cpp_CANNOT_do": [
+      "Drums-only extraction (always processes all stems)",
+      "Auto-download models",
+      "Use MDX-Net drums-specific models (kuielab)",
+      "Use VR Arch models"
+    ],
+    "to_make_demucs_cpp_viable": [
+      "1. Fix ONNX GPU path: obtain demucs_onnx.exe and htdemucs.ort",
+      "2. Keep the early-kill optimization (already implemented)",
+      "3. Accept slightly slower than kuielab drums-only model"
+    ]
+  },
+
+  "recommendation": {
+    "primary_backend": "UVR/audio-separator (when available)",
+    "reasons": [
+      "Fastest for drums-only extraction with kuielab model",
+      "GPU acceleration verified working",
+      "Already installed and configured on this system"
+    ],
+    "fallback_backend": "demucs.cpp CPU",
+    "demucs_onnx_gpu_status": "NOT FUNCTIONAL - missing CLI executable",
+    "action_items": [
+      "1. Keep current UVR priority in Auto mode",
+      "2. Either fix ONNX GPU or remove misleading code",
+      "3. Consider adding kuielab_b_drums.onnx as default UVR model for speed"
+    ]
+  },
+
+  "audio_separator_models_available": {
+    "drums_separation": [
+      {"model": "htdemucs_ft.yaml", "arch": "Demucs", "drums_sdr": 10.0, "note": "Best quality"},
+      {"model": "htdemucs.yaml", "arch": "Demucs", "drums_sdr": 9.4, "note": "Faster"},
+      {"model": "htdemucs_6s.yaml", "arch": "Demucs", "drums_sdr": 8.5, "note": "6-stem (+ guitar, piano)"},
+      {"model": "kuielab_b_drums.onnx", "arch": "MDX", "drums_sdr": 7.1, "note": "DRUMS ONLY - Fastest"},
+      {"model": "kuielab_a_drums.onnx", "arch": "MDX", "drums_sdr": 7.0, "note": "DRUMS ONLY - Alt"}
+    ],
+    "note": "kuielab models only output drums stem = skip processing vocals/bass/other entirely"
+  }
+}

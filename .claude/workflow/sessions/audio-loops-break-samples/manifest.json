@@ -1,0 +1,27 @@
+{
+  "session_id": "audio-loops-break-samples",
+  "task": "Fix audio bug: After playing loops (gray/white long samples), short cached samples stop playing in SampleBrowserPage",
+  "enhanced_task": "",
+  "started": "2025-12-08T14:26:00Z",
+  "status": "in_progress",
+  "current_phase": "investigation",
+  "phases": {
+    "prompt-enhancement": { "status": "complete" },
+    "investigation": { "status": "in_progress" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "bug_details": {
+    "symptom": "After playing a loop (white/gray colored file >2sec), clicking on short samples no longer produces sound",
+    "affected_component": "SampleBrowserPage audio playback",
+    "playback_paths": {
+      "loops": "playFile() - streams from disk via transport_",
+      "short_samples": "playFileFromCache() - plays from BufferAudioSource"
+    }
+  }
+}

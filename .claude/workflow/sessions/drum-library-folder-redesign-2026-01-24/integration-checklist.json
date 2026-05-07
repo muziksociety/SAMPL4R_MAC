@@ -1,0 +1,144 @@
+{
+  "session_id": "drum-library-folder-redesign-2026-01-24",
+  "generated_at": "2026-01-24T00:00:00Z",
+  "task": "Redesign the Drum Library UI folder area",
+  "code_path_trace": {
+    "entry_point": "SampleBrowserPage::toggleLibraryMode() or enterLibraryMode()",
+    "path": [
+      {
+        "step": 1,
+        "location": "SampleBrowserPage.cpp:5425-5525",
+        "action": "Toggle libraryMode_ flag, setup tree view visibility"
+      },
+      {
+        "step": 2,
+        "location": "SampleBrowserPage.cpp:1627 (resized)",
+        "action": "Layout recalculated - libraryMode_ triggers folder panel layout at line 1732"
+      },
+      {
+        "step": 3,
+        "location": "SampleBrowserPage.cpp:1749",
+        "action": "folderTreeView_->setBounds(treeArea) - tree positioned in left panel"
+      },
+      {
+        "step": 4,
+        "location": "SampleBrowserPage.cpp:1538 (paint)",
+        "action": "Draws folder panel background, header, border when libraryMode_ is true"
+      },
+      {
+        "step": 5,
+        "location": "FolderTreeItem.cpp:23 (paintItem)",
+        "action": "Individual folder items painted with icons, names, counts"
+      }
+    ]
+  },
+  "integration_points": [
+    {
+      "id": "IP001",
+      "name": "Library Mode Entry",
+      "description": "Controls when folder panel becomes visible",
+      "file": "SampleBrowserPage.cpp",
+      "lines": "5425-5525",
+      "integration_type": "state_toggle"
+    },
+    {
+      "id": "IP002",
+      "name": "Panel Layout",
+      "description": "Positioning of folder panel and tree view",
+      "file": "SampleBrowserPage.cpp",
+      "lines": "1732-1773",
+      "integration_type": "layout"
+    },
+    {
+      "id": "IP003",
+      "name": "Panel Painting",
+      "description": "Visual rendering of folder panel background and header",
+      "file": "SampleBrowserPage.cpp",
+      "lines": "1549-1623",
+      "integration_type": "rendering"
+    },
+    {
+      "id": "IP004",
+      "name": "Tree Item Rendering",
+      "description": "Individual folder item appearance",
+      "file": "FolderTreeItem.cpp",
+      "lines": "23-135",
+      "integration_type": "rendering"
+    },
+    {
+      "id": "IP005",
+      "name": "Tree Setup",
+      "description": "Creation and configuration of DroppableTreeView",
+      "file": "SampleBrowserPage.cpp",
+      "lines": "5528-5549",
+      "integration_type": "initialization"
+    }
+  ],
+  "dependencies": {
+    "FolderTreeItem.h": {
+      "depends_on": ["juce_gui_basics"],
+      "used_by": ["SampleBrowserPage.cpp"]
+    },
+    "FolderTreeItem.cpp": {
+      "depends_on": ["FolderTreeItem.h"],
+      "used_by": []
+    },
+    "SampleBrowserPage (library mode)": {
+      "depends_on": ["FolderTreeItem.h", "libraryMode_ flag"],
+      "used_by": ["MainWindow.cpp"]
+    }
+  },
+  "safety_checklist": [
+    {
+      "check": "Library mode toggle functionality preserved",
+      "file": "SampleBrowserPage.cpp:toggleLibraryMode()",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Normal browser mode unaffected",
+      "file": "SampleBrowserPage.cpp (all non-libraryMode_ code)",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Drag and drop still works",
+      "file": "FolderTreeItem.cpp:DroppableTreeView",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Folder selection navigates correctly",
+      "file": "FolderTreeItem.cpp:itemSelectionChanged()",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Right-click context menu works",
+      "file": "FolderTreeItem.cpp:itemClicked()",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Category colors display correctly",
+      "file": "FolderTreeItem.cpp:paintItem()",
+      "status": "must_verify_after_changes"
+    },
+    {
+      "check": "Collapse/expand toggle works",
+      "file": "SampleBrowserPage.cpp:folderPanelToggle_.onClick",
+      "status": "must_verify_after_changes"
+    }
+  ],
+  "modification_scope": {
+    "primary_changes": [
+      "FolderTreeItem.cpp - paintItem() for modern item appearance",
+      "SampleBrowserPage.cpp - paint() section for panel background styling",
+      "SampleBrowserPage.h - possibly TREE_VIEW_WIDTH constant"
+    ],
+    "secondary_changes": [
+      "SampleBrowserPage.cpp - resized() library mode section for layout adjustments"
+    ],
+    "no_changes": [
+      "Tile class",
+      "Grid logic",
+      "Audio playback",
+      "Non-library mode functionality"
+    ]
+  }
+}

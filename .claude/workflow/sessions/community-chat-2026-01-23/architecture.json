@@ -1,0 +1,410 @@
+﻿{
+  "session_id": "community-chat-2026-01-23",
+  "title": "Community Chat - Backend Architecture",
+  "created_at": "2026-01-23",
+
+  "system_overview": {
+    "description": "Real-time chat system using WebSocket for live messaging and REST API for history/auth. Built as a BIBLE.MD-compliant plugin for the license_server.",
+    "architecture_diagram": [
+      "+==================================================================================+",
+      "|                           COMMUNITY CHAT ARCHITECTURE                            |",
+      "+==================================================================================+",
+      "|                                                                                  |",
+      "|    SAMPLAR CLIENT (C++/JUCE)                     LICENSE SERVER (Python/FastAPI)    |",
+      "|    =====================                     ============================       |",
+      "|                                                                                  |",
+      "|    +----------------+                        +----------------------------+      |",
+      "|    |   ChatPage     |                        |      chat_service plugin   |      |",
+      "|    |  (UI Component)|                        |                            |      |",
+      "|    +-------+--------+                        |  +----------------------+  |      |",
+      "|            |                                 |  |   ChatService        |  |      |",
+      "|            v                                 |  |   (BIBLE.MD pattern) |  |      |",
+      "|    +----------------+                        |  +----------+-----------+  |      |",
+      "|    |  ChatService   | <== WebSocket ==>     |             |              |      |",
+      "|    |  (C++ client)  |     wss://...         |  +----------v-----------+  |      |",
+      "|    +-------+--------+                        |  | WebSocketHandler     |  |      |",
+      "|            |                                 |  | (FastAPI WebSocket)  |  |      |",
+      "|            | REST API                        |  +----------+-----------+  |      |",
+      "|            v                                 |             |              |      |",
+      "|    +----------------+                        |  +----------v-----------+  |      |",
+      "|    | HTTP Requests  | <== HTTPS ==>         |  |   MessageStore       |  |      |",
+      "|    | (history, auth)|                        |  |   (DB operations)    |  |      |",
+      "|    +----------------+                        |  +----------+-----------+  |      |",
+      "|                                              |             |              |      |",
+      "|                                              +-------------+--------------+      |",
+      "|                                                            |                     |",
+      "|                                              +-------------v--------------+      |",
+      "|                                              |     PostgreSQL Database    |      |",
+      "|                                              |   (Render.com managed)     |      |",
+      "|                                              +----------------------------+      |",
+      "|                                                                                  |",
+      "+==================================================================================+"
+    ]
+  },
+
+  "license_server_additions": {
+    "plugin_structure": {
+      "path": "license_server/plugins/chat_service/",
+      "files": [
+        {
+          "name": "__init__.py",
+          "purpose": "Plugin registration (BIBLE.MD pattern)",
+          "template": "def register(app): service = ChatService(...); app.register_service(...)"
+        },
+        {
+          "name": "chat_service.py",
+          "purpose": "Main service class coordinating chat operations"
+        },
+        {
+          "name": "websocket_handler.py",
+          "purpose": "WebSocket connection management and message routing"
+        },
+        {
+          "name": "message_store.py",
+          "purpose": "Database operations for messages (CRUD)"
+        },
+        {
+          "name": "models.py",
+          "purpose": "Pydantic models for request/response validation"
+        }
+      ]
+    },
+
+    "database_schema": {
+      "tables": [
+        {
+          "name": "chat_messages",
+          "columns": [
+            {"name": "id", "type": "SERIAL PRIMARY KEY"},
+            {"name": "user_id", "type": "INTEGER REFERENCES users(id)"},
+            {"name": "room_id", "type": "INTEGER DEFAULT 1", "note": "1 = global chat"},
+            {"name": "message_text", "type": "TEXT NOT NULL"},
+            {"name": "message_type", "type": "VARCHAR(20) DEFAULT 'text'", "note": "text, system, join, leave"},
+            {"name": "created_at", "type": "TIMESTAMP DEFAULT NOW()"},
+            {"name": "edited_at", "type": "TIMESTAMP NULL"},
+            {"name": "is_deleted", "type": "BOOLEAN DEFAULT FALSE"}
+          ],
+          "indexes": [
+            "CREATE INDEX idx_chat_messages_room_created ON chat_messages(room_id, created_at DESC)",
+            "CREATE INDEX idx_chat_messages_user ON chat_messages(user_id)"
+          ]
+        },
+        {
+          "name": "chat_rooms",
+          "columns": [
+            {"name": "id", "type": "SERIAL PRIMARY KEY"},
+            {"name": "name", "type": "VARCHAR(100) NOT NULL"},
+            {"name": "description", "type": "TEXT"},
+            {"name": "is_public", "type": "BOOLEAN DEFAULT TRUE"},
+            {"name": "created_at", "type": "TIMESTAMP DEFAULT NOW()"}
+          ],
+          "initial_data": "INSERT INTO chat_rooms (id, name) VALUES (1, 'General')"
+        },
+        {
+          "name": "chat_presence",
+          "columns": [
+            {"name": "user_id", "type": "INTEGER PRIMARY KEY REFERENCES users(id)"},
+            {"name": "last_seen", "type": "TIMESTAMP DEFAULT NOW()"},
+            {"name": "is_online", "type": "BOOLEAN DEFAULT FALSE"},
+            {"name": "connection_id", "type": "VARCHAR(100)"}
+          ],
+          "note": "Tracks online users for presence indicator"
+        }
+      ]
+    },
+
+    "api_endpoints": {
+      "rest": [
+        {
+          "method": "GET",
+          "path": "/api/chat/history",
+          "params": {"room_id": "int (default 1)", "limit": "int (default 50)", "before_id": "int (optional)"},
+          "response": "[{id, user_id, username, message_text, message_type, created_at}, ...]",
+          "auth": "Required (JWT)"
+        },
+        {
+          "method": "GET",
+          "path": "/api/chat/rooms",
+          "response": "[{id, name, description, user_count}, ...]",
+          "auth": "Required (JWT)"
+        },
+        {
+          "method": "GET",
+          "path": "/api/chat/users/online",
+          "response": "{count: N, users: [{id, username, last_seen}, ...]}",
+          "auth": "Required (JWT)"
+        }
+      ],
+      "websocket": {
+        "path": "/ws/chat",
+        "auth": "Query param ?token=JWT or header Authorization: Bearer JWT",
+        "messages_client_to_server": [
+          {
+            "type": "message",
+            "payload": {"text": "string", "room_id": "int (optional, default 1)"},
+            "example": "{\"type\": \"message\", \"text\": \"Hello everyone!\"}"
+          },
+          {
+            "type": "typing",
+            "payload": {"room_id": "int"},
+            "example": "{\"type\": \"typing\", \"room_id\": 1}"
+          },
+          {
+            "type": "ping",
+            "payload": {},
+            "example": "{\"type\": \"ping\"}"
+          }
+        ],
+        "messages_server_to_client": [
+          {
+            "type": "message",
+            "payload": {"id": "int", "user_id": "int", "username": "string", "text": "string", "timestamp": "ISO8601"},
+            "example": "{\"type\": \"message\", \"id\": 123, \"user_id\": 5, \"username\": \"DrumMaster99\", \"text\": \"Hello!\", \"timestamp\": \"2026-01-23T12:34:56Z\"}"
+          },
+          {
+            "type": "presence",
+            "payload": {"users_online": "int", "event": "join|leave", "user": "string"},
+            "example": "{\"type\": \"presence\", \"users_online\": 5, \"event\": \"join\", \"user\": \"NewUser\"}"
+          },
+          {
+            "type": "typing",
+            "payload": {"user_id": "int", "username": "string"},
+            "example": "{\"type\": \"typing\", \"user_id\": 5, \"username\": \"DrumMaster99\"}"
+          },
+          {
+            "type": "pong",
+            "payload": {},
+            "example": "{\"type\": \"pong\"}"
+          },
+          {
+            "type": "error",
+            "payload": {"code": "string", "message": "string"},
+            "example": "{\"type\": \"error\", \"code\": \"rate_limited\", \"message\": \"Too many messages\"}"
+          }
+        ]
+      }
+    },
+
+    "service_classes": {
+      "ChatService": {
+        "purpose": "Main service coordinating chat operations",
+        "methods": [
+          {"name": "initialise()", "purpose": "BIBLE.MD lifecycle hook - setup connections"},
+          {"name": "shutdown()", "purpose": "BIBLE.MD lifecycle hook - cleanup"},
+          {"name": "get_routes()", "purpose": "Return FastAPI router with REST endpoints"},
+          {"name": "get_websocket_routes()", "purpose": "Return WebSocket endpoint"},
+          {"name": "_get_db()", "purpose": "Get database_manager service via event_bus"},
+          {"name": "_validate_token(token)", "purpose": "Validate JWT and return user info"}
+        ]
+      },
+      "WebSocketHandler": {
+        "purpose": "Manages WebSocket connections and message routing",
+        "members": [
+          {"name": "connections", "type": "Dict[int, WebSocket]", "purpose": "user_id -> WebSocket mapping"},
+          {"name": "connection_count", "type": "int", "purpose": "Total online users"}
+        ],
+        "methods": [
+          {"name": "connect(websocket, user)", "purpose": "Register new connection"},
+          {"name": "disconnect(user_id)", "purpose": "Remove connection, broadcast leave"},
+          {"name": "broadcast(message, exclude_user)", "purpose": "Send to all connected clients"},
+          {"name": "send_to_user(user_id, message)", "purpose": "Send to specific user"},
+          {"name": "handle_message(user, data)", "purpose": "Process incoming message"}
+        ]
+      },
+      "MessageStore": {
+        "purpose": "Database operations for messages",
+        "methods": [
+          {"name": "save_message(user_id, room_id, text)", "purpose": "Insert new message, return id"},
+          {"name": "get_history(room_id, limit, before_id)", "purpose": "Fetch message history"},
+          {"name": "delete_message(message_id, user_id)", "purpose": "Soft delete message"},
+          {"name": "update_presence(user_id, is_online)", "purpose": "Update user online status"},
+          {"name": "get_online_users(room_id)", "purpose": "List online users"}
+        ]
+      }
+    }
+  },
+
+  "SAMPLAR_client_architecture": {
+    "service_classes": {
+      "ChatService": {
+        "purpose": "C++ service managing WebSocket connection to server",
+        "inherits": "samplar::IService",
+        "members": [
+          {"name": "webSocket_", "type": "std::unique_ptr<juce::WebSocket>", "note": "Or custom implementation"},
+          {"name": "serverUrl_", "type": "juce::String"},
+          {"name": "authToken_", "type": "juce::String"},
+          {"name": "isConnected_", "type": "std::atomic<bool>"},
+          {"name": "messageQueue_", "type": "std::queue<ChatMessage>"},
+          {"name": "onMessageReceived", "type": "std::function<void(const ChatMessage&)>"},
+          {"name": "onConnectionChanged", "type": "std::function<void(bool)>"},
+          {"name": "onPresenceUpdate", "type": "std::function<void(int)>"}
+        ],
+        "methods": [
+          {"name": "initialise()", "purpose": "IService hook - start connection thread"},
+          {"name": "shutdown()", "purpose": "IService hook - disconnect cleanly"},
+          {"name": "connect()", "purpose": "Establish WebSocket connection"},
+          {"name": "disconnect()", "purpose": "Close WebSocket connection"},
+          {"name": "sendMessage(text)", "purpose": "Send chat message"},
+          {"name": "fetchHistory(limit, beforeId)", "purpose": "REST call for message history"},
+          {"name": "handleIncomingMessage(json)", "purpose": "Parse server message, invoke callback"}
+        ]
+      }
+    },
+    "data_models": {
+      "ChatMessage": {
+        "fields": [
+          {"name": "id", "type": "int"},
+          {"name": "userId", "type": "int"},
+          {"name": "username", "type": "juce::String"},
+          {"name": "text", "type": "juce::String"},
+          {"name": "timestamp", "type": "juce::Time"},
+          {"name": "messageType", "type": "MessageType enum (text, system, join, leave)"},
+          {"name": "isOwnMessage", "type": "bool"}
+        ]
+      }
+    },
+    "websocket_considerations": {
+      "juce_native": {
+        "option": "Use juce::URL::InputStream for HTTP, implement WebSocket manually",
+        "pros": "No external dependencies",
+        "cons": "Complex to implement WebSocket protocol correctly"
+      },
+      "external_library": {
+        "option": "Use websocketpp or Beast (Boost.Asio)",
+        "pros": "Battle-tested WebSocket implementation",
+        "cons": "Adds dependency, may need CMake integration"
+      },
+      "http_polling_fallback": {
+        "option": "Fallback to HTTP long-polling if WebSocket fails",
+        "pros": "Works through restrictive firewalls",
+        "cons": "Higher latency, more server load"
+      },
+      "recommendation": "Start with simple HTTP polling for MVP, add WebSocket later"
+    }
+  },
+
+  "authentication_flow": {
+    "diagram": [
+      "1. User opens ChatPage in SAMPLAR",
+      "         |",
+      "2. ChatService requests token from LicenseSystemService",
+      "         |",
+      "3. Token retrieved from existing auth cookie/storage",
+      "         |",
+      "4. ChatService connects to wss://server.com/ws/chat?token=JWT",
+      "         |",
+      "5. Server validates JWT using same secret as license system",
+      "         |",
+      "6. Server extracts user_id, email from token payload",
+      "         |",
+      "7. Server adds connection to WebSocketHandler.connections[user_id]",
+      "         |",
+      "8. Server broadcasts presence update to all clients",
+      "         |",
+      "9. Connection established, client receives history"
+    ],
+    "jwt_payload": {
+      "fields": [
+        {"name": "uid", "type": "int", "purpose": "User ID from database"},
+        {"name": "sub", "type": "string", "purpose": "User email"},
+        {"name": "exp", "type": "int", "purpose": "Expiration timestamp"},
+        {"name": "iat", "type": "int", "purpose": "Issued at timestamp"}
+      ],
+      "validation": "Same AUTH_SECRET_KEY and algorithm as community_hub plugin"
+    }
+  },
+
+  "rate_limiting": {
+    "message_rate": {
+      "limit": "10 messages per 10 seconds per user",
+      "implementation": "Token bucket algorithm in WebSocketHandler",
+      "response_on_exceed": "{type: 'error', code: 'rate_limited', message: 'Slow down!'}"
+    },
+    "connection_rate": {
+      "limit": "5 connection attempts per minute per IP",
+      "implementation": "Reuse security_manager rate limiting"
+    }
+  },
+
+  "logging_plan": {
+    "server_side": [
+      "[ChatService] === INITIALISE START ===",
+      "[ChatService] Database service acquired",
+      "[ChatService] WebSocket handler created",
+      "[WebSocketHandler] New connection from user_id=X",
+      "[WebSocketHandler] User X disconnected",
+      "[WebSocketHandler] Broadcasting message to N clients",
+      "[MessageStore] Saved message id=X from user_id=Y",
+      "[MessageStore] Fetching history: room=1, limit=50",
+      "[ChatService] === SHUTDOWN ===",
+      "[ERROR] Connection failed: reason",
+      "[ERROR] Message validation failed: details"
+    ],
+    "client_side": [
+      "[ChatService] === CONNECT START ===",
+      "[ChatService]   serverUrl: wss://...",
+      "[ChatService]   authToken: (present)",
+      "[ChatService] Connection established",
+      "[ChatService] Received message: type=X",
+      "[ChatService] Sending message: text=...",
+      "[ChatService] Connection lost, will retry",
+      "[ChatService] === DISCONNECT ===",
+      "[ChatPage] Loaded N messages from history",
+      "[ChatPage] User count updated: N"
+    ]
+  },
+
+  "files_to_create_server": [
+    {
+      "file": "plugins/chat_service/__init__.py",
+      "description": "Plugin registration following BIBLE.MD pattern"
+    },
+    {
+      "file": "plugins/chat_service/chat_service.py",
+      "description": "Main ChatService class with routes and lifecycle hooks"
+    },
+    {
+      "file": "plugins/chat_service/websocket_handler.py",
+      "description": "WebSocket connection management"
+    },
+    {
+      "file": "plugins/chat_service/message_store.py",
+      "description": "Database operations for messages"
+    },
+    {
+      "file": "plugins/chat_service/models.py",
+      "description": "Pydantic models for validation"
+    }
+  ],
+
+  "integration_with_existing_plugins": [
+    {
+      "plugin": "database_manager",
+      "integration": "Use for PostgreSQL connections and queries",
+      "method": "event_bus.publish('services.get', {'name': 'database_manager'})"
+    },
+    {
+      "plugin": "security_manager",
+      "integration": "Reuse rate limiting and IP filtering",
+      "method": "Import rate limiting decorator"
+    },
+    {
+      "plugin": "api_router",
+      "integration": "Register REST and WebSocket endpoints",
+      "method": "event_bus.publish('api.register_routes', {...})"
+    }
+  ],
+
+  "deployment_considerations": {
+    "render_com": {
+      "websocket_support": "Render supports WebSocket connections",
+      "scaling": "Single instance initially, scale to multiple with Redis pubsub if needed",
+      "database": "Use existing PostgreSQL instance"
+    },
+    "environment_variables": [
+      "CHAT_MESSAGE_RATE_LIMIT=10",
+      "CHAT_MESSAGE_RATE_WINDOW=10",
+      "CHAT_MAX_MESSAGE_LENGTH=1000"
+    ]
+  }
+}

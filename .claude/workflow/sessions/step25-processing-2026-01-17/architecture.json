@@ -1,0 +1,427 @@
+﻿{
+  "session_id": "step25-processing-2026-01-17",
+  "design_type": "backend",
+  "created_at": "2026-01-17",
+
+  "architecture_overview": {
+    "summary": "Step 2.5 PROCESSING adds a pre-slice audio effects chain with 5 processors (Gate, Expander, Compressor, Limiter, EQ). Processing happens on a background thread with live waveform updates via AsyncUpdater.",
+    "key_components": [
+      "PreSliceProcessingService - Coordinates effect chain and background processing",
+      "ExpanderProcessor - NEW DSP processor class",
+      "Enhanced CompressorProcessor - Added dry/wet blend",
+      "Enhanced NoiseGateProcessor - Added attack/release/hold",
+      "ThresholdLineOverlay - Draggable threshold UI component",
+      "ProcessingPresetManager - Preset save/load with factory presets"
+    ]
+  },
+
+  "service_design": {
+    "PreSliceProcessingService": {
+      "purpose": "Coordinates the Gate->Expander->Compressor->Limiter->EQ processing chain",
+      "interface": {
+        "prepare": "void prepare(double sampleRate, int samplesPerBlock)",
+        "processBuffer": "juce::AudioBuffer<float> processBuffer(const juce::AudioBuffer<float>& input)",
+        "processBufferAsync": "void processBufferAsync(const juce::AudioBuffer<float>& input, std::function<void(juce::AudioBuffer<float>)> callback)",
+        "setGateParameter": "void setGateParameter(const juce::String& param, float value)",
+        "setExpanderParameter": "void setExpanderParameter(const juce::String& param, float value)",
+        "setCompressorParameter": "void setCompressorParameter(const juce::String& param, float value)",
+        "setLimiterParameter": "void setLimiterParameter(const juce::String& param, float value)",
+        "setEqParameter": "void setEqParameter(const juce::String& param, float value)",
+        "setGateEnabled": "void setGateEnabled(bool enabled)",
+        "setExpanderEnabled": "void setExpanderEnabled(bool enabled)",
+        "setCompressorEnabled": "void setCompressorEnabled(bool enabled)",
+        "setLimiterEnabled": "void setLimiterEnabled(bool enabled)",
+        "setEqEnabled": "void setEqEnabled(bool enabled)",
+        "applyPreset": "void applyPreset(const ProcessingPreset& preset)",
+        "getCurrentSettings": "ProcessingPreset getCurrentSettings() const"
+      },
+      "members": {
+        "gateProcessor_": "std::unique_ptr<EnhancedNoiseGateProcessor>",
+        "expanderProcessor_": "std::unique_ptr<ExpanderProcessor>",
+        "compressorProcessor_": "std::unique_ptr<EnhancedCompressorProcessor>",
+        "limiterProcessor_": "std::unique_ptr<LimiterProcessor>",
+        "eqProcessor_": "std::unique_ptr<EQ6Processor>",
+        "threadPool_": "juce::ThreadPool (1 thread)",
+        "currentSampleRate_": "double",
+        "currentBlockSize_": "int"
+      },
+      "threading": {
+        "processBuffer": "Sync - processes on calling thread (for preview during drag)",
+        "processBufferAsync": "Async - queues to thread pool, calls callback on message thread"
+      }
+    }
+  },
+
+  "processor_designs": {
+    "ExpanderProcessor": {
+      "purpose": "Dynamic expander - reduces gain below threshold (opposite of compressor)",
+      "base_class": "EffectProcessor (from DynamicEffectsProcessor.h)",
+      "parameters": {
+        "threshold": { "type": "float", "range": "-60 to 0", "unit": "dB", "default": -36.0 },
+        "ratio": { "type": "float", "range": "1.0 to 10.0", "unit": "ratio", "default": 2.0 },
+        "attack": { "type": "float", "range": "0.1 to 100", "unit": "ms", "default": 5.0 },
+        "release": { "type": "float", "range": "10 to 1000", "unit": "ms", "default": 50.0 }
+      },
+      "algorithm": [
+        "1. Calculate RMS envelope of input signal",
+        "2. Convert envelope to dB",
+        "3. If envelope < threshold:",
+        "   - Calculate gain reduction: (threshold - envelope) * (ratio - 1) / ratio",
+        "4. Apply attack/release smoothing to gain",
+        "5. Apply gain reduction to signal"
+      ],
+      "implementation_notes": "Similar to JUCE dsp::Compressor but with inverted ratio behavior"
+    },
+    "EnhancedCompressorProcessor": {
+      "purpose": "Compressor with NY-style parallel compression (dry/wet blend)",
+      "base_on": "Existing CompressorProcessor",
+      "new_parameters": {
+        "dryWet": { "type": "float", "range": "0 to 100", "unit": "%", "default": 100 },
+        "makeupGain": { "type": "float", "range": "-12 to 24", "unit": "dB", "default": 0 }
+      },
+      "modified_process": [
+        "1. Copy input to dryBuffer",
+        "2. Process wetBuffer through compressor",
+        "3. Apply makeup gain to wetBuffer",
+        "4. Mix: output = dryBuffer * (1 - dryWet/100) + wetBuffer * (dryWet/100)"
+      ]
+    },
+    "EnhancedNoiseGateProcessor": {
+      "purpose": "Noise gate with proper attack/release/hold envelope",
+      "base_on": "Existing NoiseGateProcessor",
+      "new_parameters": {
+        "threshold": { "type": "float", "range": "-60 to 0", "unit": "dB", "default": -24.0 },
+        "attack": { "type": "float", "range": "0.1 to 50", "unit": "ms", "default": 1.0 },
+        "release": { "type": "float", "range": "10 to 500", "unit": "ms", "default": 50.0 },
+        "hold": { "type": "float", "range": "0 to 100", "unit": "ms", "default": 10.0 }
+      },
+      "modified_process": [
+        "1. Calculate peak level of input",
+        "2. Convert to dB",
+        "3. Gate state machine:",
+        "   - CLOSED: If level > threshold, transition to ATTACK",
+        "   - ATTACK: Ramp gain from 0 to 1 over attack time",
+        "   - OPEN: If level < threshold, start hold timer",
+        "   - HOLD: Wait hold time, then transition to RELEASE",
+        "   - RELEASE: Ramp gain from 1 to 0 over release time",
+        "4. Apply gain to signal"
+      ]
+    },
+    "EQ6Processor_Frequency_Update": {
+      "purpose": "Update EQ6 frequencies to match user spec",
+      "existing_class": "EQ6Processor",
+      "frequency_changes": {
+        "band1_low_shelf": "80 Hz (was variable)",
+        "band2_low_mid_peak": "250 Hz (keep as is)",
+        "band3_mid1_peak": "1000 Hz (was 500 Hz)",
+        "band4_mid2_peak": "3000 Hz (was 1000 Hz)",
+        "band5_high_mid_peak": "8000 Hz (was 2000 Hz)",
+        "band6_high_shelf": "12000 Hz (was variable)"
+      }
+    }
+  },
+
+  "data_models": {
+    "ProcessingPreset": {
+      "purpose": "Stores all effect settings for save/load",
+      "fields": {
+        "id": "juce::String (UUID)",
+        "name": "juce::String",
+        "isFactory": "bool (true for built-in presets)",
+        "createdAt": "juce::Time",
+        "gate": {
+          "enabled": "bool",
+          "threshold": "float",
+          "attack": "float",
+          "release": "float",
+          "hold": "float"
+        },
+        "expander": {
+          "enabled": "bool",
+          "threshold": "float",
+          "ratio": "float",
+          "attack": "float",
+          "release": "float"
+        },
+        "compressor": {
+          "enabled": "bool",
+          "threshold": "float",
+          "ratio": "float",
+          "attack": "float",
+          "release": "float",
+          "makeupGain": "float",
+          "dryWet": "float"
+        },
+        "limiter": {
+          "enabled": "bool",
+          "ceiling": "float",
+          "release": "float"
+        },
+        "eq": {
+          "enabled": "bool",
+          "lowGain": "float",
+          "lowMidGain": "float",
+          "midGain": "float",
+          "midHighGain": "float",
+          "highGain": "float",
+          "airGain": "float"
+        }
+      },
+      "methods": {
+        "toJson": "juce::var toJson() const",
+        "fromJson": "static ProcessingPreset fromJson(const juce::var& json)"
+      }
+    }
+  },
+
+  "preset_manager_design": {
+    "ProcessingPresetManager": {
+      "purpose": "Manages factory and user presets with JSON persistence",
+      "storage_location": "juce::File::userApplicationDataDirectory/Samplar/processing_presets/",
+      "factory_presets": [
+        {
+          "name": "Default",
+          "description": "All effects bypassed",
+          "settings": "All enabled=false"
+        },
+        {
+          "name": "Clean Drums",
+          "description": "Light gating and EQ for clean drum samples",
+          "settings": {
+            "gate": { "enabled": true, "threshold": -40, "attack": 1, "release": 50, "hold": 10 },
+            "compressor": { "enabled": true, "threshold": -18, "ratio": 3, "attack": 10, "release": 100, "dryWet": 70 },
+            "limiter": { "enabled": true, "ceiling": -0.3, "release": 10 }
+          }
+        },
+        {
+          "name": "Punchy Kicks",
+          "description": "Heavy compression for punchy kicks",
+          "settings": {
+            "gate": { "enabled": true, "threshold": -36, "attack": 0.5, "release": 30, "hold": 5 },
+            "compressor": { "enabled": true, "threshold": -12, "ratio": 6, "attack": 5, "release": 80, "makeupGain": 6, "dryWet": 100 },
+            "limiter": { "enabled": true, "ceiling": -0.1, "release": 5 },
+            "eq": { "enabled": true, "lowGain": 3, "midGain": -2, "highGain": 1 }
+          }
+        },
+        {
+          "name": "Transparent",
+          "description": "Gentle limiting only",
+          "settings": {
+            "limiter": { "enabled": true, "ceiling": -0.3, "release": 20 }
+          }
+        },
+        {
+          "name": "Heavy Compression",
+          "description": "Extreme compression for squashed sound",
+          "settings": {
+            "compressor": { "enabled": true, "threshold": -24, "ratio": 10, "attack": 1, "release": 50, "makeupGain": 12, "dryWet": 100 },
+            "limiter": { "enabled": true, "ceiling": -0.1, "release": 5 }
+          }
+        },
+        {
+          "name": "Gate Only",
+          "description": "Aggressive gating to remove bleed",
+          "settings": {
+            "gate": { "enabled": true, "threshold": -24, "attack": 0.5, "release": 100, "hold": 20 }
+          }
+        }
+      ],
+      "interface": {
+        "getFactoryPresets": "std::vector<ProcessingPreset> getFactoryPresets()",
+        "getUserPresets": "std::vector<ProcessingPreset> getUserPresets()",
+        "getAllPresets": "std::vector<ProcessingPreset> getAllPresets()",
+        "saveUserPreset": "bool saveUserPreset(const ProcessingPreset& preset)",
+        "deleteUserPreset": "bool deleteUserPreset(const juce::String& id)",
+        "loadPreset": "ProcessingPreset loadPreset(const juce::String& name)",
+        "getPresetFile": "juce::File getPresetFile(const juce::String& name)"
+      }
+    }
+  },
+
+  "workflow_step_integration": {
+    "enum_change": {
+      "before": "enum class WorkflowStep { Step1_SelectLength, Step2_DownbeatLoops, Step3_SampleSlice }",
+      "after": "enum class WorkflowStep { Step1_SelectLength, Step2_DownbeatLoops, Step25_Processing, Step3_SampleSlice }"
+    },
+    "transitions": {
+      "Step1_to_Step2": "Unchanged - transitionToStep2()",
+      "Step2_to_Step25": "NEW - transitionToStep25(): validates tempo detection complete, transitions to Step25_Processing",
+      "Step25_to_Step3": "NEW - transitionToStep3FromStep25(): finalizes processed buffer, transitions to Step3_SampleSlice",
+      "Step3_from_Step25": "Modified - transitionToStep3() REMOVED direct call, must go through Step25"
+    },
+    "processed_buffer_flow": {
+      "step1": "Original file loaded into thumbnail_",
+      "step2": "Selection locked, original buffer analyzed for tempo",
+      "step25": "Original buffer -> PreSliceProcessingService -> processedBuffer_",
+      "step3": "processedBuffer_ used for slice generation (NOT original)"
+    }
+  },
+
+  "waveform_update_design": {
+    "approach": "Maintain separate processedThumbnail_ for displaying processed audio",
+    "implementation": [
+      "1. Keep original thumbnail_ for reference",
+      "2. Create processedThumbnail_ when entering Step 2.5",
+      "3. On parameter change:",
+      "   a. Copy original buffer to processingBuffer",
+      "   b. Apply effects chain",
+      "   c. Update processedThumbnail_ from processed buffer",
+      "   d. Trigger repaint()"
+    ],
+    "optimization": "Debounce parameter changes - only process after 50ms of no changes",
+    "threading": {
+      "parameter_update": "UI thread - store pending values",
+      "processing": "Background thread via ThreadPool",
+      "thumbnail_update": "Message thread via AsyncUpdater"
+    }
+  },
+
+  "logging_plan": {
+    "PreSliceProcessingService": [
+      "[PreSliceProcessing] === prepare START === sampleRate={}, blockSize={}",
+      "[PreSliceProcessing]   Prepared gate processor",
+      "[PreSliceProcessing]   Prepared expander processor",
+      "[PreSliceProcessing]   Prepared compressor processor",
+      "[PreSliceProcessing]   Prepared limiter processor",
+      "[PreSliceProcessing]   Prepared EQ processor",
+      "[PreSliceProcessing] === prepare END ===",
+      "[PreSliceProcessing] === processBuffer START === samples={}",
+      "[PreSliceProcessing]   Gate enabled={}, threshold={}",
+      "[PreSliceProcessing]   Expander enabled={}, threshold={}, ratio={}",
+      "[PreSliceProcessing]   Compressor enabled={}, threshold={}, ratio={}, dryWet={}",
+      "[PreSliceProcessing]   Limiter enabled={}, ceiling={}",
+      "[PreSliceProcessing]   EQ enabled={}",
+      "[PreSliceProcessing]   Processing chain complete",
+      "[PreSliceProcessing] === processBuffer END === outputSamples={}",
+      "[PreSliceProcessing] setGateParameter: {}={}",
+      "[PreSliceProcessing] applyPreset: '{}'",
+      "[PreSliceProcessing] ERROR: {}"
+    ],
+    "ExpanderProcessor": [
+      "[Expander] prepare: sampleRate={}",
+      "[Expander] process: threshold={}, ratio={}, attack={}, release={}",
+      "[Expander] setParameter: {}={}",
+      "[Expander] ERROR: {}"
+    ],
+    "ProcessingPresetManager": [
+      "[PresetManager] === loadPreset START === name='{}'",
+      "[PresetManager]   Looking for factory preset...",
+      "[PresetManager]   Looking for user preset...",
+      "[PresetManager]   Loaded preset: {}",
+      "[PresetManager] === loadPreset END ===",
+      "[PresetManager] === saveUserPreset START === name='{}'",
+      "[PresetManager]   File: {}",
+      "[PresetManager]   SUCCESS: Preset saved",
+      "[PresetManager] === saveUserPreset END ===",
+      "[PresetManager] ERROR: {}"
+    ],
+    "WavePreviewPage_Step25": [
+      "[Preview] === transitionToStep25 START ===",
+      "[Preview]   Tempo detection complete: {}",
+      "[Preview]   Creating processing service...",
+      "[Preview]   Initializing processed buffer...",
+      "[Preview] === transitionToStep25 END ===",
+      "[Preview] Step 2.5: Parameter changed {}={}, triggering reprocess",
+      "[Preview] Step 2.5: Processing complete, updating waveform",
+      "[Preview] Step 2.5: Threshold line dragged {}={} dB",
+      "[Preview] === transitionToStep3FromStep25 START ===",
+      "[Preview]   Finalizing processed buffer...",
+      "[Preview] === transitionToStep3FromStep25 END ==="
+    ]
+  },
+
+  "files_to_create": [
+    {
+      "file": "src/services/PreSliceProcessingService.h",
+      "contents": "Service class declaration with interface above"
+    },
+    {
+      "file": "src/services/PreSliceProcessingService.cpp",
+      "contents": "Service implementation with chain processing"
+    },
+    {
+      "file": "src/ui/Components/ThresholdLineOverlay.h",
+      "contents": "Component declaration for draggable threshold lines"
+    },
+    {
+      "file": "src/ui/Components/ThresholdLineOverlay.cpp",
+      "contents": "Implementation with paint() and mouse handlers"
+    },
+    {
+      "file": "src/utils/ProcessingPresetManager.h",
+      "contents": "Preset manager class with factory presets"
+    },
+    {
+      "file": "src/utils/ProcessingPresetManager.cpp",
+      "contents": "JSON persistence implementation"
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "file": "src/ui/Pages/WavePreviewPage.h",
+      "changes": [
+        "Add Step25_Processing to WorkflowStep enum",
+        "Add stepPill25_ TextButton",
+        "Add Step 2.5 control members",
+        "Add processedBuffer_, processedThumbnail_",
+        "Add thresholdLineOverlay_ unique_ptr",
+        "Add processingService_ unique_ptr",
+        "Add transitionToStep25(), transitionToStep3FromStep25() declarations",
+        "Add setStep25ControlsVisible() declaration",
+        "Add effect parameter change handlers"
+      ]
+    },
+    {
+      "file": "src/ui/Pages/WavePreviewPage.cpp",
+      "changes": [
+        "Implement all new methods",
+        "Update resized() for 4 pills and Step 2.5 controls",
+        "Update updateStepPills() with Step25 case",
+        "Update updateWorkflowState() with Step25 handling",
+        "Connect parameter sliders to processing service",
+        "Implement waveform redraw with processed buffer"
+      ]
+    },
+    {
+      "file": "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.h",
+      "changes": [
+        "Add ExpanderProcessor class",
+        "Add dryWet and makeupGain to CompressorProcessor",
+        "Enhance NoiseGateProcessor with attack/release/hold"
+      ]
+    },
+    {
+      "file": "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.cpp",
+      "changes": [
+        "Implement ExpanderProcessor",
+        "Modify CompressorProcessor::process() for dry/wet blend",
+        "Rewrite NoiseGateProcessor with state machine"
+      ]
+    },
+    {
+      "file": "CMakeLists.txt",
+      "changes": [
+        "Add new source files to target_sources"
+      ]
+    }
+  ],
+
+  "integration_with_frontend": {
+    "threshold_line_overlay": {
+      "ui_component": "ThresholdLineOverlay",
+      "backend_data": "Threshold values from each processor",
+      "sync_direction": "Bidirectional - slider changes update line, line drag updates slider"
+    },
+    "waveform_display": {
+      "ui_component": "waveformBounds_ area in paint()",
+      "backend_data": "processedThumbnail_ from processedBuffer_",
+      "update_trigger": "AsyncUpdater after background processing completes"
+    },
+    "preset_ui": {
+      "ui_component": "presetComboBox_, savePresetBtn_, loadPresetBtn_",
+      "backend_data": "ProcessingPresetManager singleton or instance",
+      "sync_direction": "Load populates all sliders, Save reads all sliders"
+    }
+  }
+}

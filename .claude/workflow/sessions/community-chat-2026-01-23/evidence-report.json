@@ -1,0 +1,155 @@
+﻿{
+  "session_id": "community-chat-2026-01-23",
+  "findings": [
+    {
+      "finding": "Community button location in SampleBrowserPage header",
+      "file": "src/ui/Pages/SampleBrowserPage.h",
+      "line": 74,
+      "code": "juce::TextButton communityButton_ { \"COMMUNITY\" };",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "Community button onClick handler",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "line": 785,
+      "code": "communityButton_.onClick = [this]{ if (onGoCommunity) onGoCommunity(); };",
+      "verified": true,
+      "verification_method": "Grep search"
+    },
+    {
+      "finding": "Community button styling",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "lines": [782, 783, 784],
+      "code": "addAndMakeVisible(communityButton_);\ncommunityButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xFF2A2A2A));\ncommunityButton_.setColour(juce::TextButton::textColourOffId, juce::Colour(0xFF00FFFF));  // Cyan text",
+      "verified": true,
+      "verification_method": "Grep search with context"
+    },
+    {
+      "finding": "Community button layout in resized()",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "line": 1650,
+      "code": "communityButton_.setBounds(right.removeFromRight(communityBtnW));",
+      "verified": true,
+      "verification_method": "Grep search"
+    },
+    {
+      "finding": "onGoCommunity callback definition",
+      "file": "src/ui/Pages/SampleBrowserPage.h",
+      "line": 38,
+      "code": "std::function<void()> onGoCommunity;  // Navigate to Community Hub",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "CommunityPage exists (current web-based implementation)",
+      "file": "src/ui/Pages/CommunityPage.h",
+      "line": 18,
+      "code": "class CommunityPage : public juce::Component",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "CommunityPage uses WebBrowserComponent",
+      "file": "src/ui/Pages/CommunityPage.h",
+      "line": 52,
+      "code": "std::unique_ptr<juce::WebBrowserComponent> browser_;",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "CommunityPage is index 7 in MainWindow page stack",
+      "file": "src/ui/MainWindow.cpp",
+      "line": 261,
+      "code": "switchTo(7);  // Community is index 7",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "License server has existing community_hub plugin",
+      "file": "b:/SANTI/license_server/plugins/community_hub/__init__.py",
+      "line": 1,
+      "code": "Community Hub Plugin - BIBLE.MD Compliant",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "License server uses FastAPI and APIRouter pattern",
+      "file": "b:/SANTI/license_server/plugins/api_router/router_service.py",
+      "line": 25,
+      "code": "def __init__(self, event_bus, fastapi_app: FastAPI):",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "License server supports PostgreSQL database",
+      "file": "b:/SANTI/license_server/README.md",
+      "line": 255,
+      "code": "Shared database (PostgreSQL)",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "Existing JWT authentication in community_service",
+      "file": "b:/SANTI/license_server/plugins/community_hub/community_service.py",
+      "line": 106,
+      "code": "payload = jwt.decode(token, SECRET_KEY, algorithms=[ALGORITHM])",
+      "verified": true,
+      "verification_method": "Read file directly"
+    },
+    {
+      "finding": "BIBLE.MD plugin architecture in use",
+      "file": "b:/SANTI/license_server/BIBLE.MD",
+      "line": 1,
+      "code": "# SAMPLAR 4 PLUG-IN BIBLE",
+      "verified": true,
+      "verification_method": "Read file directly"
+    }
+  ],
+  "integration_points": {
+    "SAMPLAR_to_server": [
+      {
+        "point": "Authentication via JWT token",
+        "SAMPLAR_file": "src/ui/Pages/CommunityPage.cpp:184",
+        "server_file": "plugins/community_hub/community_service.py:90",
+        "method": "Token passed via URL or WebSocket auth"
+      },
+      {
+        "point": "Navigation callback",
+        "SAMPLAR_file": "src/ui/Pages/SampleBrowserPage.h:38",
+        "server_file": "N/A (triggers page switch only)",
+        "method": "onGoCommunity callback triggers MainWindow.switchTo()"
+      }
+    ],
+    "server_to_database": [
+      {
+        "point": "User authentication lookup",
+        "server_file": "plugins/community_hub/community_service.py:117",
+        "database": "users table",
+        "method": "db_service.get_user_by_email(email)"
+      }
+    ]
+  },
+  "working_examples": [
+    {
+      "description": "Forum post creation API with authentication",
+      "file": "b:/SANTI/license_server/plugins/community_hub/community_service.py",
+      "line": 166,
+      "pattern": "Check user auth, parse JSON body, call service method"
+    },
+    {
+      "description": "WebBrowserComponent loading URL",
+      "file": "src/ui/Pages/CommunityPage.cpp",
+      "line": 131,
+      "pattern": "browser_->goToURL(url)"
+    },
+    {
+      "description": "Page navigation in MainWindow",
+      "file": "src/ui/MainWindow.cpp",
+      "line": 258,
+      "pattern": "initial_.onGoCommunity callback triggers switchTo(7)"
+    }
+  ],
+  "created_at": "2026-01-23T00:00:00Z",
+  "verified_by": "orchestrator"
+}

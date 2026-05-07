@@ -1,0 +1,390 @@
+﻿{
+  "session_id": "windows-installer-2026-01-31",
+  "agent": "backend-architect",
+  "created_at": "2026-01-31T01:00:00Z",
+  "status": "complete",
+  "data": {
+    "evidence_summary": {
+      "verified_facts": [
+        {
+          "fact": "OLD portable folder name is Samplar_Portable",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer.iss",
+          "line": 86,
+          "code": "Source: \"Samplar_Portable\\{#MyAppExeName}\"; DestDir: \"{app}\"; Flags: ignoreversion"
+        },
+        {
+          "fact": "NEW portable folder name is SAMPLAR_Portable",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\000portable.ps1",
+          "line": 19,
+          "code": "$OutputDir = \".\\SAMPLAR_Portable\""
+        },
+        {
+          "fact": "NEW executable name is 'SAMPLAR.exe' (no '5')",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\000portable.ps1",
+          "line": 153,
+          "code": "$ExePath = Join-Path $BuildDir \"SAMPLAR.exe\""
+        },
+        {
+          "fact": "Installer already uses 'SAMPLAR.exe' as app name",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer.iss",
+          "line": 16,
+          "code": "#define MyAppExeName \"SAMPLAR.exe\""
+        },
+        {
+          "fact": "Current version in installer is 2.0.0",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer.iss",
+          "line": 13,
+          "code": "#define MyAppVersion \"2.0.0\""
+        },
+        {
+          "fact": "CMake project version is 2.0.0",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\CMakeLists.txt",
+          "line": 3,
+          "code": "project(samplar VERSION 2.0.0 LANGUAGES CXX)"
+        },
+        {
+          "fact": "Existing make_installer.ps1 provides pattern for installer scripts",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\make_installer.ps1",
+          "line": 1,
+          "code": "Quick installer build script following established pattern"
+        },
+        {
+          "fact": "Inno Setup 6 is the installer technology",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer.iss",
+          "line": 10,
+          "code": "\"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe\" installer.iss"
+        },
+        {
+          "fact": "NEW portable includes python/ folder for Full Song separation",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\000portable.ps1",
+          "line": 272,
+          "code": "$PythonDir = Join-Path $OutputDir \"python\""
+        },
+        {
+          "fact": "NEW portable includes vc_redist.x64.exe in folder",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\000portable.ps1",
+          "line": 217,
+          "code": "$VCRedistPath = Join-Path $OutputDir \"vc_redist.x64.exe\""
+        }
+      ]
+    },
+    "design_decision": {
+      "approach": "CREATE_NEW_ISS_FILE",
+      "rationale": [
+        "Creating installer_sm5.iss (new file) preserves old installer.iss as fallback",
+        "Cleaner than modifying installer.iss with conditional logic",
+        "Follows 000portable.ps1 naming convention (prefixed number)",
+        "001installer.ps1 will use installer_sm5.iss specifically"
+      ],
+      "version_strategy": {
+        "keep_version": "2.0.0",
+        "rationale": "User requested to consider 1.0.0 but CMakeLists.txt shows 2.0.0 is the project version. Consistency with project version is more important."
+      }
+    },
+    "files_to_create": [
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer_sm5.iss",
+        "purpose": "New Inno Setup script targeting SAMPLAR_Portable structure",
+        "key_changes": [
+          "Source paths changed from Samplar_Portable to SAMPLAR_Portable",
+          "Added python/ folder to [Files] section",
+          "Removed python_bridge references (deprecated in new structure)",
+          "License file enabled (LICENSE.txt)",
+          "Cleaner file organization matching 000portable.ps1 output"
+        ]
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\LICENSE.txt",
+        "purpose": "Basic proprietary license for EULA display in installer",
+        "content_type": "Standard proprietary software license"
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\001installer.ps1",
+        "purpose": "PowerShell script to build installer from SAMPLAR_Portable",
+        "follows_pattern": "make_installer.ps1",
+        "key_features": [
+          "Verifies SAMPLAR_Portable folder exists",
+          "Checks Inno Setup 6 installation",
+          "Downloads VC++ redistributable if missing",
+          "Compiles installer_sm5.iss",
+          "Outputs to installer_output/samplar_Setup_v2.0.0.exe"
+        ]
+      }
+    ],
+    "files_to_modify": [],
+    "build_pipeline_design": {
+      "step_1": {
+        "script": "000portable.ps1",
+        "input": "build/SM5App_artefacts/Release/",
+        "output": "SAMPLAR_Portable/",
+        "description": "Creates portable folder with all dependencies"
+      },
+      "step_2": {
+        "script": "001installer.ps1",
+        "input": "SAMPLAR_Portable/",
+        "prerequisites": [
+          "SAMPLAR_Portable/ folder exists",
+          "Inno Setup 6 installed",
+          "samplar.ico exists",
+          "LICENSE.txt exists"
+        ],
+        "output": "installer_output/samplar_Setup_v2.0.0.exe",
+        "description": "Packages SAMPLAR_Portable into Windows installer"
+      }
+    },
+    "installer_SAMPLAR_iss_design": {
+      "defines": {
+        "MyAppName": "SAMPLAR",
+        "MyAppVersion": "2.0.0",
+        "MyAppPublisher": "SAMPLAR",
+        "MyAppExeName": "SAMPLAR.exe",
+        "MyAppDescription": "Audio Sample Processing & Variation Engine",
+        "SourceFolder": "SAMPLAR_Portable"
+      },
+      "files_section": {
+        "main_executable": {
+          "source": "SAMPLAR_Portable\\SAMPLAR.exe",
+          "dest": "{app}",
+          "flags": "ignoreversion"
+        },
+        "dll_files": {
+          "pattern": "SAMPLAR_Portable\\*.dll",
+          "dest": "{app}",
+          "flags": "ignoreversion",
+          "description": "All DLLs from portable (OpenBLAS, LibTorch, etc)"
+        },
+        "demucs_cli": {
+          "source": "SAMPLAR_Portable\\demucs_mt.cpp.main.exe",
+          "dest": "{app}",
+          "flags": "ignoreversion skipifsourcedoesntexist",
+          "description": "C++ demucs executable if built"
+        },
+        "python_folder": {
+          "source": "SAMPLAR_Portable\\python\\*",
+          "dest": "{app}\\python",
+          "flags": "ignoreversion recursesubdirs createallsubdirs",
+          "description": "Embedded Python 3.11 with audio-separator"
+        },
+        "models_folder": {
+          "source": "SAMPLAR_Portable\\models\\*",
+          "dest": "{app}\\models",
+          "flags": "ignoreversion recursesubdirs createallsubdirs",
+          "description": "ML models for audio separation"
+        },
+        "data_folder": {
+          "source": "SAMPLAR_Portable\\data\\*",
+          "dest": "{app}\\data",
+          "flags": "ignoreversion recursesubdirs createallsubdirs",
+          "description": "Pattern databases"
+        },
+        "assets_folder": {
+          "source": "SAMPLAR_Portable\\assets\\*",
+          "dest": "{app}\\assets",
+          "flags": "ignoreversion recursesubdirs createallsubdirs skipifsourcedoesntexist",
+          "description": "Game assets (Easter eggs)"
+        },
+        "config_file": {
+          "source": "SAMPLAR_Portable\\SAMPLAR_portable.json",
+          "dest": "{app}",
+          "flags": "ignoreversion skipifsourcedoesntexist",
+          "description": "Portable configuration file"
+        },
+        "readme": {
+          "source": "SAMPLAR_Portable\\README.txt",
+          "dest": "{app}",
+          "flags": "ignoreversion isreadme skipifsourcedoesntexist"
+        },
+        "branding": {
+          "source": "SAMPLAR_Portable\\REF.png",
+          "dest": "{app}",
+          "flags": "ignoreversion skipifsourcedoesntexist"
+        },
+        "vc_redist": {
+          "source": "installer_dependencies\\vc_redist.x64.exe",
+          "dest": "{tmp}",
+          "flags": "deleteafterinstall",
+          "description": "VC++ Runtime installer"
+        }
+      },
+      "removed_from_old": [
+        "python_bridge folder (deprecated, using embedded Python now)",
+        "plugins folder (not in new structure)",
+        "Individual DLL listings (using wildcard *.dll instead)"
+      ]
+    },
+    "001installer_ps1_design": {
+      "parameters": [
+        {
+          "name": "-SkipVerification",
+          "type": "switch",
+          "description": "Skip final installer verification"
+        },
+        {
+          "name": "-Clean",
+          "type": "switch",
+          "description": "Clean installer_output folder before build"
+        }
+      ],
+      "steps": [
+        {
+          "number": 1,
+          "name": "CHECK_PORTABLE_FOLDER",
+          "action": "Verify SAMPLAR_Portable folder exists",
+          "error_if_missing": "Run 000portable.ps1 first"
+        },
+        {
+          "number": 2,
+          "name": "CHECK_INNO_SETUP",
+          "action": "Verify Inno Setup 6 is installed",
+          "path": "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
+          "error_if_missing": "Provide installation instructions"
+        },
+        {
+          "number": 3,
+          "name": "CHECK_ICON",
+          "action": "Verify samplar.ico exists",
+          "fallback": "Create from plugins\\REF.png using ImageMagick or .NET"
+        },
+        {
+          "number": 4,
+          "name": "CHECK_LICENSE",
+          "action": "Verify LICENSE.txt exists",
+          "fallback": "Create basic proprietary license"
+        },
+        {
+          "number": 5,
+          "name": "CHECK_VC_REDIST",
+          "action": "Verify installer_dependencies\\vc_redist.x64.exe exists",
+          "fallback": "Download from https://aka.ms/vs/17/release/vc_redist.x64.exe"
+        },
+        {
+          "number": 6,
+          "name": "BUILD_INSTALLER",
+          "action": "Run Inno Setup compiler on installer_sm5.iss",
+          "command": "& \"C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe\" installer_sm5.iss"
+        },
+        {
+          "number": 7,
+          "name": "VERIFY_OUTPUT",
+          "action": "Check installer_output\\samplar_Setup_v2.0.0.exe exists",
+          "display": "Size, creation time, features"
+        }
+      ],
+      "output_format": {
+        "directory": "installer_output",
+        "filename": "samplar_Setup_v2.0.0.exe"
+      }
+    },
+    "license_txt_design": {
+      "type": "Proprietary",
+      "sections": [
+        "LICENSE AGREEMENT",
+        "GRANT OF LICENSE (single user, non-transferable)",
+        "RESTRICTIONS (no reverse engineering, redistribution)",
+        "NO WARRANTY (as-is)",
+        "LIMITATION OF LIABILITY",
+        "TERMINATION",
+        "GOVERNING LAW"
+      ],
+      "length": "Approximately 50-60 lines",
+      "encoding": "UTF-8 with BOM for Windows compatibility"
+    },
+    "integration_points_covered": [
+      {
+        "point": "000portable.ps1 output folder",
+        "design": "installer_sm5.iss uses SAMPLAR_Portable as source"
+      },
+      {
+        "point": "Executable naming",
+        "design": "Both use 'SAMPLAR.exe' (consistent)"
+      },
+      {
+        "point": "Python environment",
+        "design": "installer_sm5.iss includes python/ folder with recursesubdirs"
+      },
+      {
+        "point": "Models folder",
+        "design": "installer_sm5.iss includes models/ folder"
+      },
+      {
+        "point": "VC++ Runtime",
+        "design": "Downloaded to installer_dependencies/, auto-installed by installer"
+      },
+      {
+        "point": "Version consistency",
+        "design": "All files use 2.0.0 matching CMakeLists.txt"
+      }
+    ],
+    "risk_mitigations": [
+      {
+        "risk": "SAMPLAR_Portable folder doesn't exist",
+        "severity": "HIGH",
+        "mitigation": "001installer.ps1 checks and exits with clear error message directing to 000portable.ps1"
+      },
+      {
+        "risk": "Inno Setup not installed",
+        "severity": "HIGH",
+        "mitigation": "Check for ISCC.exe, provide winget and download URL if missing"
+      },
+      {
+        "risk": "Large installer size due to Python",
+        "severity": "MEDIUM",
+        "mitigation": "Use lzma2/max compression (already in pattern), display size progress"
+      },
+      {
+        "risk": "Missing icon file",
+        "severity": "LOW",
+        "mitigation": "Auto-create from REF.png using ImageMagick or .NET fallback"
+      },
+      {
+        "risk": "Missing VC++ redistributable",
+        "severity": "MEDIUM",
+        "mitigation": "Auto-download from Microsoft if missing"
+      },
+      {
+        "risk": "License file missing for EULA",
+        "severity": "LOW",
+        "mitigation": "Create LICENSE.txt as part of implementation"
+      }
+    ],
+    "rollback_plan": {
+      "description": "If implementation fails, these files can be safely deleted",
+      "files_to_delete": [
+        "001installer.ps1",
+        "installer_sm5.iss",
+        "LICENSE.txt"
+      ],
+      "notes": [
+        "Original installer.iss is NOT modified",
+        "Original make_installer.ps1 is NOT modified",
+        "No changes to build output or portable folder"
+      ]
+    },
+    "test_plan_alignment": [
+      {
+        "test": "Run 000portable.ps1 to create SAMPLAR_Portable",
+        "expected": "SAMPLAR_Portable folder with all dependencies"
+      },
+      {
+        "test": "Run 001installer.ps1",
+        "expected": "installer_output/samplar_Setup_v2.0.0.exe created"
+      },
+      {
+        "test": "Run installer on clean Windows VM",
+        "expected": "Application installs to Program Files, shortcuts created"
+      },
+      {
+        "test": "Launch installed application",
+        "expected": "SAMPLAR starts correctly"
+      },
+      {
+        "test": "Test Full Song separation",
+        "expected": "Python environment works, models load"
+      },
+      {
+        "test": "Uninstall application",
+        "expected": "Clean removal, optional user data cleanup"
+      }
+    ]
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "success": true,
+  "error": null,
+  "drum_stem": "../test_output\\drums.wav",
+  "all_stems": {
+    "drums": "../test_output\\drums.wav",
+    "bass": "../test_output\\bass.wav",
+    "other": "../test_output\\other.wav",
+    "vocals": "../test_output\\vocals.wav"
+  }
+}

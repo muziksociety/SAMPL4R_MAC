@@ -1,0 +1,19 @@
+{
+  "session_id": "spectral-separate-2025-12-27",
+  "task": "Add Spectral Separate feature - a copy of AI Separate (LarsDebugDialog) but using 5-band spectral/frequency separation instead of Demucs AI model. Bands: Low/Mid-Low/Mid/Mid-High/High. Same floor gate, ceiling gate, transient boost tools per band. Same workflow but uses FFT crossover filtering instead of ML separation. New button 'Spectral Separate' next to 'AI Separate' in PatternPreviewDialog.",
+  "enhanced_task": "",
+  "started": "2025-12-27T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

@@ -1,0 +1,19 @@
+{
+  "session_id": "beatgrid-ux-006",
+  "task": "5 UX improvements for WavePreviewPage: 1) Cursor-based zoom (zoom centers to cursor position), 2) Middle-click drag to pan view horizontally, 3) Fix scroll near edges (remove scroll-to-edge behavior, use middle-click drag instead), 4) Detect Loops button should highlight loops with semi-transparent overlay, 5) In Step 2 (locked selection), click should play from click position instead of restarting from beginning.",
+  "enhanced_task": "",
+  "started": "2025-12-08T15:30:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

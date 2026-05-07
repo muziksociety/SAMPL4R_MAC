@@ -1,0 +1,92 @@
+{
+  "session_id": "20251206_105540",
+  "agent": "architect",
+  "version": 2,
+  "created_at": "2025-12-06T11:05:00Z",
+  "status": "complete",
+  "evidence_correction": "RIGHT panel ALREADY EXISTS with midiExport_ button. Design updated.",
+  "data": {
+    "existing_structure": {
+      "right_panel": "rightPanel_ (std::unique_ptr<juce::Component>) at line 119",
+      "right_panel_width": "rightPanelWidth_ = 120 (line 99)",
+      "midi_export_button": "midiExport_ TextButton at line 126 - EMPTY onClick",
+      "midi_import_button": "midiImport_ TextButton at line 127 - EMPTY onClick",
+      "tempo": "tempoBpm_ = 120.0 (line 132)",
+      "grid_data": "grid_ as vector<vector<uint8_t>> (line 83)",
+      "grid_access": "getCell(r,s) and setCell(r,s,on) methods exist"
+    },
+    "design_decision": "Add MidiFileGenerator utility. Add MidiDragArea component ABOVE the Export/Import buttons in the existing right panel. Wire midiExport_.onClick to generate and save MIDI. MidiDragArea enables drag-out functionality.",
+    "files_to_create": [
+      {
+        "file": "src/utils/MidiFileGenerator.h",
+        "purpose": "Utility for converting step grid to MIDI file"
+      },
+      {
+        "file": "src/utils/MidiFileGenerator.cpp",
+        "purpose": "Implementation of MIDI file generation"
+      },
+      {
+        "file": "src/ui/Components/MidiDragArea.h",
+        "purpose": "Draggable component for external MIDI drag"
+      },
+      {
+        "file": "src/ui/Components/MidiDragArea.cpp",
+        "purpose": "Implementation with icon, label, and external drag"
+      }
+    ],
+    "files_to_modify": [
+      {
+        "file": "src/ui/Components/StepSequencerComponent.h",
+        "changes": [
+          "Line 5: Add #include \"MidiDragArea.h\"",
+          "Line 128 (after midiImport_): Add std::unique_ptr<MidiDragArea> midiDragArea_;",
+          "Line 129: Add juce::String currentMidiFilePath_;",
+          "Line 130: Add void regenerateMidiFile();"
+        ]
+      },
+      {
+        "file": "src/ui/Components/StepSequencerComponent.cpp",
+        "changes": [
+          "Line 2: Add #include \"../../utils/MidiFileGenerator.h\"",
+          "Line 113 (after midiImport_ addAndMakeVisible): Create midiDragArea_ and add to rightPanel_",
+          "Line 114: Wire midiExport_.onClick to regenerateMidiFile()",
+          "Line 322: Adjust layout to fit MidiDragArea above buttons",
+          "End of file: Add regenerateMidiFile() implementation",
+          "In setCell(): Call regenerateMidiFile() after pattern change"
+        ]
+      },
+      {
+        "file": "CMakeLists.txt",
+        "changes": [
+          "Add src/utils/MidiFileGenerator.cpp to target_sources",
+          "Add src/ui/Components/MidiDragArea.cpp to target_sources"
+        ]
+      }
+    ],
+    "layout_after_modification": {
+      "right_panel_contents": [
+        "Tempo label + input (existing)",
+        "Grid label + combo (existing)",
+        "Swing label + slider (existing)",
+        "MidiDragArea (NEW - ~60px height, icon + 'Drag MIDI' label)",
+        "Export MIDI button (existing - now wired)",
+        "Import MIDI button (existing)"
+      ]
+    },
+    "gm_drum_mapping": {
+      "description": "Map row index to GM drum note based on row name",
+      "default_mapping": {
+        "Kick": 36,
+        "Snare": 38,
+        "Hat": 42,
+        "Clap": 39,
+        "default": 36
+      }
+    },
+    "midi_generation_trigger": [
+      "On every setCell() call (pattern change)",
+      "On midiExport_.onClick (manual export)",
+      "Initial generation in constructor"
+    ]
+  }
+}

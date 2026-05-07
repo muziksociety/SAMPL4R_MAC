@@ -1,0 +1,310 @@
+﻿{
+  "session_id": "step25-processing-2026-01-17",
+  "design_type": "frontend",
+  "created_at": "2026-01-17",
+
+  "ascii_mockups": {
+    "step_pills_before": {
+      "description": "Current step pills layout (3 pills)",
+      "mockup": [
+        "+============================================================+",
+        "|                     [Back]                                  |",
+        "+------------------------------------------------------------+",
+        "|       [ LENGTH ]    [ DOWNBEAT ]    [ SLICE ]              |",
+        "|       (active)       (disabled)      (disabled)            |",
+        "+------------------------------------------------------------+"
+      ]
+    },
+    "step_pills_after": {
+      "description": "New step pills layout (4 pills, narrower)",
+      "mockup": [
+        "+============================================================+",
+        "|                     [Back]                                  |",
+        "+------------------------------------------------------------+",
+        "|  [LENGTH]   [TEMPO]   [2.5 PROCESS]   [SLICE]              |",
+        "|  (green)    (gray)      (gray)         (gray)              |",
+        "|                                                             |",
+        "| Pills are 95px wide with 6px gaps, centered in container   |",
+        "+------------------------------------------------------------+"
+      ]
+    },
+    "step25_instruction_box": {
+      "description": "Instruction box content for Step 2.5 PROCESSING",
+      "mockup": [
+        "+============================================================+",
+        "|  PRE-SLICE PROCESSING                 [Loading Zone]       |",
+        "|                                                             |",
+        "|  +-------------------------------------------------------+ |",
+        "|  | PRESETS:  [Preset Dropdown v]  [Save] [Load] [Reset]  | |",
+        "|  +-------------------------------------------------------+ |",
+        "|                                                             |",
+        "|  Apply dynamics and EQ processing to clean up your sample  |",
+        "|  before slicing. Changes are visible in real-time.         |",
+        "+============================================================+"
+      ]
+    },
+    "processing_control_panel": {
+      "description": "5-module effect strip below instruction box",
+      "mockup": [
+        "+============================================================+",
+        "|                   PROCESSING EFFECTS                        |",
+        "+----------+-----------+-----------+----------+--------------+",
+        "| [x]GATE  | [x]EXPAND | [x]COMP   | [x]LIMIT | [x]EQ        |",
+        "+----------+-----------+-----------+----------+--------------+",
+        "| Thresh   | Thresh    | Thresh    | Ceiling  | Low  80Hz    |",
+        "| [-24dB]  | [-36dB]   | [-12dB]   | [-0.1dB] | [+0dB]       |",
+        "| Attack   | Ratio     | Ratio     | Release  | LoMid 250Hz  |",
+        "| [10ms]   | [2:1]     | [4:1]     | [10ms]   | [+0dB]       |",
+        "| Release  | Attack    | Attack    |          | Mid 1kHz     |",
+        "| [50ms]   | [5ms]     | [10ms]    |          | [+0dB]       |",
+        "| Hold     | Release   | Release   |          | MidHi 3kHz   |",
+        "| [10ms]   | [50ms]    | [100ms]   |          | [+0dB]       |",
+        "|          |           | Makeup    |          | High 8kHz    |",
+        "|          |           | [+3dB]    |          | [+0dB]       |",
+        "|          |           | Dry/Wet   |          | Air 12kHz    |",
+        "|          |           | [50%]     |          | [+0dB]       |",
+        "+----------+-----------+-----------+----------+--------------+"
+      ],
+      "notes": [
+        "[x] = bypass toggle (orange when enabled, gray when bypassed)",
+        "Each module has vertical layout with parameter sliders",
+        "Sliders are compact (LinearVertical style)",
+        "Module widths are flexible to fit container"
+      ]
+    },
+    "waveform_with_threshold_lines": {
+      "description": "Waveform display with draggable horizontal threshold lines",
+      "mockup": [
+        "+============================================================+",
+        "|                    WAVEFORM DISPLAY                         |",
+        "+------------------------------------------------------------+",
+        "|                                                             |",
+        "|  ------- Gate Thresh (-24dB) ------- (red dashed line)     |",
+        "|                                                             |",
+        "|      +-----------------+                                    |",
+        "|      |#################|     <- waveform peaks             |",
+        "|  ====|======Expander===|==== (-36dB) (orange dashed)       |",
+        "|      |#################|                                    |",
+        "|  ====|====Compressor===|==== (-12dB) (yellow dashed)       |",
+        "|      |#################|                                    |",
+        "|      +-----------------+                                    |",
+        "|                                                             |",
+        "+------------------------------------------------------------+",
+        "|  Lines are draggable vertically to adjust threshold        |",
+        "|  Cursor changes to resize-vertical when hovering line      |",
+        "|  Tooltip shows current dB value while dragging             |",
+        "+------------------------------------------------------------+"
+      ],
+      "threshold_line_colors": {
+        "gate": "red (ff5555) dashed",
+        "expander": "orange (ffa500) dashed",
+        "compressor": "yellow (ffff00) dashed"
+      }
+    },
+    "workflow_complete_view": {
+      "description": "Full Step 2.5 screen layout",
+      "mockup": [
+        "+============================================================+",
+        "|  [Back]                              Sample: drums.wav      |",
+        "+------------------------------------------------------------+",
+        "|  [LENGTH]   [TEMPO]   [2.5 PROCESS]   [SLICE]              |",
+        "|   (done)    (done)      (active)      (locked)             |",
+        "+------------------------------------------------------------+",
+        "|  PRE-SLICE PROCESSING               [Tempo: OK, Colors: OK]|",
+        "|  +-------------------------------------------------------+ |",
+        "|  | PRESETS: [Clean Drums v]  [Save] [Load] [Reset]       | |",
+        "|  +-------------------------------------------------------+ |",
+        "|  Apply dynamics and EQ before slicing.                     |",
+        "+------------------------------------------------------------+",
+        "|  +--------+--------+--------+--------+-------------------+ |",
+        "|  |[x]GATE |[x]EXPD |[x]COMP |[x]LIMT |[x]EQ              | |",
+        "|  |--------|--------|--------|--------|-------------------| |",
+        "|  |Thr -24 |Thr -36 |Thr -12 |Ceil -.1|Low   [--0--]      | |",
+        "|  |Atk  10 |Rat  2:1|Rat  4:1|Rel  10 |LoMid [--0--]      | |",
+        "|  |Rel  50 |Atk  5  |Atk  10 |        |Mid   [--0--]      | |",
+        "|  |Hld  10 |Rel  50 |Rel 100 |        |MidHi [--0--]      | |",
+        "|  |        |        |Mkup +3 |        |High  [--0--]      | |",
+        "|  |        |        |D/W  50%|        |Air   [--0--]      | |",
+        "|  +--------+--------+--------+--------+-------------------+ |",
+        "+------------------------------------------------------------+",
+        "|  click and hold to play                                    |",
+        "+------------------------------------------------------------+",
+        "|  +--------------------------------------------------------+|",
+        "|  |   ===== Gate -24dB =================== (red)           ||",
+        "|  |                                                         ||",
+        "|  |   ###############################################       ||",
+        "|  |   ===== Expander -36dB =============== (orange)        ||",
+        "|  |   ###############################################       ||",
+        "|  |   ===== Compressor -12dB ============= (yellow)        ||",
+        "|  |   ###############################################       ||",
+        "|  |                                                         ||",
+        "|  +--------------------------------------------------------+|",
+        "+------------------------------------------------------------+",
+        "|  Selection: 0.00s - 4.00s (4.00s) PROCESSING APPLIED       |",
+        "+------------------------------------------------------------+",
+        "|  Drag threshold lines to adjust. Changes update instantly. |",
+        "+------------------------------------------------------------+",
+        "|  [Pitch]  [Speed]                    [Back] [Continue]     |",
+        "+============================================================+"
+      ]
+    }
+  },
+
+  "component_hierarchy": {
+    "WavePreviewPage": {
+      "children": [
+        "backButton_",
+        "stepPill1_ (LENGTH)",
+        "stepPill2_ (TEMPO)",
+        "stepPill25_ (2.5 PROCESS) <- NEW",
+        "stepPill3_ (SLICE)",
+        "instructionBoxBounds_ (contains step-specific controls)",
+        {
+          "Step25Controls": {
+            "presetComboBox_",
+            "savePresetBtn_",
+            "loadPresetBtn_",
+            "resetBtn_",
+            "ProcessingEffectsPanel_": {
+              "GateModule": ["bypassToggle", "thresholdSlider", "attackSlider", "releaseSlider", "holdSlider"],
+              "ExpanderModule": ["bypassToggle", "thresholdSlider", "ratioSlider", "attackSlider", "releaseSlider"],
+              "CompressorModule": ["bypassToggle", "thresholdSlider", "ratioSlider", "attackSlider", "releaseSlider", "makeupSlider", "dryWetSlider"],
+              "LimiterModule": ["bypassToggle", "ceilingSlider", "releaseSlider"],
+              "EQModule": ["bypassToggle", "lowSlider", "lowMidSlider", "midSlider", "midHighSlider", "highSlider", "airSlider"]
+            }
+          }
+        },
+        "playZoneBox_",
+        "waveformBounds_ (displays processed waveform)",
+        "ThresholdLineOverlay_ <- NEW (transparent overlay over waveform)",
+        "selectionFeedbackLabel_",
+        "hintBarLabel_",
+        "pitchKnob_",
+        "speedKnob_",
+        "backStepButton_",
+        "continueButton_"
+      ]
+    }
+  },
+
+  "user_interaction_flow": {
+    "entering_step25": [
+      "1. User clicks Continue button from Step 2 (TEMPO)",
+      "2. transitionToStep25() is called",
+      "3. currentStep_ changes to Step25_Processing",
+      "4. Step 2 controls hidden, Step 2.5 controls shown",
+      "5. updateStepPills() colors: LENGTH(done), TEMPO(done), 2.5 PROCESS(active), SLICE(locked)",
+      "6. ThresholdLineOverlay becomes visible over waveform",
+      "7. Initial preset 'Default' is loaded (all effects bypassed)"
+    ],
+    "adjusting_effects": [
+      "1. User enables Gate by clicking bypass toggle",
+      "2. Gate module becomes active (orange highlight)",
+      "3. User drags threshold slider to -24dB",
+      "4. PreSliceProcessingService.setGateParameter('threshold', -24) called",
+      "5. Service triggers background processing",
+      "6. Waveform redraws with processed audio (shows gate effect)",
+      "7. ThresholdLineOverlay updates gate line position"
+    ],
+    "dragging_threshold_line": [
+      "1. User hovers over red gate threshold line on waveform",
+      "2. Cursor changes to ns-resize (vertical resize)",
+      "3. User clicks and drags line up/down",
+      "4. Line follows mouse, tooltip shows current dB value",
+      "5. ThresholdLineOverlay calls onThresholdChanged(GATE, newDbValue)",
+      "6. WavePreviewPage updates gate threshold slider to match",
+      "7. Processing service receives new threshold, reprocesses",
+      "8. Waveform updates in real-time"
+    ],
+    "saving_preset": [
+      "1. User adjusts effects to desired settings",
+      "2. User clicks [Save] button",
+      "3. Dialog appears prompting for preset name",
+      "4. User enters name 'My Clean Drums', clicks Save",
+      "5. ProcessingPresetManager.saveUserPreset() called",
+      "6. Preset saved to Samplar/processing_presets/my_clean_drums.json",
+      "7. Preset combo box updates to include new preset"
+    ],
+    "loading_preset": [
+      "1. User clicks preset dropdown",
+      "2. User selects 'Punchy Kicks' factory preset",
+      "3. ProcessingPresetManager.loadPreset() called",
+      "4. All effect parameters updated from preset",
+      "5. All UI sliders sync to loaded values",
+      "6. Processing service applies new settings",
+      "7. Waveform updates to show preset effect"
+    ],
+    "continuing_to_step3": [
+      "1. User clicks Continue button from Step 2.5",
+      "2. transitionToStep3FromStep25() is called",
+      "3. Processed buffer is finalized (becomes input for Step 3)",
+      "4. currentStep_ changes to Step3_SampleSlice",
+      "5. Step 2.5 controls hidden, Step 3 controls shown",
+      "6. ThresholdLineOverlay hidden",
+      "7. Slice generation uses PROCESSED audio buffer"
+    ]
+  },
+
+  "visual_design": {
+    "step_pill_colors": {
+      "active": "#00FF88 (green) with black text",
+      "completed": "#3D9970 (dark green) with white text and [OK] suffix",
+      "disabled": "#30363D (gray) with gray text",
+      "locked": "#30363D (gray) with padlock icon or grayed text"
+    },
+    "effect_module_colors": {
+      "enabled": "Orange border (#ffa500), dark fill (#1a1f26)",
+      "bypassed": "Gray border (#4a5056), dark fill (#0d1117)",
+      "header": "Module name in caps, 11pt bold"
+    },
+    "threshold_line_colors": {
+      "gate": "#ff5555 (red) - 1.5px dashed",
+      "expander": "#ffa500 (orange) - 1.5px dashed",
+      "compressor": "#ffff00 (yellow) - 1.5px dashed"
+    },
+    "instruction_box": {
+      "background": "#1a1f26 with 92% alpha",
+      "border": "#00FFFF (cyan) with 45% alpha",
+      "title": "#00FFFF (cyan) 13pt bold",
+      "subtitle": "#C9D1D9 80% alpha 11.5pt italic"
+    }
+  },
+
+  "responsive_layout": {
+    "minimum_width": 800,
+    "pill_width": "95px (narrower than current 120px to fit 4 pills)",
+    "pill_gap": "6px",
+    "effect_modules": "Flexible width, minimum 100px each, expand to fill",
+    "eq_module": "Wider than others (needs 6 sliders)"
+  },
+
+  "accessibility": {
+    "keyboard_navigation": "Tab through controls, Enter/Space to toggle bypass",
+    "slider_increments": "Arrow keys adjust by 1dB or 1ms",
+    "threshold_line_keyboard": "Up/Down arrows when line focused",
+    "visual_feedback": "Processing indicator during background work"
+  },
+
+  "integration_points_with_backend": [
+    {
+      "ui_element": "Gate threshold slider",
+      "backend_call": "PreSliceProcessingService::setGateParameter('threshold', value)",
+      "data_type": "float (dB, range -60 to 0)"
+    },
+    {
+      "ui_element": "ThresholdLineOverlay drag",
+      "backend_call": "Same as slider - synced bidirectionally",
+      "data_type": "float (dB)"
+    },
+    {
+      "ui_element": "Preset combo selection",
+      "backend_call": "ProcessingPresetManager::loadPreset(presetName)",
+      "data_type": "ProcessingPreset struct"
+    },
+    {
+      "ui_element": "Waveform display",
+      "backend_call": "PreSliceProcessingService::getProcessedBuffer()",
+      "data_type": "juce::AudioBuffer<float>"
+    }
+  ]
+}

@@ -1,0 +1,2 @@
+﻿#pragma once
+#define SAMPLAR_VERSION "@SAMPLAR_GIT_VERSION@"

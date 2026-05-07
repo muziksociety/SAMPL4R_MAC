@@ -1,0 +1,115 @@
+{
+  "session_id": "ascii-mockup-skill-2026-01-23",
+  "agent": "orchestrator-as-evidence-gatherer",
+  "created_at": "2026-01-23T00:00:00Z",
+  "status": "complete",
+  "findings": [
+    {
+      "finding": "Skill structure pattern - YAML frontmatter with name and description required",
+      "file": ".claude/skills/skill-creator/SKILL.md",
+      "lines": "1-6",
+      "verified": true,
+      "evidence": "---\nname: skill-creator\ndescription: Guide for creating effective skills..."
+    },
+    {
+      "finding": "Skills have three loading levels: metadata (always), SKILL.md body (when triggered), resources (as needed)",
+      "file": ".claude/skills/skill-creator/SKILL.md",
+      "lines": "114-120",
+      "verified": true,
+      "evidence": "1. Metadata (name + description) - Always in context (~100 words)\n2. SKILL.md body - When skill triggers (<5k words)\n3. Bundled resources - As needed"
+    },
+    {
+      "finding": "Frontend-architect is the primary consumer requiring ASCII mockups",
+      "file": ".claude/agents/frontend-architect.md",
+      "lines": "154-211",
+      "verified": true,
+      "evidence": "ASCII Mockup Template showing BEFORE/AFTER states with box-drawing characters"
+    },
+    {
+      "finding": "ASCII mockup pattern uses +---+ for borders and | for vertical lines",
+      "file": ".claude/workflow/sessions/gif-loading-animation-2025-12-24/frontend-design.md",
+      "lines": "5-55",
+      "verified": true,
+      "evidence": "+------------------------------------------------------------------+\n|                     PROCESSING PAGE (Current)                     |"
+    },
+    {
+      "finding": "Advanced ASCII uses Unicode box-drawing characters for precise layouts",
+      "file": ".claude/workflow/sessions/bar-pattern-gen-redesign/implementation-plan-v2.md",
+      "lines": "22-38",
+      "verified": true,
+      "evidence": "Uses characters like: '|' for vertical, '-' for horizontal, '+' for corners"
+    },
+    {
+      "finding": "JUCE Component hierarchy is documented as tree structures",
+      "file": ".claude/agents/frontend-architect.md",
+      "lines": "213-235",
+      "verified": true,
+      "evidence": "PageComponent (parent)\n  |\n  +-- HeaderComponent\n  |\n  +-- ContentPanel..."
+    },
+    {
+      "finding": "User flow diagrams use numbered steps with arrows",
+      "file": ".claude/agents/frontend-architect.md",
+      "lines": "237-274",
+      "verified": true,
+      "evidence": "1. User loads sample\n   |\n   v\n2. User navigates to Step 2..."
+    },
+    {
+      "finding": "Skills should use imperative form in writing",
+      "file": ".claude/skills/skill-creator/SKILL.md",
+      "lines": "302",
+      "verified": true,
+      "evidence": "**Writing Guidelines:** Always use imperative/infinitive form."
+    },
+    {
+      "finding": "Keep SKILL.md under 500 lines to minimize context bloat",
+      "file": ".claude/skills/skill-creator/SKILL.md",
+      "lines": "124",
+      "verified": true,
+      "evidence": "Keep SKILL.md body to the essentials and under 500 lines to minimize context bloat."
+    }
+  ],
+  "integration_patterns": [
+    {
+      "pattern": "BEFORE/AFTER mockup pair",
+      "purpose": "Show current state and proposed changes clearly",
+      "example_file": ".claude/workflow/sessions/gif-loading-animation-2025-12-24/frontend-design.md"
+    },
+    {
+      "pattern": "Component hierarchy tree",
+      "purpose": "Document JUCE parent-child relationships",
+      "example_file": ".claude/agents/frontend-architect.md"
+    },
+    {
+      "pattern": "User interaction flow",
+      "purpose": "Document step-by-step user journey",
+      "example_file": ".claude/agents/frontend-architect.md"
+    }
+  ],
+  "box_drawing_characters": {
+    "basic_ascii": {
+      "horizontal": "-",
+      "vertical": "|",
+      "corners": "+",
+      "use_case": "Simple mockups, wide compatibility"
+    },
+    "unicode_light": {
+      "horizontal": "-",
+      "vertical": "|",
+      "top_left": "+",
+      "top_right": "+",
+      "bottom_left": "+",
+      "bottom_right": "+",
+      "t_down": "+",
+      "t_up": "+",
+      "t_right": "+",
+      "t_left": "+",
+      "cross": "+",
+      "use_case": "Precise layouts, modern terminals"
+    },
+    "unicode_double": {
+      "horizontal": "=",
+      "vertical": "||",
+      "use_case": "Emphasis, headers, double borders"
+    }
+  }
+}

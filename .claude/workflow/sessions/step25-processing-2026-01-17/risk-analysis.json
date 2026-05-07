@@ -1,0 +1,281 @@
+{
+  "session_id": "step25-processing-2026-01-17",
+  "design_type": "risk_analysis",
+  "created_at": "2026-01-17",
+
+  "frontend_risks": [
+    {
+      "risk_id": "FR-001",
+      "category": "Layout",
+      "risk": "4 step pills may not fit at current 120px width",
+      "severity": "medium",
+      "likelihood": "high",
+      "impact": "Pills overflow or overlap on narrower screens",
+      "mitigation": "Reduce pill width to 95px, reduce gap to 6px. Total: 4*95 + 3*6 = 398px (fits in 800px min width)",
+      "verification": "Test at minimum window width (800px)"
+    },
+    {
+      "risk_id": "FR-002",
+      "category": "UX",
+      "risk": "5 effect modules with 20+ parameters creates cognitive overload",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Users confused by too many controls",
+      "mitigation": "1) All effects start bypassed by default, 2) Provide presets for common use cases, 3) Draggable threshold lines provide visual shortcut",
+      "verification": "User testing with non-audio-engineer users"
+    },
+    {
+      "risk_id": "FR-003",
+      "category": "Responsiveness",
+      "risk": "Effect modules may not fit in control panel height",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Controls cut off or require scrolling",
+      "mitigation": "Use compact LinearVertical sliders, reduce module height, consider collapsible modules",
+      "verification": "Test layout at minimum window height"
+    },
+    {
+      "risk_id": "FR-004",
+      "category": "Interaction",
+      "risk": "Threshold line drag too small to hit easily",
+      "severity": "low",
+      "likelihood": "medium",
+      "impact": "Frustrating user experience with line selection",
+      "mitigation": "Use large hit area (10px above/below line), change cursor on hover, show tooltip during drag",
+      "verification": "Test with touchscreen if possible"
+    },
+    {
+      "risk_id": "FR-005",
+      "category": "Visual Feedback",
+      "risk": "Waveform update lag during parameter adjustment feels unresponsive",
+      "severity": "high",
+      "likelihood": "high",
+      "impact": "Users perceive app as slow/broken",
+      "mitigation": "1) Show processing indicator, 2) Debounce parameter changes (50ms), 3) Use fast preview processing, 4) Show immediate UI feedback (line position) before waveform updates",
+      "verification": "Profile update time, ensure < 200ms perceived latency"
+    },
+    {
+      "risk_id": "FR-006",
+      "category": "State",
+      "risk": "User navigates back to Step 2 then forward, losing Step 2.5 settings",
+      "severity": "low",
+      "likelihood": "low",
+      "impact": "User loses preset configuration",
+      "mitigation": "Preserve processing settings in memory when navigating between steps. Only reset on file load.",
+      "verification": "Test step navigation round-trips"
+    },
+    {
+      "risk_id": "FR-007",
+      "category": "Threshold Lines",
+      "risk": "Multiple threshold lines overlap when thresholds are similar values",
+      "severity": "low",
+      "likelihood": "medium",
+      "impact": "Difficult to distinguish and drag individual lines",
+      "mitigation": "1) Offset lines by 2-3 pixels when within 3dB, 2) Use distinct colors (red/orange/yellow), 3) Show label on hover",
+      "verification": "Test with thresholds all set to -12dB"
+    }
+  ],
+
+  "backend_risks": [
+    {
+      "risk_id": "BR-001",
+      "category": "Threading",
+      "risk": "Processing on UI thread blocks interface during long samples",
+      "severity": "critical",
+      "likelihood": "certain",
+      "impact": "App freezes for seconds during parameter changes",
+      "mitigation": "MANDATORY: Use background thread (ThreadPool) for processBuffer(). Use AsyncUpdater for safe UI callback.",
+      "verification": "Test with 60-second sample, verify UI remains responsive"
+    },
+    {
+      "risk_id": "BR-002",
+      "category": "Memory",
+      "risk": "Multiple buffer copies (original, processing, processed) consume excessive memory",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Memory issues with large samples (>100MB)",
+      "mitigation": "1) Only copy when processing starts, 2) Clear processing buffer when done, 3) Process in chunks for very large files",
+      "verification": "Monitor memory usage with 10-minute audio file"
+    },
+    {
+      "risk_id": "BR-003",
+      "category": "Audio Quality",
+      "risk": "Clicks/pops at buffer boundaries during chunk processing",
+      "severity": "medium",
+      "likelihood": "low",
+      "impact": "Audible artifacts in processed audio",
+      "mitigation": "Process entire buffer at once (not streaming). Reset processor state at buffer start.",
+      "verification": "Audio null test: processed silent input = silent output"
+    },
+    {
+      "risk_id": "BR-004",
+      "category": "State Consistency",
+      "risk": "Parameter change while processing causes race condition",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Inconsistent audio output or crash",
+      "mitigation": "1) Copy all parameters atomically before processing starts, 2) Use std::atomic for enable flags, 3) Queue parameter changes, apply at processing start",
+      "verification": "Stress test: rapid slider changes during processing"
+    },
+    {
+      "risk_id": "BR-005",
+      "category": "Preset System",
+      "risk": "Corrupt preset file crashes on load",
+      "severity": "low",
+      "likelihood": "low",
+      "impact": "App crashes or preset lost",
+      "mitigation": "1) Validate JSON before parsing, 2) Use try/catch around file operations, 3) Log errors and load Default preset on failure",
+      "verification": "Test with malformed JSON file"
+    },
+    {
+      "risk_id": "BR-006",
+      "category": "DSP",
+      "risk": "Expander implementation incorrect (never implemented before)",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Expander sounds wrong or does nothing",
+      "mitigation": "1) Follow JUCE Compressor implementation pattern but invert ratio logic, 2) Test with known input (sine wave below threshold should be quieter)",
+      "verification": "Compare output to reference expander plugin"
+    },
+    {
+      "risk_id": "BR-007",
+      "category": "DSP",
+      "risk": "Gate envelope state machine has edge cases causing clicks",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Audible clicks when gate opens/closes",
+      "mitigation": "1) Minimum attack/release of 1ms, 2) Smooth transitions with coefficient smoothing, 3) Test with percussive transients",
+      "verification": "Test gate on drum transients at various thresholds"
+    },
+    {
+      "risk_id": "BR-008",
+      "category": "Integration",
+      "risk": "Processed buffer not correctly passed to Step 3 slice generation",
+      "severity": "high",
+      "likelihood": "medium",
+      "impact": "Slicing uses original audio instead of processed",
+      "mitigation": "Explicit processedBuffer_ member, transitionToStep3FromStep25() sets slicing input buffer",
+      "verification": "Test: enable heavy compression, verify slices show compressed waveform"
+    },
+    {
+      "risk_id": "BR-009",
+      "category": "Performance",
+      "risk": "Processing large files takes too long for real-time preview feel",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Unresponsive feel, user gives up",
+      "mitigation": "1) Process only visible/selected region initially, 2) Process full buffer in background, 3) Show progress indicator",
+      "verification": "Profile processing time for 30-second, 60-second, 120-second samples"
+    }
+  ],
+
+  "integration_risks": [
+    {
+      "risk_id": "IR-001",
+      "category": "Workflow",
+      "risk": "Step numbering change (2.5) confuses users expecting 1,2,3",
+      "severity": "low",
+      "likelihood": "low",
+      "impact": "Minor confusion",
+      "mitigation": "Use clear labels: LENGTH, TEMPO, PROCESS, SLICE (not numbers)",
+      "verification": "User testing"
+    },
+    {
+      "risk_id": "IR-002",
+      "category": "Workflow",
+      "risk": "User skips Step 2.5 but expects processing anyway",
+      "severity": "low",
+      "likelihood": "low",
+      "impact": "Unprocessed slices",
+      "mitigation": "Step 2.5 is mandatory in the flow (can't skip to Step 3 directly). Default preset applies 'bypass all' so effect is neutral.",
+      "verification": "Verify navigation flow enforces sequence"
+    },
+    {
+      "risk_id": "IR-003",
+      "category": "Sync",
+      "risk": "Threshold slider and threshold line get out of sync",
+      "severity": "medium",
+      "likelihood": "medium",
+      "impact": "Confusing UI state",
+      "mitigation": "Single source of truth in processing service. Both UI elements read from same value. Changes from either update the source.",
+      "verification": "Test: change slider, verify line moves. Change line, verify slider moves."
+    },
+    {
+      "risk_id": "IR-004",
+      "category": "Thumbnail",
+      "risk": "processedThumbnail update invalidates while drawing",
+      "severity": "medium",
+      "likelihood": "low",
+      "impact": "Visual glitch or crash",
+      "mitigation": "Update thumbnail on message thread only. Use double-buffering if needed.",
+      "verification": "Stress test with rapid parameter changes while zoomed in"
+    }
+  ],
+
+  "rollback_plan": {
+    "trigger_conditions": [
+      "Build fails after changes",
+      "Critical bugs discovered in Step 2.5 affecting Step 3 slicing",
+      "Memory issues causing crashes",
+      "Processing too slow to be usable"
+    ],
+    "rollback_steps": [
+      "1. Revert WavePreviewPage.h changes (remove Step25 enum and members)",
+      "2. Revert WavePreviewPage.cpp changes",
+      "3. Revert DynamicEffectsProcessor.h/cpp changes",
+      "4. Remove new files (PreSliceProcessingService, ThresholdLineOverlay, ProcessingPresetManager)",
+      "5. Revert CMakeLists.txt",
+      "6. Verify build succeeds",
+      "7. Verify existing Step 1-2-3 workflow works"
+    ],
+    "partial_rollback": "If only specific feature fails (e.g., threshold lines), that component can be disabled while keeping core processing"
+  },
+
+  "test_plan": {
+    "unit_tests": [
+      "ExpanderProcessor: Verify gain reduction below threshold",
+      "EnhancedCompressorProcessor: Verify dry/wet blend at 0%, 50%, 100%",
+      "EnhancedNoiseGateProcessor: Verify attack/release/hold timing",
+      "ProcessingPresetManager: Save/load roundtrip",
+      "ProcessingPreset: JSON serialization/deserialization"
+    ],
+    "integration_tests": [
+      "Workflow: Navigate Step 1 -> 2 -> 2.5 -> 3 successfully",
+      "Workflow: Navigate back Step 3 -> 2.5 -> 2 -> 1 and forward again",
+      "Processing: Parameter change triggers waveform update",
+      "Processing: Processed buffer passed correctly to Step 3",
+      "Presets: Load factory preset applies all settings",
+      "Presets: Save user preset persists to file system"
+    ],
+    "visual_tests": [
+      "Step pills: All 4 visible and properly colored",
+      "Effect modules: All controls visible and functional",
+      "Threshold lines: Visible on waveform at correct dB positions",
+      "Threshold lines: Draggable with cursor feedback",
+      "Waveform: Updates reflect processing changes"
+    ],
+    "performance_tests": [
+      "Processing time: < 500ms for 30-second sample",
+      "UI responsiveness: No freeze during processing",
+      "Memory: < 200MB additional for typical sample"
+    ],
+    "audio_quality_tests": [
+      "Null test: Bypass all = exact input/output match",
+      "Gate test: Silent sections properly gated",
+      "Compressor test: Peaks reduced by expected ratio",
+      "Limiter test: No samples exceed ceiling"
+    ]
+  },
+
+  "risk_summary": {
+    "critical_risks": 1,
+    "high_risks": 2,
+    "medium_risks": 13,
+    "low_risks": 6,
+    "top_priority_mitigations": [
+      "BR-001: MUST use background thread for processing",
+      "BR-008: MUST verify processed buffer flows to Step 3",
+      "FR-005: MUST show visual feedback during processing"
+    ]
+  }
+}

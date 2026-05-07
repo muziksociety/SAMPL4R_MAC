@@ -1,0 +1,163 @@
+{
+  "session_id": "community-chat-2026-01-23",
+  "code_paths": [
+    {
+      "path_name": "User clicks COMMUNITY button to open chat",
+      "steps": [
+        {
+          "step": 1,
+          "description": "User clicks COMMUNITY button in SampleBrowserPage header",
+          "file": "src/ui/Pages/SampleBrowserPage.cpp",
+          "line": 785,
+          "code": "communityButton_.onClick = [this]{ if (onGoCommunity) onGoCommunity(); };"
+        },
+        {
+          "step": 2,
+          "description": "MainWindow callback handles navigation",
+          "file": "src/ui/MainWindow.cpp",
+          "line": 258,
+          "code": "initial_.onGoCommunity = [this]{ ... switchTo(7); }"
+        },
+        {
+          "step": 3,
+          "description": "switchTo(7) shows CommunityPage (to be replaced with ChatPage)",
+          "file": "src/ui/MainWindow.cpp",
+          "line": 261,
+          "code": "switchTo(7);  // Community is index 7"
+        },
+        {
+          "step": 4,
+          "description": "ChatPage connects to server and displays messages",
+          "file": "src/ui/Pages/ChatPage.cpp",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED"
+        }
+      ]
+    },
+    {
+      "path_name": "User sends a chat message",
+      "steps": [
+        {
+          "step": 1,
+          "description": "User types message in ChatPage input field",
+          "file": "src/ui/Pages/ChatPage.cpp",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - TextEditor inputField_"
+        },
+        {
+          "step": 2,
+          "description": "User clicks Send or presses Enter",
+          "file": "src/ui/Pages/ChatPage.cpp",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - sendButton_.onClick or keyPressed()"
+        },
+        {
+          "step": 3,
+          "description": "ChatService sends message via WebSocket",
+          "file": "src/services/ChatService.cpp",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - sendMessage(text)"
+        },
+        {
+          "step": 4,
+          "description": "Server receives and stores message",
+          "file": "plugins/chat_service/chat_service.py",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - handle_message()"
+        },
+        {
+          "step": 5,
+          "description": "Server broadcasts to all connected clients",
+          "file": "plugins/chat_service/websocket_handler.py",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - broadcast()"
+        },
+        {
+          "step": 6,
+          "description": "ChatService receives and updates UI",
+          "file": "src/services/ChatService.cpp",
+          "line": "NEW",
+          "code": "TO BE IMPLEMENTED - onMessageReceived callback"
+        }
+      ]
+    },
+    {
+      "path_name": "Authentication flow for chat",
+      "steps": [
+        {
+          "step": 1,
+          "description": "ChatPage requests auth token from LicenseSystemService",
+          "file": "src/ui/Pages/ChatPage.cpp",
+          "line": "NEW",
+          "code": "auto* licenseSvc = app->services().get('license'); token = licenseSvc->getAuthToken();"
+        },
+        {
+          "step": 2,
+          "description": "ChatService connects with auth header",
+          "file": "src/services/ChatService.cpp",
+          "line": "NEW",
+          "code": "websocket.connect(url, headers={'Authorization': 'Bearer ' + token})"
+        },
+        {
+          "step": 3,
+          "description": "Server validates JWT token",
+          "file": "plugins/chat_service/chat_service.py",
+          "line": "NEW",
+          "code": "payload = jwt.decode(token, SECRET_KEY, algorithms=['HS256'])"
+        },
+        {
+          "step": 4,
+          "description": "Server associates connection with user",
+          "file": "plugins/chat_service/websocket_handler.py",
+          "line": "NEW",
+          "code": "connections[user_id] = websocket"
+        }
+      ]
+    }
+  ],
+  "integration_points": [
+    {
+      "name": "Button to Page Navigation",
+      "source": "SampleBrowserPage.communityButton_",
+      "target": "MainWindow.switchTo()",
+      "verified": true,
+      "verification": "Traced through onGoCommunity callback"
+    },
+    {
+      "name": "JWT Authentication",
+      "source": "LicenseSystemService",
+      "target": "chat_service JWT validation",
+      "verified": true,
+      "verification": "Same JWT pattern used in community_hub plugin"
+    },
+    {
+      "name": "WebSocket Connection",
+      "source": "ChatService (C++)",
+      "target": "websocket_handler (Python)",
+      "verified": false,
+      "verification": "NEW - requires implementation"
+    },
+    {
+      "name": "Database Integration",
+      "source": "chat_service",
+      "target": "PostgreSQL via database_manager plugin",
+      "verified": true,
+      "verification": "Pattern exists in community_hub/community_service.py"
+    }
+  ],
+  "dependencies": [
+    {
+      "component": "ChatPage",
+      "depends_on": ["ChatService", "LicenseSystemService", "EventBus"]
+    },
+    {
+      "component": "ChatService",
+      "depends_on": ["WebSocket library (JUCE sockets or external)"]
+    },
+    {
+      "component": "chat_service plugin",
+      "depends_on": ["database_manager", "security_manager", "api_router"]
+    }
+  ],
+  "created_at": "2026-01-23T00:00:00Z"
+}

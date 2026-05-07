@@ -1,0 +1,255 @@
+﻿{
+  "session_id": "python-demucs-packaging-investigation",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T03:00:00Z",
+  "status": "complete",
+  "investigation_summary": "PYTHON IS NOT REQUIRED FOR DISTRIBUTION - App uses native C++ CLI executables",
+
+  "executive_summary": {
+    "key_finding": "SAMPLAR does NOT require Python or pip packages for distribution. The Full Song workflow uses NATIVE C++ CLI executables that invoke pre-compiled binaries.",
+    "python_bridge_status": "DEPRECATED/BACKUP ONLY - The python_bridge folder exists but is NOT invoked by FullSongService.cpp",
+    "primary_backends": [
+      "UVR/audio-separator (pip package - if installed by user, auto-detected from PATH)",
+      "demucs.cpp ONNX GPU (native C++ CLI with ONNX Runtime)",
+      "demucs.cpp CPU (native C++ CLI with OpenBLAS)"
+    ],
+    "recommendation": "Bundle native C++ executables + model files. Python is NOT needed."
+  },
+
+  "evidence": {
+    "full_song_service_analysis": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+      "line_count": 1289,
+      "backend_selection_flow": {
+        "order_of_precedence": [
+          "1. UVR (audio-separator) - if available in PATH (lines 81-96)",
+          "2. demucs.cpp ONNX GPU - if demucs_onnx.exe + CUDA available (lines 475-511)",
+          "3. demucs.cpp CPU - demucs_mt_openblas.exe fallback (lines 517-551)"
+        ],
+        "no_python_invocation": true,
+        "child_process_usage": "Uses juce::ChildProcess to spawn native executables",
+        "cli_detection_method": "Searches for executables in app directory, not Python"
+      },
+      "separation_backends": {
+        "UVR": {
+          "function": "separateAudioUVR()",
+          "lines": "1092-1286",
+          "invocation_method": "juce::ChildProcess with 'audio-separator' command",
+          "requires_python": "YES - but only if user has it installed via pip",
+          "bundling_required": false,
+          "note": "Auto-detected from system PATH, NOT bundled with app"
+        },
+        "ONNX_GPU": {
+          "function": "separateAudioCppCli() with useGpuBackend=true",
+          "lines": "460-1037",
+          "invocation_method": "juce::ChildProcess with demucs_onnx.exe",
+          "requires_python": false,
+          "cli_executable": "demucs_onnx.exe",
+          "model_format": ".ort (ONNX Runtime format)"
+        },
+        "CPU_OPENBLAS": {
+          "function": "separateAudioCppCli() with useGpuBackend=false",
+          "lines": "460-1037",
+          "invocation_method": "juce::ChildProcess with demucs_mt_openblas.exe",
+          "requires_python": false,
+          "cli_executable": "demucs_mt_openblas.exe or demucs_mt.cpp.main.exe",
+          "model_format": ".bin (GGML format)"
+        }
+      }
+    },
+
+    "python_bridge_analysis": {
+      "location": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\python_bridge\\demucs_separator.py",
+      "status": "EXISTS BUT NOT USED BY FULLSONGSERVICE",
+      "grep_results": {
+        "python_in_src": "0 matches - No Python invocation in src/ folder",
+        "subprocess_calls": "Only in FullSongService.cpp (CLI) and HardwareFingerprintGenerator.cpp (system info)"
+      },
+      "purpose": "Backup/legacy code for when C++ demucs is unavailable",
+      "python_dependencies_if_used": [
+        "torch",
+        "torchaudio",
+        "demucs (pip package)",
+        "Standard library: sys, os, argparse, json, time, signal, threading, pathlib"
+      ],
+      "note": "This script is copied to build output but never invoked by the C++ application"
+    },
+
+    "uvr_audio_separator_analysis": {
+      "detection_function": "isUvrAvailable() at lines 1043-1090",
+      "how_detected": "Attempts to run 'audio-separator --version' via juce::ChildProcess",
+      "bundling_status": "NOT BUNDLED - Requires user to install via: pip install audio-separator",
+      "model_auto_download": true,
+      "model_options": [
+        "htdemucs_6s.yaml (6-stem, auto-downloaded)",
+        "htdemucs_ft.yaml (4-stem best quality)",
+        "kuielab_b_drums.onnx (drums-only fastest)"
+      ],
+      "note": "If user has audio-separator installed, it will be used as FASTEST option"
+    },
+
+    "required_files_for_packaging": {
+      "native_executables": {
+        "cpu_backend": {
+          "file": "demucs_mt_openblas.exe",
+          "description": "Multi-threaded demucs.cpp CLI with OpenBLAS",
+          "built_from": "third_party/demucs.cpp (WITH_DEMUCS_CLI=ON)",
+          "size_estimate": "~5-10MB"
+        },
+        "gpu_backend": {
+          "file": "demucs_onnx.exe",
+          "description": "ONNX Runtime GPU CLI for NVIDIA CUDA",
+          "source": "third_party/onnxruntime/bin/",
+          "size_estimate": "~5MB",
+          "optional": true
+        }
+      },
+      "runtime_dlls": {
+        "openblas": {
+          "file": "libopenblas.dll",
+          "location": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\openblas\\bin\\",
+          "size": "51076488 bytes (~49MB)",
+          "required_for": "CPU backend (demucs_mt_openblas.exe)"
+        },
+        "onnx_runtime_core": {
+          "file": "onnxruntime.dll",
+          "location": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\onnxruntime\\bin\\",
+          "size": "12134432 bytes (~12MB)",
+          "required_for": "GPU backend (demucs_onnx.exe)"
+        },
+        "onnx_cuda_provider": {
+          "file": "onnxruntime_providers_cuda.dll",
+          "location": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\onnxruntime\\bin\\",
+          "size": "540289080 bytes (~515MB)",
+          "required_for": "GPU backend with NVIDIA CUDA",
+          "note": "LARGE FILE - Consider making optional download"
+        },
+        "onnx_shared_provider": {
+          "file": "onnxruntime_providers_shared.dll",
+          "location": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\onnxruntime\\bin\\",
+          "size": "22088 bytes (~22KB)",
+          "required_for": "GPU backend"
+        }
+      },
+      "model_files": {
+        "cpu_model": {
+          "file": "ggml-model-htdemucs-4s-f16.bin",
+          "location": "models/",
+          "size": "83994361 bytes (~80MB)",
+          "required_for": "CPU backend (demucs.cpp)"
+        },
+        "gpu_model": {
+          "file": "htdemucs.ort",
+          "expected_location": "models/",
+          "expected_size": "~300MB",
+          "current_status": "Placeholder file only (135 bytes) - NEEDS ACTUAL MODEL",
+          "required_for": "GPU backend (ONNX)"
+        },
+        "lars_drumsep_models": {
+          "description": "LibTorch TorchScript models for AI drum separation",
+          "location": "models/drumsep/",
+          "total_size": "~226MB",
+          "files": [
+            "my_scripted_module.pt (~38MB)",
+            "my_scripted_module_cymbals.pt (~38MB)",
+            "my_scripted_module_hihat.pt (~38MB)",
+            "my_scripted_module_kick.pt (~38MB)",
+            "my_scripted_module_snare.pt (~38MB)",
+            "my_scripted_module_toms.pt (~38MB)"
+          ],
+          "optional": true,
+          "note": "Only needed if WITH_LIBTORCH is enabled"
+        }
+      }
+    },
+
+    "cmake_build_configuration": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\CMakeLists.txt",
+      "relevant_options": {
+        "WITH_DEMUCS": "OFF (default) - In-process lib disabled due to model loading issues",
+        "WITH_DEMUCS_CLI": "ON (default) - Builds demucs.cpp CLI executable",
+        "WITH_ONNX_GPU": "ON (default) - Copies ONNX GPU files to output",
+        "WITH_LIBTORCH": "Auto-detected from third_party/libtorch",
+        "WITH_SOUNDTOUCH": "ON (default) - Audio preview"
+      },
+      "post_build_copies": {
+        "line_627": "Copies python_bridge/ folder to output (but not used)",
+        "line_643": "Copies data/ folder (pattern databases)",
+        "line_657": "Copies libopenblas.dll for demucs CLI",
+        "line_674": "Copies models/ directory",
+        "line_696": "Copies ONNX GPU files if available"
+      }
+    }
+  },
+
+  "packaging_recommendations": {
+    "minimal_distribution": {
+      "total_size_estimate": "~150MB",
+      "required_files": [
+        "SAMPLAR.exe (main app)",
+        "demucs_mt_openblas.exe (CPU separation CLI)",
+        "libopenblas.dll (~49MB)",
+        "models/ggml-model-htdemucs-4s-f16.bin (~80MB)",
+        "data/ folder (pattern databases, small)"
+      ],
+      "python_required": false
+    },
+    "full_distribution_with_gpu": {
+      "total_size_estimate": "~900MB",
+      "additional_files": [
+        "demucs_onnx.exe (~5MB)",
+        "onnxruntime.dll (~12MB)",
+        "onnxruntime_providers_cuda.dll (~515MB) - LARGE!",
+        "onnxruntime_providers_shared.dll (~22KB)",
+        "models/htdemucs.ort (~300MB) - NEEDS ACTUAL MODEL FILE"
+      ],
+      "python_required": false,
+      "note": "Consider making GPU pack a separate download due to size"
+    },
+    "optional_libtorch_distribution": {
+      "additional_files": [
+        "LibTorch DLLs (~500MB+)",
+        "models/drumsep/*.pt (~226MB)"
+      ],
+      "note": "Only if LARS AI drum separation is desired"
+    }
+  },
+
+  "verification_checklist": [
+    {
+      "item": "Python bridge NOT invoked",
+      "verified": true,
+      "evidence": "Grep for 'python' in src/ returns 0 matches for subprocess calls"
+    },
+    {
+      "item": "demucs.cpp CLI is primary backend",
+      "verified": true,
+      "evidence": "FullSongService.cpp lines 460-1037 use juce::ChildProcess with native executables"
+    },
+    {
+      "item": "UVR is user-installed optional",
+      "verified": true,
+      "evidence": "isUvrAvailable() checks PATH, not bundled directory"
+    },
+    {
+      "item": "Model files must be bundled",
+      "verified": true,
+      "evidence": "ggml-model-htdemucs-4s-f16.bin found in build output (~80MB)"
+    },
+    {
+      "item": "ONNX GPU model needs attention",
+      "verified": true,
+      "evidence": "htdemucs.ort is only 135 bytes placeholder - needs actual model"
+    }
+  ],
+
+  "files_analyzed": [
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.h",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\python_bridge\\demucs_separator.py",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\CMakeLists.txt",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\CpuOptimizer.h",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\GpuDetector.h",
+    "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\third_party\\onnxruntime\\README.md"
+  ]
+}

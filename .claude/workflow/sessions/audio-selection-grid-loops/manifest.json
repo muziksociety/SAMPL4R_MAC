@@ -1,0 +1,37 @@
+{
+  "session_id": "audio-selection-grid-loops",
+  "task": "Move BPM detection and loop boundary detection to the Audio Selection Page with live beat grid visualization, draggable downbeat marker, and draggable loop boundaries - allowing user to verify/adjust before processing",
+  "enhanced_task": "",
+  "started": "2025-12-08T19:10:00Z",
+  "status": "in_progress",
+  "current_phase": "implementation",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "completed" },
+    "design": { "status": "in_progress" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "context": {
+    "problem": "Current downbeat detection algorithm cannot reliably detect fills/breaks because they use the same instruments as regular bars. User needs visual control to verify and adjust loop boundaries before processing.",
+    "user_requirements": [
+      "Move tempo detection to audio load time (when file is loaded in Audio Selection Page)",
+      "Display detected BPM on the Audio Selection Page",
+      "Overlay a beat grid on the waveform based on detected BPM",
+      "Add a 'Detect Loops' button that runs loop boundary detection live",
+      "Show loop boundaries as draggable blue vertical lines",
+      "Add a draggable red triangle/line for the downbeat marker",
+      "Auto/Manual toggle to switch between automatic and manual mode",
+      "All boundaries are pre-configured before going to Processing page"
+    ],
+    "existing_components": {
+      "MiniBPM": "src/services/analysis/MiniBPM.h - Fast BPM detection (~100ms)",
+      "LoopDetector": "src/services/analysis/LoopDetector.cpp - Loop boundary detection with phase correlation",
+      "WaveformViewer": "likely in src/ui/ - needs grid overlay and draggable markers"
+    }
+  }
+}

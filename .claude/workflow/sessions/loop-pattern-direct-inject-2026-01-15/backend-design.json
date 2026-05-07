@@ -1,0 +1,394 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "backend-architect",
+  "created_at": "2026-01-15T01:00:00Z",
+  "status": "complete",
+  "data": {
+    "evidence_summary": {
+      "verified_sources": [
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+          "line": 46,
+          "content": "PatternPreviewDialog::Result struct with accepted, patterns (vector<PatternEntry>), genre, patternName, finalBpm",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternLibraryDialog.h",
+          "line": 38,
+          "content": "PatternSet struct with name, genre, isUserPattern, gridSize, patterns (map<DrumCategory, RhythmicPattern>), subcategoryPatterns",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line": 2963,
+          "content": "void StepSequencerComponent::applyPatternSet(const PatternSet& patternSet) - applies to existing rows by matching category",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line": 3267,
+          "content": "void StepSequencerComponent::addTrackRow(const DrumTrack& track) - adds new row dynamically with steps, category, MIDI note",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line": 1018,
+          "content": "void StepSequencerComponent::setTempo(double bpm) - sets tempo and updates UI",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+          "line": 6851,
+          "content": "Existing callback pattern: [fileName](PatternPreviewDialog::Result dialogResult) - lambda captures by value, not this",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\DrumMapping.h",
+          "line": 431,
+          "content": "DrumMapping::getPrimaryCategoryNote(DrumCategory) - returns GM MIDI note for category",
+          "verified": true
+        },
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\PatternLibrary.h",
+          "line": 39,
+          "content": "struct DrumTrack { midiNote, name, category, steps, velocities, gridType } - data for addTrackRow",
+          "verified": true
+        }
+      ],
+      "working_example": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line": 6844,
+        "description": "PatternPreviewDialog::showDialogAsync callback pattern - saves patterns to UserPatternDatabase"
+      }
+    },
+    "design_decision": "Extend existing callback to capture stepSequencer_ and inject patterns after saving to database",
+    "data_flow": {
+      "description": "PatternPreviewDialog::Result -> Conversion -> StepSequencer injection",
+      "steps": [
+        {
+          "step": 1,
+          "action": "User clicks 'Learn & Apply' in PatternPreviewDialog",
+          "result": "Dialog closes with accepted=true, patterns populated"
+        },
+        {
+          "step": 2,
+          "action": "Callback receives PatternPreviewDialog::Result",
+          "result": "dialogResult.patterns contains vector<PatternEntry>"
+        },
+        {
+          "step": 3,
+          "action": "Existing behavior: Save to UserPatternDatabase (unchanged)",
+          "result": "Patterns persisted for future pattern generation"
+        },
+        {
+          "step": 4,
+          "action": "NEW: Apply finalBpm to StepSequencer",
+          "code": "stepSequencer_->setTempo(static_cast<double>(dialogResult.finalBpm));",
+          "result": "Sequencer tempo matches learned pattern"
+        },
+        {
+          "step": 5,
+          "action": "NEW: For each PatternEntry, check if matching row exists",
+          "logic": "Iterate grid rows, match by DrumCategory OR subcategory name",
+          "result": "Categorize entries into 'existing_rows' vs 'new_rows_needed'"
+        },
+        {
+          "step": 6,
+          "action": "NEW: Convert PatternEntry[] to PatternSet for existing rows",
+          "conversion": {
+            "PatternSet.name": "dialogResult.patternName",
+            "PatternSet.genre": "dialogResult.genre.toLowerCase().toStdString()",
+            "PatternSet.isUserPattern": true,
+            "PatternSet.gridSize": "pattern.size() (from first non-empty entry)",
+            "PatternSet.patterns": "map from entry.category -> RhythmicPattern",
+            "PatternSet.subcategoryPatterns": "map from entry.subcategoryName -> SubcategoryPattern"
+          },
+          "result": "PatternSet ready for applyPatternSet()"
+        },
+        {
+          "step": 7,
+          "action": "NEW: Call applyPatternSet(patternSet) for existing rows",
+          "result": "Existing rows updated with new patterns"
+        },
+        {
+          "step": 8,
+          "action": "NEW: For categories not in grid, create DrumTrack and call addTrackRow()",
+          "conversion": {
+            "DrumTrack.midiNote": "DrumMapping::getPrimaryCategoryNote(entry.category)",
+            "DrumTrack.name": "entry.displayName",
+            "DrumTrack.category": "entry.category",
+            "DrumTrack.steps": "entry.pattern (resize to match grid if needed)"
+          },
+          "result": "New rows added for missing categories"
+        }
+      ]
+    },
+    "conversion_function": {
+      "name": "convertResultToPatternSet",
+      "location": "Inline in callback OR new helper function in SampleBrowserPage.cpp",
+      "input": "const PatternPreviewDialog::Result& result",
+      "output": "PatternSet",
+      "implementation": {
+        "pseudocode": [
+          "PatternSet patternSet;",
+          "patternSet.name = result.patternName.toStdString();",
+          "patternSet.genre = result.genre.toLowerCase().toStdString();",
+          "patternSet.isUserPattern = true;",
+          "patternSet.gridSize = 16; // default, update from first pattern",
+          "",
+          "for (const auto& entry : result.patterns) {",
+          "    if (entry.pattern.empty()) continue;",
+          "    if (patternSet.gridSize == 16 && entry.pattern.size() > 0) {",
+          "        patternSet.gridSize = static_cast<int>(entry.pattern.size());",
+          "    }",
+          "    ",
+          "    if (entry.isSubcategory) {",
+          "        SubcategoryPattern subPat;",
+          "        subPat.baseCategory = entry.category;",
+          "        subPat.displayName = entry.displayName;",
+          "        subPat.pattern.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+          "        patternSet.subcategoryPatterns[entry.displayName] = subPat;",
+          "    } else {",
+          "        RhythmicPattern rhyPat;",
+          "        rhyPat.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+          "        patternSet.patterns[entry.category] = rhyPat;",
+          "    }",
+          "}",
+          "return patternSet;"
+        ]
+      }
+    },
+    "injection_flow": {
+      "sequence": [
+        {
+          "order": 1,
+          "method": "stepSequencer_->setTempo(dialogResult.finalBpm)",
+          "purpose": "Sync tempo before applying pattern"
+        },
+        {
+          "order": 2,
+          "method": "Build set of existing categories in grid",
+          "code": [
+            "std::set<DrumCategory> existingCategories;",
+            "for (int r = 0; r < stepSequencer_->getRowCount(); ++r) {",
+            "    existingCategories.insert(stepSequencer_->getRowCategory(r));",
+            "}"
+          ]
+        },
+        {
+          "order": 3,
+          "method": "stepSequencer_->applyPatternSet(patternSet)",
+          "purpose": "Apply patterns to all matching existing rows"
+        },
+        {
+          "order": 4,
+          "method": "For each category NOT in existingCategories, call addTrackRow()",
+          "code": [
+            "for (const auto& entry : dialogResult.patterns) {",
+            "    if (entry.pattern.empty()) continue;",
+            "    if (existingCategories.count(entry.category) == 0) {",
+            "        DrumTrack track;",
+            "        track.midiNote = DrumMapping::getPrimaryCategoryNote(entry.category);",
+            "        track.name = entry.displayName;",
+            "        track.category = entry.category;",
+            "        track.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+            "        stepSequencer_->addTrackRow(track);",
+            "        existingCategories.insert(entry.category);",
+            "    }",
+            "}"
+          ]
+        }
+      ]
+    },
+    "callback_modification": {
+      "current_signature": "[fileName](PatternPreviewDialog::Result dialogResult)",
+      "new_signature": "[this, fileName](PatternPreviewDialog::Result dialogResult)",
+      "reason": "Need to capture 'this' to access stepSequencer_ member",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "line": 6851
+    },
+    "files_to_modify": [
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "changes": [
+          {
+            "line": 6851,
+            "description": "Change callback capture from [fileName] to [this, fileName]",
+            "before": "[fileName](PatternPreviewDialog::Result dialogResult)",
+            "after": "[this, fileName](PatternPreviewDialog::Result dialogResult)"
+          },
+          {
+            "line": "6930 (after existing save confirmation)",
+            "description": "Add step sequencer injection logic after saving to database",
+            "code_block": [
+              "",
+              "// ==== NEW: Inject pattern into StepSequencer ====",
+              "if (stepSequencer_ && savedCount > 0)",
+              "{",
+              "    juce::Logger::writeToLog(\"[SampleBrowserPage] Injecting pattern into StepSequencer\");",
+              "    ",
+              "    // Apply tempo from dialog",
+              "    if (dialogResult.finalBpm > 0.0f)",
+              "    {",
+              "        stepSequencer_->setTempo(static_cast<double>(dialogResult.finalBpm));",
+              "        juce::Logger::writeToLog(\"[SampleBrowserPage]   Set tempo: \" + juce::String(dialogResult.finalBpm, 1) + \" BPM\");",
+              "    }",
+              "    ",
+              "    // Build set of existing categories",
+              "    std::set<DrumCategory> existingCategories;",
+              "    for (int r = 0; r < stepSequencer_->getRowCount(); ++r)",
+              "    {",
+              "        existingCategories.insert(stepSequencer_->getRowCategory(r));",
+              "    }",
+              "    ",
+              "    // Convert Result to PatternSet for applyPatternSet()",
+              "    PatternSet patternSet;",
+              "    patternSet.name = dialogResult.patternName.toStdString();",
+              "    patternSet.genre = genre.toStdString();",
+              "    patternSet.isUserPattern = true;",
+              "    patternSet.gridSize = 16;",
+              "    ",
+              "    for (const auto& entry : dialogResult.patterns)",
+              "    {",
+              "        if (entry.pattern.empty()) continue;",
+              "        ",
+              "        // Update gridSize from first non-empty pattern",
+              "        if (patternSet.gridSize == 16 && !entry.pattern.empty())",
+              "            patternSet.gridSize = static_cast<int>(entry.pattern.size());",
+              "        ",
+              "        if (entry.isSubcategory)",
+              "        {",
+              "            SubcategoryPattern subPat;",
+              "            subPat.baseCategory = entry.category;",
+              "            subPat.displayName = entry.displayName;",
+              "            subPat.pattern.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+              "            patternSet.subcategoryPatterns[entry.displayName] = subPat;",
+              "        }",
+              "        else",
+              "        {",
+              "            RhythmicPattern rhyPat;",
+              "            rhyPat.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+              "            patternSet.patterns[entry.category] = rhyPat;",
+              "        }",
+              "    }",
+              "    ",
+              "    // Apply patterns to existing rows",
+              "    stepSequencer_->applyPatternSet(patternSet);",
+              "    juce::Logger::writeToLog(\"[SampleBrowserPage]   Applied patterns to existing rows\");",
+              "    ",
+              "    // Add rows for categories not in grid",
+              "    int addedRows = 0;",
+              "    for (const auto& entry : dialogResult.patterns)",
+              "    {",
+              "        if (entry.pattern.empty()) continue;",
+              "        if (existingCategories.count(entry.category) == 0)",
+              "        {",
+              "            DrumTrack track;",
+              "            track.midiNote = DrumMapping::getPrimaryCategoryNote(entry.category);",
+              "            track.name = entry.displayName;",
+              "            track.category = entry.category;",
+              "            track.steps.assign(entry.pattern.begin(), entry.pattern.end());",
+              "            stepSequencer_->addTrackRow(track);",
+              "            existingCategories.insert(entry.category);",
+              "            addedRows++;",
+              "            juce::Logger::writeToLog(\"[SampleBrowserPage]   Added new row: \" + entry.displayName);",
+              "        }",
+              "    }",
+              "    ",
+              "    juce::Logger::writeToLog(\"[SampleBrowserPage]   Injection complete. Added \" + juce::String(addedRows) + \" new rows.\");",
+              "}"
+            ]
+          }
+        ]
+      }
+    ],
+    "include_requirements": {
+      "file": "SampleBrowserPage.cpp",
+      "already_included": [
+        "PatternPreviewDialog.h",
+        "StepSequencerComponent.h",
+        "PatternLibraryDialog.h (for PatternSet, SubcategoryPattern)",
+        "DrumMapping.h (for DrumCategory, DrumMapping::getPrimaryCategoryNote)",
+        "PatternLibrary.h (for DrumTrack)",
+        "RhythmicPatterns.h (for RhythmicPattern)"
+      ],
+      "new_includes_needed": [
+        "#include <set> (for std::set<DrumCategory>)"
+      ]
+    },
+    "integration_points_covered": [
+      {
+        "point": "PatternPreviewDialog::Result to PatternSet conversion",
+        "implementation": "Inline conversion in callback body"
+      },
+      {
+        "point": "Tempo sync from dialog finalBpm",
+        "implementation": "stepSequencer_->setTempo() call"
+      },
+      {
+        "point": "Apply to existing rows",
+        "implementation": "stepSequencer_->applyPatternSet()"
+      },
+      {
+        "point": "Add rows for new categories",
+        "implementation": "stepSequencer_->addTrackRow() in loop"
+      },
+      {
+        "point": "Callback capture access to stepSequencer_",
+        "implementation": "Lambda captures [this, fileName]"
+      }
+    ],
+    "juce_patterns_used": [
+      "Lambda capture with [this, ...] for member access",
+      "juce::Logger::writeToLog for comprehensive logging",
+      "std::set for category tracking",
+      "JUCE String to std::string conversion via .toStdString()"
+    ],
+    "thread_safety": {
+      "analysis": "All operations occur on message thread (UI callback)",
+      "safe_operations": [
+        "stepSequencer_->setTempo() - UI thread only",
+        "stepSequencer_->applyPatternSet() - UI thread only",
+        "stepSequencer_->addTrackRow() - UI thread only"
+      ],
+      "concerns": "None - dialog callback runs on message thread"
+    },
+    "risk_mitigations": [
+      {
+        "risk": "Empty pattern vector crash",
+        "mitigation": "Check entry.pattern.empty() before processing"
+      },
+      {
+        "risk": "Null stepSequencer_",
+        "mitigation": "Guard with if (stepSequencer_ && savedCount > 0)"
+      },
+      {
+        "risk": "Invalid BPM from dialog",
+        "mitigation": "Guard with if (dialogResult.finalBpm > 0.0f)"
+      },
+      {
+        "risk": "Duplicate row insertion",
+        "mitigation": "Track existingCategories with std::set, update after addTrackRow"
+      },
+      {
+        "risk": "Grid size mismatch (dialog pattern size != sequencer grid)",
+        "mitigation": "addTrackRow internally handles step copying/truncation (line 3275)"
+      }
+    ],
+    "rollback_plan": {
+      "description": "Single file modification - easy revert",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "git_command": "git checkout HEAD -- src/ui/Pages/SampleBrowserPage.cpp"
+    },
+    "test_plan_alignment": [
+      "Load a drum loop file from browser",
+      "Right-click and select 'Learn Pattern' (existing flow)",
+      "Edit pattern in PatternPreviewDialog, set tempo",
+      "Click 'Save Patterns' (triggers callback)",
+      "VERIFY: StepSequencer tempo matches dialog finalBpm",
+      "VERIFY: Existing rows show learned patterns",
+      "VERIFY: New rows added for categories not in original grid",
+      "VERIFY: Patterns persisted to UserPatternDatabase (existing behavior)"
+    ]
+  }
+}

@@ -1,0 +1,120 @@
+{
+  "session_id": "step25-processing-2026-01-17",
+  "original_request": "Add a new Step 2.5 PROCESSING between Step 2 (Downbeat/Beat Grid) and Step 3 (Slice) in WavePreviewPage with Gate, Expansion, Compression, Limiting, and EQ effects.",
+  "user_modifications": [
+    "PARALLEL COMPRESSION: Add dry/wet blend knob to the compressor for NY compression style",
+    "PRESET SAVE/LOAD: Save/load effect presets (Clean Drums, Punchy Kicks, etc.) in user data folder",
+    "LIVE WAVEFORM VISUALIZATION: Processing changes visible in REAL-TIME on waveform display",
+    "THRESHOLD LINES ON WAVEFORM: Draggable horizontal lines for Gate, Expander, Compressor thresholds",
+    "6-BAND EQ: Low (80Hz), Low-Mid (250Hz), Mid (1kHz), Mid-High (3kHz), High (8kHz), Air (12kHz+)"
+  ],
+  "specification": {
+    "summary": "Step 2.5 PROCESSING - Pre-Slice Audio Effects Chain",
+    "description": "Insert a new workflow step between Tempo (Step 2) and Slice (Step 3) that allows users to apply dynamics and EQ processing to the selected audio region BEFORE slicing. Real-time visual feedback via waveform updates and draggable threshold lines.",
+    "deliverables": [
+      "New WorkflowStep enum value: Step25_Processing",
+      "New step pill button: '2.5 PROCESS' in step navigation tabs",
+      "Processing control panel with 5 effect sections",
+      "Backend processing logic to apply effects to audio buffer",
+      "Live waveform visualization with real-time updates",
+      "Draggable threshold lines on waveform for Gate/Expander/Compressor",
+      "Preset save/load system for effect settings",
+      "Processed audio buffer passed to Step 3 for slicing"
+    ],
+    "effects": {
+      "gate": {
+        "description": "Noise Gate - silences audio below threshold",
+        "parameters": ["threshold (-60 to 0 dB)", "attack (ms)", "release (ms)", "hold (ms)"],
+        "threshold_line": true
+      },
+      "expander": {
+        "description": "Dynamic Expander - reduces gain below threshold",
+        "parameters": ["threshold (-60 to 0 dB)", "ratio (1:1 to 1:10)", "attack (ms)", "release (ms)"],
+        "threshold_line": true,
+        "new_implementation": true
+      },
+      "compressor": {
+        "description": "Dynamic Compressor with parallel/dry-wet blend (NY compression)",
+        "parameters": ["threshold (-60 to 0 dB)", "ratio (1:1 to 20:1)", "attack (ms)", "release (ms)", "makeup gain (dB)", "dry/wet blend (0-100%)"],
+        "threshold_line": true
+      },
+      "limiter": {
+        "description": "Brick-Wall Limiter - hard ceiling",
+        "parameters": ["ceiling (-12 to 0 dBFS)", "release (ms)"],
+        "threshold_line": false
+      },
+      "eq": {
+        "description": "6-Band EQ for tone shaping",
+        "bands": [
+          {"name": "Low", "frequency": "80Hz", "gain_range": "+/- 12dB"},
+          {"name": "Low-Mid", "frequency": "250Hz", "gain_range": "+/- 12dB"},
+          {"name": "Mid", "frequency": "1kHz", "gain_range": "+/- 12dB"},
+          {"name": "Mid-High", "frequency": "3kHz", "gain_range": "+/- 12dB"},
+          {"name": "High", "frequency": "8kHz", "gain_range": "+/- 12dB"},
+          {"name": "Air", "frequency": "12kHz+", "gain_range": "+/- 12dB"}
+        ]
+      }
+    },
+    "audio_flow": [
+      "Step 1 (LENGTH) - User selects region",
+      "Step 2 (TEMPO) - User adjusts beat grid",
+      "Step 2.5 (PROCESSING) - User configures effects, sees real-time waveform updates",
+      "Step 3 (SLICE) - Slicing uses PROCESSED audio buffer"
+    ],
+    "processing_chain_order": ["Gate", "Expander", "Compressor", "Limiter", "EQ"],
+    "ui_requirements": {
+      "effect_modules": "Horizontal strip of 5 effect modules in control panel",
+      "per_module": "Enable/bypass toggle + 2-6 parameter controls",
+      "waveform_overlay": "Draggable threshold lines for Gate, Expander, Compressor",
+      "live_preview": "Waveform redraws in real-time as parameters change",
+      "presets": "Save/Load buttons + preset dropdown selector"
+    },
+    "thread_safety": {
+      "processing_thread": "Background thread for heavy processing",
+      "ui_update": "AsyncUpdater for safe UI thread callbacks",
+      "real_time_preview": "Affects playback in real-time during preview"
+    },
+    "presets": {
+      "storage_location": "User data folder (JUCE getApplicationDir or similar)",
+      "format": "JSON files",
+      "factory_presets": ["Clean Drums", "Punchy Kicks", "Transparent", "Heavy Compression", "Gate Only"],
+      "user_presets": "Allow user to save custom presets"
+    }
+  },
+  "scope": {
+    "files_to_modify": [
+      "src/ui/Pages/WavePreviewPage.h",
+      "src/ui/Pages/WavePreviewPage.cpp",
+      "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.h",
+      "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.cpp"
+    ],
+    "files_to_create": [
+      "src/services/PreSliceProcessingService.h",
+      "src/services/PreSliceProcessingService.cpp",
+      "src/ui/Components/ProcessingStepPanel.h",
+      "src/ui/Components/ProcessingStepPanel.cpp",
+      "src/ui/Components/EffectModule.h",
+      "src/ui/Components/EffectModule.cpp",
+      "src/ui/Components/ThresholdLineOverlay.h",
+      "src/ui/Components/ThresholdLineOverlay.cpp",
+      "src/utils/ProcessingPresetManager.h",
+      "src/utils/ProcessingPresetManager.cpp"
+    ]
+  },
+  "out_of_scope": [
+    "Multi-band compression (single-band only)",
+    "Sidechain processing",
+    "Mid/Side processing",
+    "Undo/redo for processing changes (future feature)"
+  ],
+  "assumptions": [
+    "Processing is applied to the entire selected region (not per-slice)",
+    "Processing is destructive to workflow buffer (original file untouched)",
+    "User can preview processed audio in real-time during playback",
+    "Processing order is fixed: Gate -> Expander -> Compressor -> Limiter -> EQ",
+    "Each effect can be individually bypassed via toggle",
+    "Step 2.5 is optional - user can skip directly to Step 3 if no processing needed"
+  ],
+  "approved": true,
+  "approved_at": "2026-01-17T00:00:00Z"
+}

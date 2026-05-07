@@ -1,0 +1,62 @@
+{
+  "session_id": "step3-slice-bug-001",
+  "bug_title": "Step 3 manual slicing workflow not using Step 2 detected loops",
+  "root_cause": {
+    "summary": "generateSlicePoints() always used beat-grid granularity slicing, ignoring sliceModeAuto_ flag and detected loops from Step 2",
+    "details": [
+      "In Step 2, loops are detected and stored in detectedLoops_ (visual) and currentBeatGrid_.detectedLoops (for processing)",
+      "When transitioning to Step 3 (Sample Slice), generateSlicePoints() is called",
+      "The function ALWAYS generated slices based on beat interval granularity (1 bar, 1/2 bar, 1 beat, etc.)",
+      "Even when sliceModeAuto_ was true (AUTO mode), it never checked this flag",
+      "AUTO mode was supposed to use detected loops as slice points, but this logic was missing"
+    ],
+    "file": "src/ui/Pages/WavePreviewPage.cpp",
+    "function": "generateSlicePoints()",
+    "line": 1784
+  },
+  "fix_applied": {
+    "description": "Added AUTO mode handling to generateSlicePoints() that uses detectedLoops_ as slice points",
+    "changes": [
+      {
+        "file": "src/ui/Pages/WavePreviewPage.cpp",
+        "type": "edit",
+        "description": "Added AUTO mode branch at start of generateSlicePoints() that uses loop boundaries from detectedLoops_ as slice points"
+      },
+      {
+        "file": "src/ui/Pages/WavePreviewPage.cpp",
+        "type": "edit",
+        "description": "Updated AUTO button onClick handler to call generateSlicePoints() instead of just clearing slicePoints_"
+      },
+      {
+        "file": "src/ui/Pages/WavePreviewPage.cpp",
+        "type": "edit",
+        "description": "Added #include <algorithm> for std::sort and std::unique"
+      }
+    ]
+  },
+  "data_flow_diagram": {
+    "step_2": {
+      "action": "User sets BPM and clicks 'Detect Loops'",
+      "storage": ["detectedLoops_ (visual)", "currentBeatGrid_.detectedLoops (processing)"]
+    },
+    "step_3_transition": {
+      "action": "User clicks 'Next: Slice' button",
+      "calls": "transitionToStep3() -> generateSlicePoints()"
+    },
+    "step_3_auto_mode_before_fix": {
+      "behavior": "BROKEN - always used beat-grid granularity, ignoring detected loops"
+    },
+    "step_3_auto_mode_after_fix": {
+      "behavior": "FIXED - uses detectedLoops_ boundaries as slice points in AUTO mode"
+    }
+  },
+  "verification": {
+    "build_status": "SUCCESS",
+    "expected_behavior": [
+      "In Step 2, detect loops from BPM and downbeat settings",
+      "In Step 3 with AUTO mode, slice points should appear at loop boundaries",
+      "In Step 3 with MANUAL mode, slice points use beat-grid granularity as before"
+    ]
+  },
+  "completed_at": "2025-12-10T12:30:00Z"
+}

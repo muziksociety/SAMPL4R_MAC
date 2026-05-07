@@ -1,0 +1,328 @@
+﻿{
+  "session_id": "packaging-data-investigation",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "summary": "Comprehensive investigation of all data files, models, and resources needed for SAMPLAR packaging",
+
+    "ml_models": {
+      "demucs_cpu": {
+        "path": "models/ggml-model-htdemucs-4s-f16.bin",
+        "size_bytes": 83994361,
+        "size_mb": 80.1,
+        "description": "Demucs CPU model (GGML format) for audio source separation",
+        "required": true,
+        "runtime_location": "Next to executable in models/",
+        "code_reference": {
+          "file": "src/services/FullSongService.h",
+          "line": 60,
+          "code": "juce::String modelPath = \"models/ggml-model-htdemucs-4s-f16.bin\";"
+        }
+      },
+      "lars_drum_separation": {
+        "path": "models/drumsep/",
+        "files": [
+          {"name": "my_scripted_module.pt", "size_bytes": 39452731},
+          {"name": "my_scripted_module_cymbals.pt", "size_bytes": 39458135},
+          {"name": "my_scripted_module_hihat.pt", "size_bytes": 39457791},
+          {"name": "my_scripted_module_kick.pt", "size_bytes": 39454329},
+          {"name": "my_scripted_module_snare.pt", "size_bytes": 39457791},
+          {"name": "my_scripted_module_toms.pt", "size_bytes": 39457555}
+        ],
+        "total_size_mb": 226.3,
+        "description": "LibTorch TorchScript models for AI-based drum stem separation",
+        "required": false,
+        "conditional_on": "WITH_LIBTORCH build option",
+        "runtime_location": "models/drumsep/ next to executable OR user AppData/samplar/models/drumsep/",
+        "code_reference": {
+          "file": "src/services/DrumSeparatorService.cpp",
+          "lines": [46, 62],
+          "code_snippet": "getModelsDirectory() checks userApplicationDataDirectory/samplar/models/drumsep OR executable/models/drumsep"
+        }
+      },
+      "onnx_gpu": {
+        "path": "third_party/onnxruntime/models/htdemucs.ort",
+        "size_bytes": 135,
+        "description": "ONNX model for GPU-accelerated separation (currently a placeholder/stub)",
+        "note": "The actual model file appears to be a stub - full model would be much larger",
+        "required": false,
+        "conditional_on": "WITH_ONNX_GPU build option",
+        "code_reference": {
+          "file": "src/services/FullSongService.h",
+          "line": 72,
+          "code": "juce::String onnxModelPath = \"models/htdemucs.ort\";"
+        }
+      }
+    },
+
+    "pattern_databases": {
+      "location": "data/",
+      "runtime_location": "data/ next to executable",
+      "copy_mechanism": "CMakeLists.txt post-build copies data/ to output directory",
+      "files": [
+        {
+          "name": "midi_patterns.json",
+          "size_bytes": 1377562657,
+          "size_mb": 1313.8,
+          "description": "Large MIDI pattern database for pattern generation",
+          "search_order": ["exe/data/midi_patterns.json", "cwd/data/midi_patterns.json", "projectRoot/data/midi_patterns.json"],
+          "code_reference": {
+            "file": "src/utils/MidiPatternDatabase.cpp",
+            "line": 34,
+            "function": "findDatabaseFile()"
+          }
+        },
+        {
+          "name": "patterns_with_rolls.json",
+          "size_bytes": 217941115,
+          "size_mb": 207.8,
+          "description": "Rhythmic patterns with roll/triplet data (version 2.0 format)"
+        },
+        {
+          "name": "patterns_enhanced.json",
+          "size_bytes": 109823339,
+          "size_mb": 104.7,
+          "description": "Enhanced pattern database"
+        },
+        {
+          "name": "patterns_rhythmic.json",
+          "size_bytes": 51451131,
+          "size_mb": 49.1,
+          "description": "Rhythmic pattern database"
+        },
+        {
+          "name": "latin_patterns.json",
+          "size_bytes": 34910,
+          "size_kb": 34.1,
+          "description": "Latin genre-specific patterns"
+        }
+      ],
+      "total_size_mb": 1675.4,
+      "note": "midi_patterns.json alone is 1.3GB - consider compression or lazy loading for distribution"
+    },
+
+    "embedded_binary_resources": {
+      "description": "Files embedded via JUCE juce_add_binary_data in CMakeLists.txt",
+      "always_included": true,
+      "files": [
+        {"name": "backdrop.png", "size_bytes": 2891604, "path": "backdrop.png"},
+        {"name": "loading_spritesheet.png", "size_bytes": 2092903, "path": "loading_spritesheet.png"},
+        {"name": "CAMPO_optimized.gif", "size_bytes": 5962573, "path": "BACKGROUNDS/CAMPO_optimized.gif"},
+        {"name": "LAVA_optimized.gif", "size_bytes": 12626241, "path": "BACKGROUNDS/LAVA_optimized.gif"},
+        {"name": "TILESET.png", "size_bytes": 23029447, "path": "BACKGROUNDS/TILESET.png"}
+      ],
+      "game_assets": {
+        "description": "Snake, Flappy Bird, and Space Shooter mini-game assets",
+        "path": "assets/",
+        "subfolders": ["gamesnake/", "flappy/", "shooter/"],
+        "total_size_estimate_kb": 100
+      },
+      "total_embedded_size_mb": 42.7,
+      "code_reference": {
+        "file": "CMakeLists.txt",
+        "lines": [751, 825]
+      }
+    },
+
+    "runtime_dlls": {
+      "openblas": {
+        "source": "third_party/openblas/bin/libopenblas.dll",
+        "size_bytes": 51076488,
+        "size_mb": 48.7,
+        "description": "OpenBLAS for fast BLAS operations in demucs CLI",
+        "required": true,
+        "copy_destination": "Next to executable"
+      },
+      "onnxruntime_gpu": {
+        "files": [
+          {"name": "onnxruntime.dll", "size_bytes": 12134432, "size_mb": 11.6},
+          {"name": "onnxruntime_providers_cuda.dll", "size_bytes": 540289080, "size_mb": 515.3},
+          {"name": "onnxruntime_providers_shared.dll", "size_bytes": 22088, "size_kb": 21.6}
+        ],
+        "total_size_mb": 527.0,
+        "description": "ONNX Runtime with CUDA support for GPU acceleration",
+        "required": false,
+        "conditional_on": "WITH_ONNX_GPU build option and NVIDIA GPU"
+      },
+      "libtorch": {
+        "source": "third_party/libtorch/",
+        "description": "LibTorch DLLs for LARS drum separation",
+        "required": false,
+        "conditional_on": "WITH_LIBTORCH build option",
+        "note": "CMakeLists.txt copies all DLLs from libtorch/lib/*.dll to output"
+      }
+    },
+
+    "cli_executables": {
+      "demucs_cpu": {
+        "built_as": "demucs_mt.cpp.main",
+        "renamed_to": "demucs_mt_openblas.exe",
+        "description": "Multi-threaded CPU demucs CLI",
+        "required": true,
+        "code_reference": {
+          "file": "CMakeLists.txt",
+          "lines": [577, 610]
+        }
+      },
+      "demucs_onnx_gpu": {
+        "source": "third_party/onnxruntime/bin/demucs_onnx.exe",
+        "description": "ONNX GPU-accelerated demucs CLI",
+        "required": false,
+        "conditional_on": "WITH_ONNX_GPU build option",
+        "note": "Provides 10-15x speedup with NVIDIA CUDA"
+      }
+    },
+
+    "python_bridge": {
+      "path": "python_bridge/",
+      "files": [
+        {"name": "demucs_separator.py", "size_bytes": 12195},
+        {"name": "result.json", "size_bytes": 281}
+      ],
+      "description": "Python IPC bridge for optional Python-based demucs (fallback)",
+      "required": false,
+      "copy_destination": "python_bridge/ next to executable"
+    },
+
+    "application_icon": {
+      "path": "plugins/REF.png",
+      "size_bytes": 2481357,
+      "size_mb": 2.4,
+      "description": "Application icon referenced in CMakeLists.txt for ICON_BIG/ICON_SMALL"
+    },
+
+    "user_data_paths": {
+      "description": "Paths where user data is stored (NOT bundled with app)",
+      "base_directory": {
+        "windows": "%APPDATA%/Samplar/",
+        "mac": "~/Library/Application Support/Samplar/",
+        "linux": "~/.config/Samplar/",
+        "code": "juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory).getChildFile(\"Samplar\")"
+      },
+      "files": [
+        {
+          "name": "license_cache.json",
+          "description": "Encrypted license cache",
+          "code_reference": {
+            "file": "src/security/LicenseCache.cpp",
+            "line": 16,
+            "code": "constexpr auto kCacheFilename = \"license_cache.json\";"
+          }
+        },
+        {
+          "name": "license_failures.json",
+          "description": "License attempt lockout tracking",
+          "code_reference": {
+            "file": "src/security/LicenseCache.cpp",
+            "line": 17
+          }
+        },
+        {
+          "name": "user_patterns.json",
+          "description": "User-learned drum patterns",
+          "code_reference": {
+            "file": "src/utils/UserPatternDatabase.cpp",
+            "line": 459,
+            "code": "return appDir.getChildFile(DB_FILENAME);"
+          }
+        },
+        {
+          "name": "custom_categories.json",
+          "description": "User-defined drum categories",
+          "code_reference": {
+            "file": "src/utils/CustomCategoryManager.cpp",
+            "line": 222
+          }
+        },
+        {
+          "name": "ml_training_data.json",
+          "description": "ML classifier training samples",
+          "code_reference": {
+            "file": "src/utils/ml/TrainingDataStore.cpp",
+            "line": 316
+          }
+        },
+        {
+          "name": "drum_ml_model.json",
+          "description": "Trained ML classifier model",
+          "code_reference": {
+            "file": "src/utils/ml/DrumMLClassifier.cpp",
+            "line": 582
+          }
+        }
+      ],
+      "note": "These files are created at runtime and should NOT be bundled with the installer"
+    },
+
+    "environment_variable_overrides": {
+      "SAMPLAR_CACHE_DIR_OVERRIDE": {
+        "description": "Override license cache directory",
+        "code_reference": {
+          "file": "src/security/LicenseCache.cpp",
+          "line": 247,
+          "code": "auto overridePath = juce::SystemStats::getEnvironmentVariable(\"SAMPLAR_CACHE_DIR_OVERRIDE\", {});"
+        }
+      }
+    },
+
+    "path_resolution_patterns": {
+      "model_files": {
+        "primary": "Next to executable (currentExecutableFile.getParentDirectory())",
+        "fallback": "User AppData directory (userApplicationDataDirectory)",
+        "search_order": ["exe/models/", "appdata/samplar/models/"]
+      },
+      "pattern_databases": {
+        "primary": "Next to executable in data/",
+        "fallback": "Current working directory",
+        "tertiary": "Project root (by finding CMakeLists.txt)",
+        "code_reference": {
+          "file": "src/utils/MidiPatternDatabase.cpp",
+          "function": "findDatabaseFile()",
+          "lines": [34, 68]
+        }
+      }
+    },
+
+    "size_summary": {
+      "total_models_mb": 306.4,
+      "total_pattern_data_mb": 1675.4,
+      "total_embedded_resources_mb": 42.7,
+      "total_runtime_dlls_mb": 575.7,
+      "total_application_size_estimate_mb": 2600.2,
+      "notes": [
+        "midi_patterns.json (1.3GB) is the largest file - consider compression or optional download",
+        "ONNX GPU DLLs (527MB) are optional and only needed for NVIDIA GPU users",
+        "LARS models (226MB) are optional and require LibTorch build",
+        "Core application without optional GPU features: ~1800MB"
+      ]
+    },
+
+    "packaging_recommendations": {
+      "required_files": [
+        "SAMPLAR.exe (main application)",
+        "demucs_mt_openblas.exe (CPU separation CLI)",
+        "libopenblas.dll (BLAS library)",
+        "models/ggml-model-htdemucs-4s-f16.bin (CPU separation model)",
+        "data/ folder with all pattern JSON files",
+        "python_bridge/ folder (optional fallback)"
+      ],
+      "optional_gpu_bundle": [
+        "demucs_onnx.exe",
+        "onnxruntime.dll",
+        "onnxruntime_providers_cuda.dll",
+        "onnxruntime_providers_shared.dll",
+        "models/htdemucs.ort (if real model available)"
+      ],
+      "optional_lars_bundle": [
+        "models/drumsep/*.pt files",
+        "LibTorch DLLs"
+      ],
+      "considerations": [
+        "Large pattern files could be split into separate optional download",
+        "GPU acceleration could be a separate installer component",
+        "LARS drum separation could be a premium add-on"
+      ]
+    }
+  }
+}

@@ -1,0 +1,19 @@
+{
+  "session_id": "4eb53c0f",
+  "task": "Fix 3 critical Populate/Classification bugs: Bug#1 - Populate stops working when ANY row is locked (should continue populating unlocked rows). Bug#2 - EQ Divider classification needs aggressive frequency filtering - hihats shouldn't have low/mid frequencies, kicks shouldn't have high frequencies. Need to reorganize misclassified samples. Bug#3 - Add ADSR envelope detection to classification - each drum type has expected attack/decay characteristics (kicks=fast attack long decay, hihats=fast attack fast decay, etc). Impacts on hihats makes no sense - need envelope-based filtering to prevent wrong classifications.",
+  "enhanced_task": "",
+  "started": "2025-12-07T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

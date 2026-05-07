@@ -1,0 +1,79 @@
+# SAMPLAR Release Linter — Intentional Orphan Events Allowlist
+#
+# Format: one topic name per line. Lines starting with # are comments.
+#
+# SAMPLAR uses a hybrid architecture: EventBus for fan-out notifications AND
+# direct service API calls for commands. Some topics are therefore legitimately
+# "orphaned" in one direction:
+#
+#   - SUBSCRIBED-ONLY: services listen defensively for a command topic
+#     even though production code calls them via direct service API. The
+#     subscription is a fallback hook for future use.
+#
+#   - PUBLISHED-ONLY: notification events whose listeners have been
+#     removed but the publish site kept, or whose listeners register
+#     dynamically at runtime (not visible to static analysis).
+#
+# Triaged 2026-04-10 via release_linter check #4.
+#
+# ---------------------------------------------------------------------------
+# SUBSCRIBED-ONLY: license / command topics. LicenseSystemService listens
+# for these, but production code calls the service directly via App.cpp
+# and SAMPLARAudioProcessor wiring.
+# ---------------------------------------------------------------------------
+license.activate
+license.validate
+license.check_feature
+
+# SUBSCRIBED-ONLY: startup signal. Historically published from App.cpp; the
+# publish site was refactored out but LicenseSystemService still listens
+# defensively.
+app.startup
+
+# SUBSCRIBED-ONLY: processing pipeline topics. MainWindow listens, but the
+# processing coordinator uses direct callbacks to UI (onProgress lambdas)
+# rather than going through the bus.
+processing.progress
+processing.result
+processing.viz
+
+# SUBSCRIBED-ONLY: variation UI state topics. The engine dropdown and
+# progress bar listen, but current publishers use direct setters.
+sm5.variation.engine.changed.ui
+sm5.variation.progress
+sm5.variation.ready
+
+# ---------------------------------------------------------------------------
+# PUBLISHED-ONLY: chat notifications. Chat UI listens dynamically at runtime
+# via subscribe() calls that happen inside UI construction — not always
+# visible to static scan when UI is conditionally built.
+# ---------------------------------------------------------------------------
+chat.messages
+chat.presence
+chat.status
+
+# PUBLISHED-ONLY: drum library mutation notification. The library browser
+# rebuilds on this; subscription happens in browser construction.
+drumLibrary.changed
+
+# PUBLISHED-ONLY: license status broadcasts. Status dialog listens when
+# opened; when closed there's no subscriber, so this shows as orphaned.
+license.activation_result
+license.feature_result
+license.validation_result
+
+# PUBLISHED-ONLY: MIDI learn "waiting for input" signal. The learn overlay
+# subscribes only while the user is actively mapping; at linter scan time
+# no subscriber exists.
+midi.learn.waiting
+smode.midi.learn.waiting
+
+# PUBLISHED-ONLY: variation workflow topics. Published to notify a future
+# listener chain; current UI uses direct callbacks.
+sm5.variation.engine.changed
+sm5.variation.requested
+
+# One-way notification topics; no subscriber exists by design (observers opt in future).
+smode.redo.applied
+smode.undo.applied
+variation.settings.changed

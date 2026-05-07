@@ -1,0 +1,272 @@
+﻿{
+  "session_id": "step25-processing-2026-01-17",
+  "investigation_summary": "Complete investigation of WavePreviewPage workflow, existing DSP processors, waveform drawing, overlay patterns, and preset storage",
+  "gathered_at": "2026-01-17",
+
+  "findings": [
+    {
+      "category": "workflow_state_machine",
+      "finding": "WorkflowStep enum definition and current workflow",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.h",
+      "line": "21-26",
+      "code": "enum class WorkflowStep {\n    Step1_SelectLength,\n    Step2_DownbeatLoops,\n    Step3_SampleSlice\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed enum exists at lines 21-26",
+      "relevance": "Need to add Step25_Processing between Step2 and Step3"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "Step pill buttons for navigation tabs",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.h",
+      "line": "172-174",
+      "code": "juce::TextButton stepPill1_ { \"1 LENGTH\" };\njuce::TextButton stepPill2_ { \"2 TEMPO\" };\njuce::TextButton stepPill3_ { \"3 SLICE\" };",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed pills at lines 172-174",
+      "relevance": "Need to add stepPill25_ for '2.5 PROCESS' tab"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "Step pill positioning in resized()",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "444-446",
+      "code": "stepPill1_.setBounds(pillStartX, pillY, pillWidth, pillHeight);\nstepPill2_.setBounds(pillStartX + pillWidth + pillGap, pillY, pillWidth, pillHeight);\nstepPill3_.setBounds(pillStartX + (pillWidth + pillGap) * 2, pillY, pillWidth, pillHeight);",
+      "verified": true,
+      "verification_method": "Read file at offset 400, confirmed positioning at lines 444-446",
+      "relevance": "Need to adjust pill layout to fit 4 pills (with smaller widths)"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "transitionToStep2() implementation pattern",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "2561-2631",
+      "code": "void WavePreviewPage::transitionToStep2() {\n    if (currentStep_ != WorkflowStep::Step1_SelectLength)\n        return;\n    // Lock selection, transition, auto-zoom, tooltip, updateWorkflowState()\n}",
+      "verified": true,
+      "verification_method": "Read file at offset 2550, confirmed transition pattern",
+      "relevance": "Follow same pattern for transitionToStep25() and transitionToStep3FromStep25()"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "transitionToStep3() with analysis gate",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "2720-2755",
+      "code": "void WavePreviewPage::transitionToStep3() {\n    if (currentStep_ != WorkflowStep::Step2_DownbeatLoops)\n        return;\n    // GATE: Block transition until both analyses are complete\n    if (!tempoDetectionComplete_ || !spectralColorsReady_) {\n        return;\n    }\n    currentStep_ = WorkflowStep::Step3_SampleSlice;\n    generateSlicePoints();\n    updateWorkflowState();\n}",
+      "verified": true,
+      "verification_method": "Read file at offset 2700, confirmed transition with gate at lines 2720-2755",
+      "relevance": "Step25 should transition FROM Step2 (not use Step2's analysis gate)"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "updateStepPills() color handling",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "3089-3149",
+      "code": "switch (currentStep_) {\n    case WorkflowStep::Step1_SelectLength:\n        stepPill1_.setColour(...activeColor);\n        stepPill2_.setColour(...disabledColor);\n        stepPill3_.setColour(...disabledColor);\n    // etc for Step2, Step3\n}",
+      "verified": true,
+      "verification_method": "Read file via grep, confirmed updateStepPills pattern",
+      "relevance": "Need to add Step25 case with proper coloring for all 4 pills"
+    },
+    {
+      "category": "workflow_state_machine",
+      "finding": "Control panel bounds and instruction box",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "448-451",
+      "code": "auto instructionArea = bounds.removeFromTop(instructionBoxHeight);\ninstructionArea = instructionArea.reduced(margin, 5);\ninstructionBoxBounds_ = instructionArea;",
+      "verified": true,
+      "verification_method": "Read file at offset 400, confirmed instruction box bounds",
+      "relevance": "Step 2.5 controls go inside instructionBoxBounds_ area"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "EffectProcessor base class interface",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "line": "11-32",
+      "code": "class EffectProcessor {\npublic:\n    virtual void prepare(const juce::dsp::ProcessSpec& spec) = 0;\n    virtual void process(juce::AudioBuffer<float>& buffer) = 0;\n    virtual void reset() = 0;\n    virtual void setEnabled(bool enabled);\n    virtual bool getEnabled() const;\n    virtual void setParameter(const juce::String& paramId, float value) = 0;\n    virtual float getParameter(const juce::String& paramId) const = 0;\nprotected:\n    bool isEnabled = false;\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed interface at lines 11-32",
+      "relevance": "ExpanderProcessor must implement this interface"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "CompressorProcessor implementation - REUSABLE",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "line": "35-51",
+      "code": "class CompressorProcessor : public EffectProcessor {\nprivate:\n    juce::dsp::Compressor<float> compressor;\n    float threshold = -12.0f;\n    float ratio = 4.0f;\n    float attack = 10.0f;\n    float release = 100.0f;\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed at lines 35-51",
+      "relevance": "Compressor EXISTS - need to add dry/wet blend for NY compression"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "CompressorProcessor process() - needs dry/wet enhancement",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.cpp",
+      "line": "17-23",
+      "code": "void CompressorProcessor::process(juce::AudioBuffer<float>& buffer) {\n    if (!isEnabled) return;\n    juce::dsp::AudioBlock<float> block(buffer);\n    juce::dsp::ProcessContextReplacing<float> context(block);\n    compressor.process(context);\n}",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed at lines 17-23",
+      "relevance": "Need to modify to add dry/wet parallel compression blend"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "EQ6Processor - 6-band EQ already exists!",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "line": "77-105",
+      "code": "class EQ6Processor : public EffectProcessor {\nprivate:\n    juce::dsp::ProcessorChain<juce::dsp::IIR::Filter<float>, // Low shelf\n                              juce::dsp::IIR::Filter<float>, // Low-mid peak\n                              juce::dsp::IIR::Filter<float>, // Mid1 peak\n                              juce::dsp::IIR::Filter<float>, // Mid2 peak\n                              juce::dsp::IIR::Filter<float>, // High-mid peak\n                              juce::dsp::IIR::Filter<float>> filterChain; // High shelf\n    float lowGain = 0.0f;\n    float lowMidGain = 0.0f, lowMidFreq = 250.0f, lowMidQ = 1.0f;\n    // etc\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed EQ6 at lines 77-105",
+      "relevance": "6-band EQ ALREADY EXISTS - just need to modify frequencies"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "LimiterProcessor - REUSABLE",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "line": "108-124",
+      "code": "class LimiterProcessor : public EffectProcessor {\nprivate:\n    juce::dsp::Limiter<float> limiter;\n    float ceiling = -0.1f;     // dBFS threshold\n    float release = 10.0f;     // ms\n    float outputGainDb = 0.0f; // Makeup gain in dB\n    bool autoGain = true;      // Auto gain compensation\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed at lines 108-124",
+      "relevance": "Limiter EXISTS - can reuse directly"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "NoiseGateProcessor - exists but basic implementation",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "line": "472-492",
+      "code": "class NoiseGateProcessor : public EffectProcessor {\nprivate:\n    float threshold = 0.3f;\n    float reduction = 2.0f;\n    float preservation = 0.1f;\n    float frequencyFocus = 1.5f;\n    float gateState = 1.0f;\n    float attackCoeff = 0.1f;\n    float releaseCoeff = 0.999f;\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed at lines 472-492",
+      "relevance": "Gate EXISTS but needs attack/release/hold enhancement"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "NoiseGateProcessor process() - simple threshold check",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.cpp",
+      "line": "2055-2071",
+      "code": "void NoiseGateProcessor::process(juce::AudioBuffer<float>& buffer) {\n    if (!isEnabled) return;\n    for (int channel = 0; channel < buffer.getNumChannels(); ++channel) {\n        auto* channelData = buffer.getWritePointer(channel);\n        for (int sample = 0; sample < buffer.getNumSamples(); ++sample) {\n            float absInput = std::abs(channelData[sample]);\n            if (absInput < threshold) {\n                float reductionFactor = 1.0f - (reduction - 1.0f) / 2.0f;\n                channelData[sample] *= std::max(reductionFactor, preservation);\n            }\n        }\n    }\n}",
+      "verified": true,
+      "verification_method": "Read file at offset 2050, confirmed at lines 2055-2071",
+      "relevance": "Gate implementation is basic - needs proper attack/release envelope"
+    },
+    {
+      "category": "dsp_processors",
+      "finding": "EXPANDER DOES NOT EXIST - must implement new",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\WaveEditor\\sm4port\\DynamicEffectsProcessor.h",
+      "verified": true,
+      "verification_method": "Grep for Expander returned no matches",
+      "relevance": "ExpanderProcessor must be created from scratch"
+    },
+    {
+      "category": "waveform_drawing",
+      "finding": "drawSpectralWaveform() - pixel-by-pixel waveform drawing",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "3945-3974",
+      "code": "void WavePreviewPage::drawSpectralWaveform(juce::Graphics& g, juce::Rectangle<int> area,\n                                            double startTime, double endTime) {\n    const int width = area.getWidth();\n    const double duration = endTime - startTime;\n    const double secondsPerPixel = duration / width;\n    for (int x = 0; x < width; ++x) {\n        double sliceStart = startTime + x * secondsPerPixel;\n        juce::Colour col = getSpectralColorForTime(sliceStart);\n        juce::Rectangle<int> sliceArea(area.getX() + x, area.getY(), 1, area.getHeight());\n        g.setColour(col.withAlpha(0.9f));\n        thumbnail_.drawChannel(g, sliceArea, sliceStart, sliceEnd, 0, 1.0f);\n    }\n}",
+      "verified": true,
+      "verification_method": "Read file at offset 3940, confirmed at lines 3945-3974",
+      "relevance": "For live waveform visualization, need to redraw processed buffer similar to this pattern"
+    },
+    {
+      "category": "waveform_drawing",
+      "finding": "waveformBounds_ stores waveform display area",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "558-559",
+      "code": "auto waveArea = bounds.reduced(margin, 4);\nwaveformBounds_ = waveArea;",
+      "verified": true,
+      "verification_method": "Read file at offset 400, confirmed at lines 558-559",
+      "relevance": "Threshold lines must be drawn relative to waveformBounds_"
+    },
+    {
+      "category": "overlay_patterns",
+      "finding": "BeatGridOverlay - transparent overlay pattern for waveform",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\BeatGridOverlay.h",
+      "line": "22-177",
+      "code": "class BeatGridOverlay : public juce::Component {\npublic:\n    void setBeatGrid(const BeatGridInfo& beatGrid);\n    void setVisibleRange(double startSeconds, double endSeconds);\n    void setZoomController(WaveformZoomController* controller);\n    int timeToX(double timeSeconds) const;\n    double xToTime(int x) const;\n    void paint(juce::Graphics& g) override;\n    void mouseDown(const juce::MouseEvent& e) override;\n    void mouseDrag(const juce::MouseEvent& e) override;\nprivate:\n    bool isDraggingGrid_ = false;\n    bool isHoveringGridLine_ = false;\n};",
+      "verified": true,
+      "verification_method": "Read file directly, confirmed overlay pattern",
+      "relevance": "PERFECT PATTERN for ThresholdLineOverlay - transparent component over waveform with draggable lines"
+    },
+    {
+      "category": "overlay_patterns",
+      "finding": "BeatGridOverlay positioning matches waveform",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\WavePreviewPage.cpp",
+      "line": "566-570",
+      "code": "if (beatGridOverlay_) {\n    beatGridOverlay_->setBounds(waveArea);\n    beatGridOverlay_->toFront(false);\n}",
+      "verified": true,
+      "verification_method": "Read file at offset 400, confirmed at lines 566-570",
+      "relevance": "ThresholdLineOverlay follows same pattern - setBounds(waveArea) then toFront()"
+    },
+    {
+      "category": "preset_storage",
+      "finding": "User data folder pattern for settings",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\TooltipOverlay.cpp",
+      "line": "356-357",
+      "code": "auto appData = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory);\nreturn appData.getChildFile(\"Samplar\").getChildFile(\"tooltip_settings.json\");",
+      "verified": true,
+      "verification_method": "Grep found userApplicationDataDirectory pattern",
+      "relevance": "Use same pattern: Samplar/processing_presets.json"
+    },
+    {
+      "category": "preset_storage",
+      "finding": "JSON serialization pattern from UserPatternDatabase",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\UserPatternDatabase.h",
+      "line": "82-123",
+      "code": "juce::var toJson() const {\n    auto obj = new juce::DynamicObject();\n    obj->setProperty(\"id\", id);\n    obj->setProperty(\"name\", name);\n    // etc\n    return juce::var(obj);\n}\nstatic UserPattern fromJson(const juce::var& json) {\n    UserPattern p;\n    p.id = json.getProperty(\"id\", p.id).toString();\n    // etc\n    return p;\n}",
+      "verified": true,
+      "verification_method": "Read UserPatternDatabase.h directly",
+      "relevance": "ProcessingPreset should use same toJson()/fromJson() pattern"
+    },
+    {
+      "category": "preset_storage",
+      "finding": "Save/load file pattern from CustomCategoryManager",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\CustomCategoryManager.cpp",
+      "line": "238-259",
+      "code": "juce::String json = juce::JSON::toString(rootVar, true);\nif (getConfigFile().replaceWithText(json)) {\n    // success\n}\nauto json = file.loadFileAsString();\nauto parsed = juce::JSON::parse(json);",
+      "verified": true,
+      "verification_method": "Grep found JSON save/load pattern",
+      "relevance": "ProcessingPresetManager uses same save/load file pattern"
+    }
+  ],
+
+  "existing_processors_summary": {
+    "gate": {
+      "exists": true,
+      "class": "NoiseGateProcessor",
+      "location": "DynamicEffectsProcessor.h:472-492",
+      "needs_enhancement": "Add proper attack/release/hold envelope parameters",
+      "parameters": ["threshold", "reduction", "preservation", "frequencyFocus"]
+    },
+    "expander": {
+      "exists": false,
+      "needs_implementation": true,
+      "design_notes": "Similar to compressor but expands below threshold instead of compressing above"
+    },
+    "compressor": {
+      "exists": true,
+      "class": "CompressorProcessor",
+      "location": "DynamicEffectsProcessor.h:35-51",
+      "needs_enhancement": "Add dry/wet blend for NY parallel compression",
+      "parameters": ["threshold", "ratio", "attack", "release"]
+    },
+    "limiter": {
+      "exists": true,
+      "class": "LimiterProcessor",
+      "location": "DynamicEffectsProcessor.h:108-124",
+      "needs_enhancement": "None - ready to use",
+      "parameters": ["ceiling", "release", "gain", "auto_gain"]
+    },
+    "eq": {
+      "exists": true,
+      "class": "EQ6Processor",
+      "location": "DynamicEffectsProcessor.h:77-105",
+      "needs_enhancement": "Adjust frequencies to match spec (80Hz, 250Hz, 1kHz, 3kHz, 8kHz, 12kHz)",
+      "parameters": ["low_gain", "low_mid_gain", "low_mid_freq", "low_mid_q", "mid1_gain", "mid1_freq", "mid1_q", "mid2_gain", "mid2_freq", "mid2_q", "high_mid_gain", "high_mid_freq", "high_mid_q", "high_gain"]
+    }
+  },
+
+  "key_patterns_discovered": {
+    "workflow_transition": "Check current step -> validation -> update currentStep_ -> update UI state -> updateWorkflowState()",
+    "step_pill_layout": "Pills positioned horizontally, updateStepPills() handles coloring based on currentStep_",
+    "overlay_on_waveform": "Create Component, setBounds(waveArea), toFront(false), implement paint() with drawing",
+    "draggable_elements": "mouseDown/mouseDrag/mouseUp with hit testing, calculate new value from drag distance",
+    "preset_storage": "userApplicationDataDirectory/Samplar/filename.json with toJson()/fromJson() pattern"
+  },
+
+  "evidence_verified": true
+}

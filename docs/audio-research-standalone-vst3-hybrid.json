@@ -1,0 +1,581 @@
+{
+  "session_id": "standalone-vst3-hybrid",
+  "agent": "audio-research",
+  "created_at": "2026-03-14T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "research_question": "How to convert SAMPLAR JUCE standalone app to hybrid standalone+VST3 plugin while preserving all standalone functionality, covering AudioSource adapter, AudioDeviceManager, MIDI, UI sizing, state, multi-out buses, thread safety, real examples, and risk areas.",
+    "search_strategy": {
+      "sources_searched": [
+        "JUCE official forums (forum.juce.com)",
+        "JUCE official docs (docs.juce.com)",
+        "JUCE GitHub source (juce-framework/JUCE)",
+        "JUCE CMake API docs",
+        "DeepWiki JUCE plugin system",
+        "KVR Audio DSP forum",
+        "Medium technical articles",
+        "Steinberg VST3 developer portal"
+      ],
+      "keywords": [
+        "AudioSource AudioProcessor adapter processBlock getNextAudioBlock",
+        "StandaloneFilterWindow AudioDeviceManager getDeviceManager",
+        "JUCE standalone VST3 MIDI device selection",
+        "VST3 editor resizable large UI multipage",
+        "getStateInformation file path samples state serialization",
+        "isBusesLayoutSupported multi-output stereo pairs drum",
+        "JUCE standalone plugin thread safety host processBlock",
+        "FORMATS Standalone VST3 CMake dual build",
+        "standalone VST3 conversion pitfalls file access message thread timer"
+      ],
+      "date_range": "2020-2026, prioritized 2023-2026"
+    },
+    "findings": [
+      {
+        "id": 1,
+        "title": "AudioSource to AudioProcessor Adapter Pattern",
+        "topic": "Wrapping AudioTransportSource chain inside processBlock",
+        "quality": "High (JUCE official docs + forum consensus)",
+        "summary": "The bridge between AudioSource and AudioProcessor is a thin adapter built directly inside processBlock. AudioSourceChannelInfo wraps the AudioBuffer, then the top of the AudioSource chain is called via getNextAudioBlock(). This is the standard pattern confirmed by multiple JUCE forum threads and the official AudioTransportSource docs.",
+        "canonical_pattern": {
+          "description": "Inside AudioProcessor::processBlock(), construct AudioSourceChannelInfo pointing at the output buffer, then call your top-level AudioSource chain.",
+          "pseudocode": [
+            "void processBlock(AudioBuffer<float>& buffer, MidiBuffer& midi) {",
+            "    // Bridge: AudioProcessor buffer -> AudioSourceChannelInfo",
+            "    AudioSourceChannelInfo info(&buffer, 0, buffer.getNumSamples());",
+            "    transportSource.getNextAudioBlock(info);",
+            "    // Any post-chain processing operates on 'buffer' directly",
+            "}"
+          ],
+          "notes": [
+            "AudioTransportSource -> SoundTouchSource -> ProcessingAudioSource chain: call getNextAudioBlock on the LAST source in the chain (the source that owns the others as input sources). The chain pulls upstream automatically.",
+            "prepareToPlay() in AudioProcessor maps 1:1 to AudioSource::prepareToPlay(samplesPerBlock, sampleRate).",
+            "releaseResources() maps 1:1 to AudioSource::releaseResources().",
+            "AudioSourceChannelInfo.startSample is always 0 when called from processBlock since you fill the entire block.",
+            "The startSample field in getNextAudioBlock is for internal use by JUCE host apps. In processBlock you always pass 0."
+          ]
+        },
+        "applicability": "DIRECT - SAMPLAR's AudioTransportSource -> SoundTouchSource -> ProcessingAudioSource can be called from processBlock with exactly this wrapper.",
+        "computational_cost": "Negligible adapter overhead",
+        "references": [
+          "https://forum.juce.com/t/audiotransportsource-and-audioprocessor-solved/9988",
+          "https://forum.juce.com/t/behind-the-scenes-of-processblock-and-getnextaudioblock/30694",
+          "https://forum.juce.com/t/need-some-clarification-on-playing-an-audio-file-and-using-processblock-audioblocks-audiosourcechannelinfo-and-getnextaudioblock/38786"
+        ]
+      },
+      {
+        "id": 2,
+        "title": "AudioDeviceManager in Standalone Mode Within Plugin Architecture",
+        "topic": "StandalonePluginHolder owns the AudioDeviceManager; accessing it from code",
+        "quality": "High (JUCE source code confirmed)",
+        "summary": "When JUCE builds a standalone target from an AudioProcessor, it wraps everything in StandalonePluginHolder (owned by StandaloneFilterWindow). StandalonePluginHolder creates an AudioDeviceManager and an AudioProcessorPlayer. The window exposes it via getDeviceManager() which returns pluginHolder->deviceManager. Users get full device selection UI via the built-in Options menu (AudioDeviceSelectorComponent). Nothing special needs to be coded for this - it is free with the Standalone FORMATS build.",
+        "key_facts": [
+          "StandalonePluginHolder::deviceManager is the real AudioDeviceManager in standalone mode.",
+          "StandaloneFilterWindow::getDeviceManager() returns a reference to it.",
+          "In plugin (VST3/AU) mode there is NO AudioDeviceManager - the host owns the audio hardware.",
+          "To conditionally show an audio settings panel only in standalone: use #if JucePlugin_Build_Standalone == 0 guard, or check StandalonePluginHolder::getInstance() != nullptr at runtime.",
+          "StandalonePluginHolder::getInstance() returns nullptr when running as a hosted plugin.",
+          "Audio device settings are persisted by StandalonePluginHolder to a PropertiesFile automatically."
+        ],
+        "access_pattern": {
+          "description": "Access the device manager safely from inside your AudioProcessorEditor or AudioProcessor",
+          "pseudocode": [
+            "if (auto* holder = StandalonePluginHolder::getInstance())",
+            "{",
+            "    AudioDeviceManager& dm = holder->deviceManager;",
+            "    // Show AudioDeviceSelectorComponent or query device info",
+            "}"
+          ]
+        },
+        "references": [
+          "https://docs.juce.com/master/classStandalonePluginHolder.html",
+          "https://github.com/juce-framework/JUCE/blob/master/modules/juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h",
+          "https://forum.juce.com/t/how-to-get-access-to-an-instance-of-audiodevicemanager-when-running-as-a-standalone-plugin/41746"
+        ]
+      },
+      {
+        "id": 3,
+        "title": "MIDI in Standalone Mode",
+        "topic": "MIDI device selection and routing via StandalonePluginHolder",
+        "quality": "High (JUCE source confirmed)",
+        "summary": "StandaloneFilterWindow constructor accepts an autoOpenMidiDevices parameter (false by default on desktop). StandalonePluginHolder's AudioDeviceManager handles MIDI input routing. The same AudioDeviceSelectorComponent shown for audio also shows MIDI inputs. MIDI events flow into the AudioProcessor::processBlock MidiBuffer automatically via AudioProcessorPlayer. No special code needed for basic MIDI support in standalone mode.",
+        "key_facts": [
+          "MIDI events in standalone mode arrive via AudioProcessorPlayer -> processBlock MidiBuffer, same as in a DAW.",
+          "setAutoOpenMidiDevices(true) on AudioDeviceManager will open all available MIDI inputs automatically.",
+          "The standalone Options menu's AudioDeviceSelectorComponent includes MIDI device checkboxes.",
+          "In VST3/hosted mode MIDI arrives from the host through the standard processBlock MidiBuffer - no change needed.",
+          "MidiInputCallback registration is not needed if using the AudioProcessorPlayer/StandalonePluginHolder path."
+        ],
+        "references": [
+          "https://github.com/juce-framework/JUCE/blob/master/modules/juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h",
+          "https://forum.juce.com/t/standalone-app-and-audiomidisettings-and-audiodevicemanager/26557"
+        ]
+      },
+      {
+        "id": 4,
+        "title": "UI Size and Flexibility - Plugin Editor at 800x600+",
+        "topic": "VST3 editor size, resizability, multipage UI",
+        "quality": "High (forum consensus + known bugs documented)",
+        "summary": "JUCE AudioProcessorEditor supports arbitrary sizes including 800x600 and larger. Resizability requires setResizable(true, true) plus setResizeLimits(). VST3 hosts generally respect editor size, but there are known bugs with calling setSize() dynamically after initial load in some hosts. Large multipage UIs work fine as plugin editors - the editor is just a Component embedded in a host window. The standalone wrapper adds a native window frame automatically.",
+        "key_facts": [
+          "Call setSize(width, height) in AudioProcessorEditor constructor to set initial size - this is mandatory.",
+          "For resizable editors: setResizable(true, true) + setResizeLimits(minW, minH, maxW, maxH) + implement resized().",
+          "setResizable(true, false) (user-draggable but no resizer widget) also works in VST3.",
+          "Known bug: calling setSize() from within the editor AFTER construction causes positioning issues in VST3 in Ableton Live. Set size only in constructor.",
+          "Host window expands to fit the editor size. 800x600 is normal. 1200x900 is used by commercial plugins.",
+          "Multipage UI: use TabbedComponent or custom page-switching - it is just Components, no plugin-specific constraints.",
+          "Menu bar: JUCEApplication::getInstance()->setMenuBar() works only in standalone. In plugin mode use a custom Component-based menu or PopupMenu. MenuBarModel is not automatically shown in hosted plugins.",
+          "Standalone JUCE window includes a native menu bar via StandaloneFilterWindow. Plugin editors do not get an OS menu bar.",
+          "Scaling: some DAWs scale the plugin editor. Use getDesktopScaleFactor() and apply transforms if needed.",
+          "ComponentBoundsConstrainer: add as a child member of AudioProcessorEditor and pass to setConstrainer() to enforce aspect ratio during resize."
+        ],
+        "known_issues": [
+          "VST3 in Cubase 14 clips editors taller than screen height - design with scrolling or scalable layouts.",
+          "Some hosts force the editor to fit in their plugin window - design min size carefully.",
+          "setResizable(true, false) does not work in VST2/AU but works in VST3 - test per format.",
+          "Ableton Live VST3: do not call setSize() from inside any button callbacks or timers after construction."
+        ],
+        "references": [
+          "https://forum.juce.com/t/resizable-plugin-how-to/45043",
+          "https://forum.juce.com/t/gui-resize-vst3-vs-vst2/45458",
+          "https://forum.juce.com/t/bug-with-calling-editor-setsize-in-vst3/67246/1",
+          "https://forum.juce.com/t/best-way-to-implement-resizable-plugin/12644"
+        ]
+      },
+      {
+        "id": 5,
+        "title": "State Save/Restore - getStateInformation / setStateInformation",
+        "topic": "Preset recall, file paths for samples, ValueTree serialization",
+        "quality": "High (JUCE tutorial + forum)",
+        "summary": "getStateInformation() is called by the host to snapshot plugin state into a MemoryBlock (typically XML or binary ValueTree). setStateInformation() restores it. For sample-based plugins, file paths are a critical concern: absolute paths break when the project moves machines. Best practice is to store paths relative to a well-known root (project folder or user documents) and resolve at load time. APVTS (AudioProcessorValueTreeState) is the modern recommended state container.",
+        "key_facts": [
+          "getStateInformation and setStateInformation are called from the message thread in VST3 (JUCE enforces this with JUCE_ASSERT_MESSAGE_THREAD).",
+          "In standalone mode these are called on whatever thread saves/loads settings - still usually message thread.",
+          "Use AudioProcessorValueTreeState (APVTS) for parameters - it handles getStateInformation/setStateInformation automatically via copyState()/replaceState().",
+          "For sample file paths: store them as String in a ValueTree child element. Do NOT hardcode to absolute paths.",
+          "Recommended path strategy: store relative to File::getSpecialLocation(File::userDocumentsDirectory) or project file location. Resolve on setStateInformation.",
+          "For SAMPLAR use case: store the loaded sample path as a relative or absolute string. On setStateInformation, attempt to reload the file, show a missing-file warning if not found.",
+          "Standalone settings (audio device config) are stored separately by StandalonePluginHolder in a PropertiesFile - not in getStateInformation.",
+          "State size limit: VST3 has no hard limit but keep state compact. File paths as strings are fine.",
+          "Version your state XML with a 'version' attribute to handle future migrations."
+        ],
+        "recommended_pattern": {
+          "description": "ValueTree-based state with APVTS for parameters plus custom nodes for file paths",
+          "pseudocode": [
+            "void getStateInformation(MemoryBlock& dest) {",
+            "    auto state = apvts.copyState();",
+            "    // Add sample file path as a child",
+            "    ValueTree sampleNode('SampleFile');",
+            "    sampleNode.setProperty('path', currentSamplePath, nullptr);",
+            "    state.appendChild(sampleNode, nullptr);",
+            "    std::unique_ptr<XmlElement> xml(state.createXml());",
+            "    copyXmlToBinary(*xml, dest);",
+            "}",
+            "void setStateInformation(const void* data, int sizeInBytes) {",
+            "    auto xml = getXmlFromBinary(data, sizeInBytes);",
+            "    if (xml) {",
+            "        auto state = ValueTree::fromXml(*xml);",
+            "        apvts.replaceState(state);",
+            "        // Restore file path",
+            "        if (auto* sampleNode = state.getChildWithName('SampleFile'))",
+            "            loadSampleFile(sampleNode.getProperty('path').toString());",
+            "    }",
+            "}"
+          ]
+        },
+        "references": [
+          "https://juce.com/tutorials/tutorial_audio_processor_value_tree_state/",
+          "https://forum.juce.com/t/getstateinformation-where-is-path-to-file/48760",
+          "https://forum.juce.com/t/when-to-use-getstateinformation-setstateinformation/47520"
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Multi-Output Bus Configuration",
+        "topic": "8 stereo pairs for individual drum outputs in VST3",
+        "quality": "High (JUCE official tutorial + forum examples)",
+        "summary": "JUCE's bus system allows configuring optional additional output buses. For 8 stereo drum outs, add 8 output buses in the AudioProcessor constructor and override isBusesLayoutSupported() to accept layouts with 1 main stereo out (for simple hosts) or 8 stereo outs (for multi-out hosts). The plugin is passive - the host enables buses and the plugin either accepts or rejects the proposed layout.",
+        "constructor_pattern": {
+          "description": "Add buses in AudioProcessor constructor via BusesProperties",
+          "pseudocode": [
+            "MyProcessor() : AudioProcessor(",
+            "    BusesProperties()",
+            "        .withOutput('Main Out',   AudioChannelSet::stereo(), true)",
+            "        .withOutput('Drum 1',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 2',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 3',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 4',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 5',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 6',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 7',     AudioChannelSet::stereo(), false)",
+            "        .withOutput('Drum 8',     AudioChannelSet::stereo(), false)",
+            ") {}"
+          ]
+        },
+        "layout_support_pattern": {
+          "pseudocode": [
+            "bool isBusesLayoutSupported(const BusesLayout& layouts) const override {",
+            "    int numOuts = layouts.outputBuses.size();",
+            "    // Accept 1 (main only) or 9 (main + 8 individual) output buses",
+            "    if (numOuts != 1 && numOuts != 9) return false;",
+            "    for (auto& bus : layouts.outputBuses)",
+            "        if (bus != AudioChannelSet::stereo()) return false;",
+            "    return true;",
+            "}"
+          ]
+        },
+        "processblock_routing": {
+          "notes": [
+            "getBusBuffer(buffer, false, 0) returns the main stereo output buffer slice.",
+            "getBusBuffer(buffer, false, 1) through getBusBuffer(buffer, false, 8) return individual drum bus slices.",
+            "In processBlock, fill main bus always; fill individual buses only when getChannelCountOfBus(false, N) > 0."
+          ]
+        },
+        "key_facts": [
+          "Buses marked false (disabled by default) will not be activated unless the host explicitly enables them.",
+          "Not all DAWs support multi-out VST3 (Ableton Live has limited multi-out VST3 support as of 2024).",
+          "Reaper, Cubase, Logic Pro (AU), Bitwig support multi-out VST3 well.",
+          "In standalone mode, extra output buses map to additional output channels on the audio device. StandalonePluginHolder routes them automatically."
+        ],
+        "references": [
+          "https://juce.com/tutorials/tutorial_audio_bus_layouts/",
+          "https://forum.juce.com/t/getting-multiple-buses-working-for-au-and-vst3/60078",
+          "https://forum.juce.com/t/bus-layout-for-2-stereo-outs/23323",
+          "https://forum.juce.com/t/multibus-api-advice-on-stereo-or-multichannel-synth/20863"
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Thread Safety - Standalone vs Host Audio Thread",
+        "topic": "What breaks when the host controls the audio thread",
+        "quality": "High (JUCE forum + Steinberg VST3 portal confirmed)",
+        "summary": "The audio thread model is identical between standalone and hosted modes - processBlock is always called on a dedicated real-time thread. What CHANGES is who manages it. In standalone mode AudioDeviceManager/AudioProcessorPlayer own the audio thread. In hosted VST3 the DAW owns it. The same real-time rules apply in both cases. The critical new risks are: (1) prepareToPlay may be called from a non-audio thread in some hosts, (2) getStateInformation must be called from the message thread (enforced by JUCE for VST3), (3) there is no AudioDeviceManager in hosted mode so any code referencing it must be guarded.",
+        "thread_model_table": {
+          "standalone": {
+            "audio_thread_owner": "AudioDeviceManager -> AudioProcessorPlayer -> calls processBlock",
+            "message_thread": "JUCE MessageManager (standard)",
+            "prepareToPlay_thread": "Called on audio thread typically",
+            "getStateInformation_thread": "Message thread (PropertiesFile save)"
+          },
+          "hosted_vst3": {
+            "audio_thread_owner": "DAW host - calls processBlock directly",
+            "message_thread": "Host's main thread (JUCE maps it)",
+            "prepareToPlay_thread": "May be called from ANY host thread - ThreadSanitizer races reported",
+            "getStateInformation_thread": "Message thread (JUCE asserts this for VST3)"
+          }
+        },
+        "what_breaks": [
+          "Any code that calls AudioDeviceManager methods inside processor/editor - DeviceManager does not exist in hosted mode. Guard with StandalonePluginHolder::getInstance() check.",
+          "Any code that assumes prepareToPlay is called on the audio thread - it may not be in some hosts. Use atomic flags and avoid race conditions.",
+          "Timers started in the processor - MessageManager-based timers (juce::Timer) require the message loop to be pumping. In some hosts this is fine; in others with aggressive threading it may stall. Prefer juce::HighResolutionTimer for processing-critical timing.",
+          "File I/O inside processBlock - forbidden in both modes but standalone apps sometimes get away with it. Hosted plugins will cause priority inversion and audio dropouts.",
+          "Memory allocation inside processBlock - same as above. Pre-allocate all buffers.",
+          "JUCEApplication::getInstance() - returns nullptr when running as a hosted plugin. Any code referencing the application singleton will crash.",
+          "AlertWindow, NativeMessageBox, FileChooser from audio thread - will deadlock in hosted mode. Move all UI dialogs to message thread callbacks.",
+          "SystemAudioVolume - not accessible from plugins.",
+          "Sending messages from processor to controller during process call - VST3 spec prohibits this. Use AudioProcessorValueTreeState listeners instead."
+        ],
+        "safe_patterns": [
+          "Use std::atomic<float> for all parameter values read in processBlock.",
+          "Use FIFO queues (AbstractFifo) for audio-to-UI communication.",
+          "Use AsyncUpdater::triggerAsyncUpdate() to schedule UI refreshes from processBlock.",
+          "Guard all AudioDeviceManager access with: if (auto* h = StandalonePluginHolder::getInstance())",
+          "Guard all JUCEApplication access with: if (auto* app = JUCEApplication::getInstance())"
+        ],
+        "references": [
+          "https://forum.juce.com/t/preparetoplay-and-processblock-thread-safety/32193",
+          "https://forum.juce.com/t/audioparameter-thread-safety/21097",
+          "https://forum.juce.com/t/how-to-get-access-to-an-instance-of-audiodevicemanager-when-running-as-a-standalone-plugin/41746",
+          "https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Processing.html"
+        ]
+      },
+      {
+        "id": 8,
+        "title": "Real Examples of Hybrid Standalone + VST3 Apps",
+        "topic": "Open source JUCE projects shipping both formats from one AudioProcessor",
+        "quality": "High (JUCE official examples confirmed)",
+        "summary": "JUCE's own CMake AudioPlugin example is the canonical reference. Any JUCE CMake plugin project that lists FORMATS Standalone VST3 automatically builds both targets from the same AudioProcessor. Hundreds of commercial and open source plugins do this. The architecture is straightforward - there is truly one AudioProcessor class, and JUCE's build system wraps it appropriately for each format.",
+        "official_example": {
+          "location": "JUCE/examples/CMake/AudioPlugin/CMakeLists.txt",
+          "url": "https://github.com/juce-framework/JUCE/blob/master/examples/CMake/AudioPlugin/CMakeLists.txt",
+          "cmake_snippet": [
+            "juce_add_plugin(AudioPluginExample",
+            "    FORMATS AU VST3 Standalone",
+            "    ...)",
+            "# This single call generates three build targets:",
+            "# AudioPluginExample_Standalone (exe)",
+            "# AudioPluginExample_VST3 (.vst3)",
+            "# AudioPluginExample_AU (.component, macOS only)"
+          ]
+        },
+        "open_source_references": [
+          {
+            "name": "JUCE AudioPlugin CMake example",
+            "url": "https://github.com/juce-framework/JUCE/tree/master/examples/CMake/AudioPlugin",
+            "notes": "Official reference - Standalone + VST3 + AU from one AudioProcessor"
+          },
+          {
+            "name": "Melatonin JUCE CMake guide",
+            "url": "https://melatonin.dev/blog/how-to-use-cmake-with-juce/",
+            "notes": "Practical guide showing dual Standalone/VST3 build setup"
+          }
+        ],
+        "conditional_compilation": {
+          "description": "Use these preprocessor defines to write format-specific code",
+          "defines": [
+            "JucePlugin_Build_Standalone  // 1 when building standalone target",
+            "JucePlugin_Build_VST3        // 1 when building VST3 target"
+          ],
+          "runtime_check": [
+            "// Preferred runtime check (no recompile needed):",
+            "bool isStandalone = (StandalonePluginHolder::getInstance() != nullptr);"
+          ]
+        },
+        "references": [
+          "https://github.com/juce-framework/JUCE/blob/master/examples/CMake/AudioPlugin/CMakeLists.txt",
+          "https://forum.juce.com/t/standalone-vs-vst-defs/33298",
+          "https://thewolfsound.com/how-to-build-audio-plugin-with-juce-cpp-framework-cmake-and-unit-tests/"
+        ]
+      },
+      {
+        "id": 9,
+        "title": "Risk Areas - What Commonly Breaks",
+        "topic": "Full risk catalogue for standalone-to-plugin conversion",
+        "quality": "High (synthesized from multiple forum threads and VST3 spec)",
+        "risks": [
+          {
+            "area": "AudioDeviceManager references",
+            "severity": "CRITICAL",
+            "description": "Any code calling AudioDeviceManager directly will crash when hosted. Guard ALL references with StandalonePluginHolder::getInstance() != nullptr.",
+            "fix": "Wrap in isStandalone check. Provide a no-op path for hosted mode."
+          },
+          {
+            "area": "JUCEApplication singleton",
+            "severity": "CRITICAL",
+            "description": "JUCEApplication::getInstance() returns nullptr in hosted plugins. Calls to getApplicationName(), quit(), etc. will crash.",
+            "fix": "Replace all JUCEApplication calls with alternatives (e.g., SystemStats::getJUCEVersion() for version strings)."
+          },
+          {
+            "area": "File I/O and file choosers on audio thread",
+            "severity": "CRITICAL",
+            "description": "Any FileChooser or file access inside processBlock or callbacks invoked synchronously from processBlock will deadlock or cause xruns in hosted mode.",
+            "fix": "Move all file operations to message thread. Use triggerAsyncUpdate() to schedule from processBlock."
+          },
+          {
+            "area": "Menu bar",
+            "severity": "HIGH",
+            "description": "MenuBarModel/setMenuBar() does not work inside a plugin editor. The OS menu bar is owned by the host.",
+            "fix": "Implement a custom in-editor menu Component. In standalone mode only, attempt to set a menu bar on the StandaloneFilterWindow."
+          },
+          {
+            "area": "Window title and icon",
+            "severity": "LOW",
+            "description": "TopLevelWindow::getTopLevelComponent() in hosted mode returns the host window, not SAMPLAR's window.",
+            "fix": "Do not rely on window title/icon in hosted mode."
+          },
+          {
+            "area": "Sample file paths in state",
+            "severity": "HIGH",
+            "description": "Absolute paths serialized in getStateInformation break on other machines and when projects are shared.",
+            "fix": "Store paths as relative-to-documents or relative-to-project. Resolve at load time. Show missing-file UI if not found."
+          },
+          {
+            "area": "prepareToPlay thread assumptions",
+            "severity": "MEDIUM",
+            "description": "Some DAW hosts call prepareToPlay from a thread that is not the audio thread and not the message thread. Data initialized in prepareToPlay and read in processBlock can race.",
+            "fix": "Use std::atomic or ensure prepareToPlay initializations are complete before processBlock starts (use a flag like isInitialized.store(true, std::memory_order_release))."
+          },
+          {
+            "area": "Timer and animation in editor",
+            "severity": "MEDIUM",
+            "description": "juce::Timer requires MessageManager to be pumping. In some sandboxed or restricted hosts, the message loop may have different behavior. Component-based timers generally work, but be cautious with high-frequency timers in plugin mode.",
+            "fix": "Keep timer callbacks lightweight. Test in Reaper, Ableton, Cubase. Use startTimerHz(30) rather than very fast timers."
+          },
+          {
+            "area": "VST3 editor lifecycle (multiple create/destroy cycles)",
+            "severity": "HIGH",
+            "description": "In VST3, createEditor() and the editor destructor may be called multiple times during a session as the user opens/closes the plugin window. Standalone creates the editor once. Any state stored exclusively in the editor (not in the processor) is lost when the editor is destroyed.",
+            "fix": "Store ALL meaningful state in the AudioProcessor, not in AudioProcessorEditor. The editor is a view only. On editor construction, read from processor state."
+          },
+          {
+            "area": "Python bridge / external process",
+            "severity": "HIGH",
+            "description": "SAMPLAR's Python bridge launches a subprocess (for ML processing). In hosted VST3 on Windows, the working directory and PATH are the host's, not SAMPLAR's install directory. Process launch may fail silently.",
+            "fix": "Use absolute paths for subprocess executable (store the plugin bundle path via File::getSpecialLocation or from the processor constructor via PluginHostType). Test subprocess launch in all target DAWs."
+          },
+          {
+            "area": "Demucs CLI subprocess",
+            "severity": "HIGH",
+            "description": "Same as Python bridge - subprocess paths and temp file locations must be resolved against the plugin's actual install location, not the working directory.",
+            "fix": "Resolve paths against File::getSpecialLocation(File::currentApplicationFile).getParentDirectory() at runtime."
+          },
+          {
+            "area": "Single instance assumptions",
+            "severity": "MEDIUM",
+            "description": "Standalone apps are a single instance. In a DAW, users can instantiate multiple copies of SAMPLAR simultaneously. Any global/static shared state (file caches, GPU resources, license checks) must be reference-counted or instance-local.",
+            "fix": "Audit all static/global variables. Move to instance members or add reference counting."
+          },
+          {
+            "area": "VST3 editor setSize() after construction",
+            "severity": "MEDIUM",
+            "description": "Calling setSize() dynamically from within the editor (e.g., in response to a button) causes visual glitches in Ableton Live VST3.",
+            "fix": "Set final size in AudioProcessorEditor constructor only. For resizable editors, rely on setResizeLimits and the host's resize handle."
+          }
+        ]
+      }
+    ],
+    "recommended_approach": "Use JUCE's built-in dual-format CMake build (FORMATS Standalone VST3). The AudioProcessor is the single source of truth. The AudioSource chain (AudioTransportSource -> SoundTouchSource -> ProcessingAudioSource) bridges to processBlock via a thin AudioSourceChannelInfo adapter. The editor is rebuilt as a plain AudioProcessorEditor Component - same UI code, just wrapped properly. All state lives in the processor using APVTS + custom ValueTree nodes. All AudioDeviceManager and JUCEApplication references are guarded by StandalonePluginHolder::getInstance() runtime checks. Subprocess (Python/Demucs) paths are resolved against the plugin's install location at construction time.",
+    "implementation_roadmap": [
+      {
+        "step": 1,
+        "title": "Convert to AudioProcessor architecture",
+        "description": "Create SamplarAudioProcessor : public AudioProcessor. Move all audio state (transport, SoundTouch chain, buffer management) into the processor. Implement prepareToPlay, processBlock (with AudioSourceChannelInfo bridge), releaseResources.",
+        "estimated_effort": "3-5 days"
+      },
+      {
+        "step": 2,
+        "title": "Update CMakeLists.txt",
+        "description": "Change juce_add_gui_app to juce_add_plugin with FORMATS Standalone VST3. Set IS_SYNTH, NEEDS_MIDI_INPUT, NEEDS_MIDI_OUTPUT flags as needed. Add PLUGIN_MANUFACTURER_CODE, PLUGIN_CODE, VST3_CATEGORIES.",
+        "estimated_effort": "0.5 days"
+      },
+      {
+        "step": 3,
+        "title": "Wrap UI as AudioProcessorEditor",
+        "description": "Create SamplarAudioProcessorEditor : public AudioProcessorEditor. Move existing MainWindow content into the editor Component. Remove menu bar from editor (move to standalone-only conditional code). Set size in constructor. Implement createEditor() in processor.",
+        "estimated_effort": "2-3 days"
+      },
+      {
+        "step": 4,
+        "title": "Implement getStateInformation / setStateInformation",
+        "description": "Use APVTS for parameters. Add custom ValueTree child nodes for sample file paths. Version the state XML. Handle missing files gracefully in setStateInformation.",
+        "estimated_effort": "1-2 days"
+      },
+      {
+        "step": 5,
+        "title": "Guard all standalone-only code",
+        "description": "Audit every reference to AudioDeviceManager, JUCEApplication, SystemAudioVolume, and subprocess launch paths. Wrap with isStandalone check. Test in plugin mode.",
+        "estimated_effort": "1-2 days"
+      },
+      {
+        "step": 6,
+        "title": "Add multi-out bus configuration (optional)",
+        "description": "Add output buses in AudioProcessor constructor. Implement isBusesLayoutSupported(). Add getBusBuffer routing in processBlock.",
+        "estimated_effort": "1 day"
+      },
+      {
+        "step": 7,
+        "title": "Fix subprocess path resolution",
+        "description": "Replace all relative subprocess paths with absolute paths resolved from File::getSpecialLocation(File::currentApplicationFile) or a stored install-time path.",
+        "estimated_effort": "0.5-1 day"
+      },
+      {
+        "step": 8,
+        "title": "Test in multiple hosts",
+        "description": "Test in JUCE Plugin Host (reference), Reaper, Ableton Live, Cubase. Verify editor open/close cycles, state save/restore, multi-out routing, MIDI, device selection in standalone.",
+        "estimated_effort": "2-3 days"
+      }
+    ],
+    "potential_pitfalls": [
+      "Do NOT store any meaningful state in AudioProcessorEditor - it will be destroyed and recreated by hosts.",
+      "Do NOT call JUCEApplication::getInstance() without a null check - it returns nullptr in hosted mode.",
+      "Do NOT use absolute file paths in getStateInformation - they break on other machines.",
+      "Do NOT call setSize() on the editor after construction in VST3 - causes Ableton Live glitches.",
+      "Do NOT access AudioDeviceManager without guarding with StandalonePluginHolder::getInstance() check.",
+      "DO test the editor open/destroy/reopen cycle - this is the most common VST3-specific bug.",
+      "DO resolve subprocess executable paths against the plugin binary location, not the working directory.",
+      "DO audit all static/global variables for multi-instance safety.",
+      "DO implement getEditorStateInformation/setEditorStateInformation if you want editor-only state (zoom level, page selection) to persist separately from processor state."
+    ],
+    "references": {
+      "official_juce": [
+        {
+          "title": "JUCE CMake AudioPlugin Example",
+          "url": "https://github.com/juce-framework/JUCE/blob/master/examples/CMake/AudioPlugin/CMakeLists.txt"
+        },
+        {
+          "title": "JUCE StandalonePluginHolder Class Reference",
+          "url": "https://docs.juce.com/master/classStandalonePluginHolder.html"
+        },
+        {
+          "title": "JUCE StandaloneFilterWindow Source",
+          "url": "https://github.com/juce-framework/JUCE/blob/master/modules/juce_audio_plugin_client/Standalone/juce_StandaloneFilterWindow.h"
+        },
+        {
+          "title": "JUCE AudioProcessor Class Reference",
+          "url": "https://docs.juce.com/master/classAudioProcessor.html"
+        },
+        {
+          "title": "JUCE AudioDeviceManager Class Reference",
+          "url": "https://docs.juce.com/master/classAudioDeviceManager.html"
+        },
+        {
+          "title": "JUCE Tutorial: Saving and Loading Plugin State (APVTS)",
+          "url": "https://juce.com/tutorials/tutorial_audio_processor_value_tree_state/"
+        },
+        {
+          "title": "JUCE Tutorial: Configuring Audio Bus Layouts",
+          "url": "https://juce.com/tutorials/tutorial_audio_bus_layouts/"
+        }
+      ],
+      "juce_forum": [
+        {
+          "title": "AudioTransportSource and AudioProcessor [solved]",
+          "url": "https://forum.juce.com/t/audiotransportsource-and-audioprocessor-solved/9988"
+        },
+        {
+          "title": "Behind the scenes of processBlock() and getNextAudioBlock()",
+          "url": "https://forum.juce.com/t/behind-the-scenes-of-processblock-and-getnextaudioblock/30694"
+        },
+        {
+          "title": "AudioSource vs AudioProcessor",
+          "url": "https://forum.juce.com/t/audiosource-vs-audioprocessor/62362"
+        },
+        {
+          "title": "How to get access to AudioDeviceManager in Standalone Plugin",
+          "url": "https://forum.juce.com/t/how-to-get-access-to-an-instance-of-audiodevicemanager-when-running-as-a-standalone-plugin/41746"
+        },
+        {
+          "title": "Getting multiple buses working for AU and VST3",
+          "url": "https://forum.juce.com/t/getting-multiple-buses-working-for-au-and-vst3/60078"
+        },
+        {
+          "title": "Resizable Plugin - how to?",
+          "url": "https://forum.juce.com/t/resizable-plugin-how-to/45043"
+        },
+        {
+          "title": "Bug with calling Editor setSize() in VST3",
+          "url": "https://forum.juce.com/t/bug-with-calling-editor-setsize-in-vst3/67246/1"
+        },
+        {
+          "title": "prepareToPlay and processBlock thread-safety",
+          "url": "https://forum.juce.com/t/preparetoplay-and-processblock-thread-safety/32193"
+        },
+        {
+          "title": "getStateInformation - where is path to file?",
+          "url": "https://forum.juce.com/t/getstateinformation-where-is-path-to-file/48760"
+        },
+        {
+          "title": "Standalone vs VST defs",
+          "url": "https://forum.juce.com/t/standalone-vs-vst-defs/33298"
+        }
+      ],
+      "external": [
+        {
+          "title": "Steinberg VST3 Developer Portal - Processing FAQ",
+          "url": "https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Processing.html"
+        },
+        {
+          "title": "How To Build An Audio Plugin With JUCE CMake (WolfSound 2023)",
+          "url": "https://thewolfsound.com/how-to-build-audio-plugin-with-juce-cpp-framework-cmake-and-unit-tests/"
+        },
+        {
+          "title": "How to use CMake with JUCE (Melatonin)",
+          "url": "https://melatonin.dev/blog/how-to-use-cmake-with-juce/"
+        },
+        {
+          "title": "JUCE Audio Plugin System (DeepWiki)",
+          "url": "https://deepwiki.com/juce-framework/JUCE/4.1-audio-plugin-system"
+        }
+      ]
+    }
+  }
+}

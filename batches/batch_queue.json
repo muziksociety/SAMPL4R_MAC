@@ -1,0 +1,13 @@
+{
+  "schema_version": "1.0",
+  "created": "2026-02-14T17:28:00Z",
+  "batches": {},
+  "settings": {
+    "default_concurrent_separation": 2,
+    "default_concurrent_processing": 3,
+    "default_confidence_threshold": 0.85,
+    "default_engines": ["FastSimpleVariation", "CreativeVariationEngine"],
+    "default_variations": 5,
+    "cleanup_completed_after_days": 7
+  }
+}

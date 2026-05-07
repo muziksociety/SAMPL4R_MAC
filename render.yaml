@@ -1,0 +1,10 @@
+services:
+  - type: web
+    name: sample-monsta-license-server
+    env: python
+    plan: starter
+    region: oregon
+    buildCommand: pip install -r license_server/requirements.txt
+    startCommand: uvicorn license_server.app:app --host 0.0.0.0 --port $PORT
+    autoDeploy: true
+

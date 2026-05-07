@@ -1,0 +1,30 @@
+{
+  "session_id": "20251206_024708",
+  "task": "Investigate and fix crash on EQ processing completion - Signal 11 SIGSEGV",
+  "enhanced_task": "",
+  "started": "2025-12-06T02:47:08Z",
+  "status": "in_progress",
+  "current_phase": "investigation",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "in_progress" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5",
+  "crash_context": {
+    "signal": 11,
+    "type": "SIGSEGV",
+    "location": "After EQ Step FINAL log, before EQ async callback COMPLETED log",
+    "pattern": "Crash on different thread (audio) while message thread between log statements",
+    "fixes_tried": [
+      "THREAD-SAFE v3 audio teardown with sync delays",
+      "Thread-local AudioFormatManager for EQ background thread",
+      "Eliminated nested callAsync to avoid dangling this pointer"
+    ]
+  }
+}

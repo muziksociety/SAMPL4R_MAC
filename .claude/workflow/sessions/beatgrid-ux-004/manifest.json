@@ -1,0 +1,19 @@
+{
+  "session_id": "beatgrid-ux-004",
+  "task": "Fix 5 beat grid UX issues: 1) Mouse scroll zoom only affects grid overlay, not the actual waveform thumbnail - need to zoom both together. 2) Downbeat marker (red draggable) is out of sync with the downbeat grid lines from BeatGridOverlay. 3) BPM slider input still shows decimals - should round to whole numbers. 4) AUTO button doesn't auto-adjust grid to track - should trigger downbeat detection. 5) Zoom slider should snap to measure values (4/8/16/32 beats per view) instead of continuous zoom.",
+  "enhanced_task": "",
+  "started": "2025-12-08T13:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

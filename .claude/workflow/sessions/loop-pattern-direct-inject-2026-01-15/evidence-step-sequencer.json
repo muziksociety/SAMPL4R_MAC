@@ -1,0 +1,219 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-15T00:30:00Z",
+  "status": "complete",
+  "investigation_focus": "StepSequencer pattern application and row management",
+  "data": {
+    "step_sequencer_location": {
+      "header": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+      "implementation": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+      "namespace": "sm5",
+      "class_name": "StepSequencerComponent"
+    },
+    "finding_1_applyPatternSet": {
+      "question": "How does applyPatternSet() work? What parameters does it take?",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 2963,
+        "declaration_file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+        "declaration_line": 421
+      },
+      "signature": "void applyPatternSet(const PatternSet& patternSet)",
+      "behavior": [
+        "Updates currentGenreName_ and selectedGenreGuide_ from patternSet.genre",
+        "Updates genreButton_ text display",
+        "Resizes grid to match patternSet.getStepCount() if needed (calculates bars = ceiling(steps/16), clamped 1-4)",
+        "Iterates through existing grid rows",
+        "For each row: first tries to match subcategory patterns by row name (case-insensitive partial match)",
+        "If no subcategory match: matches base category using rowCategory_[row] vs patternSet.patterns map",
+        "Copies pattern.steps[0..N] to grid_[row][0..N]",
+        "Clears any roll/ratchet data for modified rows",
+        "Calls regenerateMidiFile() after all patterns applied",
+        "Calls repaint() and onPatternChanged callback"
+      ],
+      "important_note": "Does NOT create new rows - only applies patterns to EXISTING rows based on category match",
+      "code_snippet": "void StepSequencerComponent::applyPatternSet(const PatternSet& patternSet)\n{\n    juce::Logger::writeToLog(\"[StepSequencer] === APPLY PATTERN SET ===\");\n    // ... updates genre, resizes grid, then:\n    for (int row = 0; row < numRows; ++row) {\n        DrumCategory rowCat = getRowCategory(row);\n        // First try subcategory match by name\n        // Then try base category match\n        auto it = patternSet.patterns.find(rowCat);\n        if (it != patternSet.patterns.end() && !it->second.steps.empty()) {\n            // Apply steps\n            for (int step = 0; step < numSteps; ++step) {\n                grid_[row][step] = pattern.steps[step];\n            }\n        }\n    }\n    regenerateMidiFile();\n    repaint();\n    if (onPatternChanged) onPatternChanged();\n}"
+    },
+    "finding_2_addTrackRow": {
+      "question": "How are rows added dynamically to StepSequencer?",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 3267,
+        "declaration_file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+        "declaration_line": 239
+      },
+      "signature": "void addTrackRow(const DrumTrack& track)",
+      "behavior": [
+        "Creates a new row with step count matching existing grid (or cfg_.steps if empty)",
+        "Copies track.steps[0..min(16,steps)] to new row (DrumTrack internally has 16 steps)",
+        "Pushes to grid_, rowFiles_, rowLocked_, rowSoloed_, rowPatternRole_, rowCategory_, rowMidiNote_, stepRollData_",
+        "Adds track.name to cfg_.rowNames",
+        "Increments cfg_.rows",
+        "Creates and adds ChannelGenerateButton [G] for the new row",
+        "Calls regenerateMidiFile(), resized(), repaint()"
+      ],
+      "code_snippet": "void StepSequencerComponent::addTrackRow(const DrumTrack& track)\n{\n    const int steps = grid_.empty() ? cfg_.steps : static_cast<int>(grid_[0].size());\n    std::vector<uint8_t> row(steps, 0);\n    int copySteps = std::min(16, steps);\n    for (int s = 0; s < copySteps; ++s) {\n        row[s] = track.steps[s];\n    }\n    grid_.push_back(row);\n    rowFiles_.push_back(juce::File());\n    rowLocked_.push_back(false);\n    rowSoloed_.push_back(false);\n    rowPatternRole_.push_back(PatternLibrary::categoryToRole(track.category));\n    rowCategory_.push_back(track.category);\n    rowMidiNote_.push_back(track.midiNote);\n    stepRollData_.push_back(std::vector<StepData>(steps));\n    cfg_.rowNames.add(track.name);\n    cfg_.rows = static_cast<int>(grid_.size());\n    // Creates [G] button for new row\n    auto btn = std::make_unique<ChannelGenerateButton>(...)\n    addAndMakeVisible(*btn);\n    channelGenButtons_.push_back(std::move(btn));\n    regenerateMidiFile();\n    resized();\n    repaint();\n}"
+    },
+    "finding_3_applyFlexiblePattern": {
+      "question": "Alternative method for applying patterns with dynamic row creation",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 3208,
+        "declaration_file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+        "declaration_line": 238
+      },
+      "signature": "void applyFlexiblePattern(const FlexiblePatternSet& pattern)",
+      "behavior": [
+        "CLEARS all existing data: grid_, rowFiles_, rowLocked_, rowSoloed_, rowPatternRole_, rowCategory_, rowMidiNote_, cfg_.rowNames",
+        "Sets tempo from pattern.tempoBpm",
+        "Creates NEW rows for each track in pattern.tracks",
+        "Copies track steps, assigns category, midiNote, name",
+        "Updates cfg_.rows",
+        "Calls regenerateMidiFile(), resized(), repaint()"
+      ],
+      "key_difference": "applyFlexiblePattern REPLACES all rows, applyPatternSet UPDATES existing rows"
+    },
+    "finding_4_PatternSet_structure": {
+      "question": "What is the PatternSet structure used by StepSequencer?",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternLibraryDialog.h",
+        "line": 38,
+        "namespace": "sm5"
+      },
+      "definition": {
+        "name": "std::string - pattern name",
+        "genre": "std::string - genre name",
+        "isUserPattern": "bool - true for user-learned patterns",
+        "gridSize": "int - default 16",
+        "patterns": "std::map<DrumCategory, RhythmicPattern> - patterns keyed by category",
+        "subcategoryPatterns": "std::map<juce::String, SubcategoryPattern> - custom instruments"
+      },
+      "code_snippet": "struct PatternSet {\n    std::string name;\n    std::string genre;\n    bool isUserPattern = false;\n    int gridSize = 16;\n    std::map<DrumCategory, RhythmicPattern> patterns;\n    std::map<juce::String, SubcategoryPattern> subcategoryPatterns;\n    int getStepCount() const;\n    int getTotalPatternCount() const;\n    bool hasSubcategories() const;\n};"
+    },
+    "finding_5_RhythmicPattern_structure": {
+      "question": "What is RhythmicPattern used in PatternSet?",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\RhythmicPatterns.h",
+        "line": 29
+      },
+      "definition": {
+        "steps": "std::vector<uint8_t> - 0/1 per step",
+        "velocities": "std::vector<uint8_t> - optional velocity per step",
+        "rollData": "std::vector<StepData> - roll/triplet data per step",
+        "gridSize": "int",
+        "confidence": "float",
+        "name": "std::string"
+      },
+      "code_snippet": "struct RhythmicPattern {\n    std::vector<uint8_t> steps;\n    std::vector<uint8_t> velocities;\n    std::vector<StepData> rollData;\n    int gridSize;\n    float confidence;\n    std::string name;\n};"
+    },
+    "finding_6_visual_highlight": {
+      "question": "How can we trigger a visual highlight/flash on rows?",
+      "finding": "NO EXISTING FLASH/HIGHLIGHT MECHANISM FOUND",
+      "searched_terms": ["flash", "highlight", "animation", "blink"],
+      "related_features_found": [
+        {
+          "name": "Row hover highlight",
+          "location": "StepSequencerComponent.cpp:340",
+          "behavior": "Draws highlight when hoverRow_ >= 0 and hoverDropMode_ == DropMode::Replace",
+          "code": "if (hoverRow_ >= 0 && hoverRow_ < rows && hoverDropMode_ == DropMode::Replace) {\n    g.setColour(cfg_.gridAccent.withAlpha(0.25f));\n    g.fillRect(...);\n}"
+        },
+        {
+          "name": "Backdrop animation",
+          "location": "StepSequencerComponent.cpp:276",
+          "behavior": "Timer-driven backdrop drift animation (not row highlight)"
+        }
+      ],
+      "recommendation": "Would need to implement new visual feedback mechanism - options: (1) Add highlightedRows_ set with timer-based fade, (2) Use onPatternChanged callback to trigger parent-level notification, (3) Simple approach: no animation, just repaint shows new pattern"
+    },
+    "finding_7_step_sequencer_access": {
+      "question": "How to access the StepSequencer from other components?",
+      "finding": "DIRECT MEMBER VARIABLE - NO EVENT BUS, NO SERVICE REGISTRY",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+        "line": 385
+      },
+      "access_pattern": {
+        "owner": "SampleBrowserPage",
+        "member": "std::unique_ptr<StepSequencerComponent> stepSequencer_",
+        "creation_line": "src/ui/Pages/SampleBrowserPage.cpp:798",
+        "visibility": "private to SampleBrowserPage"
+      },
+      "code_snippet": "// In SampleBrowserPage.h:385\nstd::unique_ptr<StepSequencerComponent> stepSequencer_;\n\n// In SampleBrowserPage.cpp:798\nstepSequencer_ = std::make_unique<StepSequencerComponent>();",
+      "implications": [
+        "StepSequencer is owned exclusively by SampleBrowserPage",
+        "Other pages/components CANNOT directly access it",
+        "Communication must go through callbacks or adding new EventBus topics",
+        "To inject patterns from Sample Browser context menu, code must be in SampleBrowserPage"
+      ]
+    },
+    "finding_8_PatternPreviewDialog_result": {
+      "question": "How does PatternPreviewDialog communicate results?",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+        "line": 46
+      },
+      "result_structure": {
+        "accepted": "bool - true if user clicked Save",
+        "patterns": "std::vector<PatternEntry> - all patterns including subcategories",
+        "genre": "juce::String - selected genre",
+        "patternName": "juce::String - user-entered pattern name",
+        "finalBpm": "float - BPM after user override"
+      },
+      "callback_pattern": "showDialogAsync() takes std::function<void(Result)> callback",
+      "code_snippet": "struct Result {\n    bool accepted = false;\n    std::vector<PatternEntry> patterns;\n    juce::String genre;\n    juce::String patternName;\n    float finalBpm = 0.0f;\n};\n\nstatic void showDialogAsync(..., std::function<void(Result)> callback, ...);"
+    },
+    "finding_9_DrumTrack_structure": {
+      "question": "DrumTrack structure for addTrackRow()",
+      "location": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\PatternLibrary.h",
+        "line": 39
+      },
+      "definition": {
+        "midiNote": "int - GM MIDI note (default 36 for kick)",
+        "name": "juce::String - display name",
+        "category": "DrumCategory - for grouping",
+        "steps": "std::vector<uint8_t> - variable length pattern (default 16)",
+        "velocities": "std::vector<uint8_t> - velocity per step",
+        "gridType": "GridType - current grid type"
+      },
+      "constructors": [
+        "DrumTrack() - creates 16-step default",
+        "DrumTrack(int stepCount) - creates with specific step count",
+        "DrumTrack::fromInstrument(const DrumInstrument& inst, int stepCount = 16)"
+      ]
+    },
+    "finding_10_conversion_needed": {
+      "description": "To inject PatternPreviewDialog result into StepSequencer, need conversion",
+      "from": "PatternPreviewDialog::Result with std::vector<PatternEntry>",
+      "to": "PatternSet with std::map<DrumCategory, RhythmicPattern>",
+      "PatternEntry_structure": {
+        "location": "PatternPreviewDialog.h:38",
+        "fields": {
+          "category": "DrumCategory",
+          "displayName": "juce::String",
+          "subcategoryName": "juce::String",
+          "pattern": "std::vector<uint8_t>",
+          "isSubcategory": "bool"
+        }
+      },
+      "conversion_logic": "Iterate result.patterns, for each entry: if isSubcategory, add to subcategoryPatterns; else add to patterns map keyed by category"
+    }
+  },
+  "summary": {
+    "primary_injection_method": "stepSequencer_->applyPatternSet(patternSet)",
+    "alternative_method": "stepSequencer_->applyFlexiblePattern(flexiblePattern) - replaces all rows",
+    "row_addition_method": "stepSequencer_->addTrackRow(drumTrack) - adds single row",
+    "access_constraints": "StepSequencer is private to SampleBrowserPage - injection code must be there",
+    "visual_feedback": "No built-in flash mechanism - relies on repaint() showing new pattern",
+    "required_conversion": "PatternPreviewDialog::Result -> PatternSet for applyPatternSet()"
+  },
+  "recommendations_for_implementation": [
+    "1. Add right-click menu item in SampleBrowserPage's tile context menu for loop files",
+    "2. On click: Open PatternPreviewDialog with audio analysis",
+    "3. On dialog close with accepted=true: Convert Result to PatternSet",
+    "4. Call stepSequencer_->applyPatternSet(convertedPatternSet)",
+    "5. Optionally save to UserPatternDatabase for persistence",
+    "6. StepSequencer will repaint automatically showing new pattern"
+  ]
+}

@@ -1,0 +1,50 @@
+{
+  "session_id": "drag-wave-button-2025-12-12",
+  "task": "Create a Drag Wave button that renders step sequencer patterns with loaded samples",
+  "enhanced_task": "WaveDragArea component with integrated progress bar that renders the pattern grid with loaded samples and exports as WAV",
+  "started": "2025-12-12T00:00:00Z",
+  "completed": "2025-12-12T01:00:00Z",
+  "status": "completed",
+  "current_phase": "implementation-complete",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "completed" },
+    "design": { "status": "completed" },
+    "user-approval": { "status": "completed" },
+    "implementation": { "status": "completed" },
+    "build": { "status": "skipped", "note": "User will handle build" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "completed" }
+  },
+  "files_created": [
+    "src/ui/Components/WaveDragArea.h",
+    "src/ui/Components/WaveDragArea.cpp"
+  ],
+  "files_modified": [
+    "src/ui/Components/StepSequencerComponent.h",
+    "src/ui/Components/StepSequencerComponent.cpp",
+    "CMakeLists.txt"
+  ],
+  "features": {
+    "visual": {
+      "idle_state": "Gray when no samples/pattern, dim cyan when has content",
+      "preparing_state": "Cyan with progress bar filling inside button, shows 'Rendering...'",
+      "ready_state": "Green accent, ready for drag-out",
+      "wave_icon": "Simple waveform graphic"
+    },
+    "functionality": {
+      "click_to_render": "Renders pattern with samples on background thread",
+      "progress_bar": "Shows rendering progress inside button (0-80%) then file writing (80-100%)",
+      "drag_out": "Drag rendered WAV to DAW or file explorer",
+      "right_click_menu": "Save As... and Re-render options",
+      "auto_invalidate": "Invalidates cached render when pattern or samples change"
+    },
+    "rendering": {
+      "sample_rate": "44100 Hz",
+      "format": "16-bit stereo WAV",
+      "swing_support": "Applies swing timing same as playback",
+      "normalization": "Auto-normalizes to prevent clipping"
+    }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

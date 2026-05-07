@@ -1,0 +1,79 @@
+{
+  "session_id": "populate-redesign-2025-12-12",
+  "investigation_completed": "2025-12-13T01:00:00Z",
+  "verified": true,
+
+  "findings": [
+    {
+      "id": "F1",
+      "title": "Attack time is calculated but NEVER used in classification",
+      "file": "src/utils/DrumAnalyzer.cpp",
+      "line": 184,
+      "evidence": "result.attackTimeMs = calculateAttackTimeMs(samples, numSamples, sampleRate);",
+      "impact": "HIGH - Fast vs slow attack is key to drum classification but completely ignored",
+      "verified": true
+    },
+    {
+      "id": "F2",
+      "title": "Rigid frequency band thresholds cause misclassification",
+      "file": "src/utils/DrumAnalyzer.cpp",
+      "lines": "296-306",
+      "evidence": "if (frequency < 250.0f) return DrumBand::Kick; else if (frequency < 800.0f) return DrumBand::Snare;",
+      "impact": "HIGH - Real kicks can have dominant freq at 300-400Hz, real snares can peak at 4000Hz+",
+      "verified": true
+    },
+    {
+      "id": "F3",
+      "title": "Single FFT peak misses perceptually important frequencies",
+      "file": "src/utils/DrumAnalyzer.cpp",
+      "lines": "275-293",
+      "evidence": "Finds maxMag and returns single peakIndex frequency",
+      "impact": "MEDIUM - A kick's click transient can overshadow its body, causing wrong classification",
+      "verified": true
+    },
+    {
+      "id": "F4",
+      "title": "classifySubType only uses band, flatness, dominantFreq",
+      "file": "src/utils/DrumAnalyzer.cpp",
+      "line": 392,
+      "evidence": "DrumSubType classifySubType(DrumBand band, float spectralFlatness, float dominantFreq)",
+      "impact": "HIGH - attackTimeMs is available in result but not passed to classification function",
+      "verified": true
+    },
+    {
+      "id": "F5",
+      "title": "Color-to-category mapping in SampleBrowserPage is CORRECT",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "lines": "332-392",
+      "evidence": "colorToCategory lambda correctly maps all 21 DrumColors to DrumCategory",
+      "impact": "N/A - This is working correctly, problem is upstream",
+      "verified": true
+    }
+  ],
+
+  "root_cause": "DrumAnalyzer assigns wrong DrumSubType (and thus wrong color) because classification relies only on rigid frequency thresholds and spectral flatness. Attack time is calculated but never used, and dominant frequency analysis doesn't account for transient vs body distinction.",
+
+  "integration_points": [
+    {
+      "source": "StepSequencerComponent::populateTracks()",
+      "file": "src/ui/Components/StepSequencerComponent.cpp",
+      "line": 1520,
+      "target": "SampleBrowserPage::onRequestSampleForCategory callback",
+      "verified": true
+    },
+    {
+      "source": "SampleBrowserPage::onRequestSampleForCategory",
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "lines": "323-443",
+      "target": "eqWaveColors_ cache (pre-computed by DrumAnalyzer)",
+      "verified": true
+    },
+    {
+      "source": "DrumAnalyzer::analyze()",
+      "file": "src/utils/DrumAnalyzer.cpp",
+      "line": 231,
+      "target": "DrumSubType classification",
+      "verified": true
+    }
+  ]
+}

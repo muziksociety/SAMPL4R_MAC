@@ -1,0 +1,216 @@
+﻿{
+  "session_id": "cpp-runtime-investigation",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T12:00:00Z",
+  "status": "complete",
+  "data": {
+    "summary": "Complete C++ runtime dependency mapping for SAMPLAR portable installer",
+
+    "main_executable": {
+      "name": "SAMPLAR.exe",
+      "size_mb": 54,
+      "path": "build/SM5App_artefacts/Release/SAMPLAR.exe"
+    },
+
+    "runtime_dlls": {
+      "libtorch_required": {
+        "description": "LibTorch (PyTorch C++) - Required for AI drum stem separation (LARS neural network)",
+        "total_size_mb": 249,
+        "files": [
+          {"name": "torch_cpu.dll", "size_mb": 241, "description": "Main PyTorch CPU inference engine"},
+          {"name": "fbgemm.dll", "size_mb": 4.7, "description": "Facebook GEMM library for matrix operations"},
+          {"name": "libiomp5md.dll", "size_mb": 2.0, "description": "Intel OpenMP runtime"},
+          {"name": "c10.dll", "size_kb": 712, "description": "PyTorch C10 core library"},
+          {"name": "asmjit.dll", "size_kb": 352, "description": "JIT assembly generation"},
+          {"name": "fbjni.dll", "size_kb": 340, "description": "Facebook JNI bridge"},
+          {"name": "uv.dll", "size_kb": 192, "description": "libuv event loop"},
+          {"name": "pytorch_jni.dll", "size_kb": 188, "description": "PyTorch JNI interface"},
+          {"name": "libiompstubs5md.dll", "size_kb": 44, "description": "Intel OpenMP stubs"},
+          {"name": "torch.dll", "size_kb": 12, "description": "Torch loader stub"},
+          {"name": "torch_global_deps.dll", "size_kb": 12, "description": "Torch global dependencies stub"}
+        ]
+      },
+
+      "openblas_required": {
+        "description": "OpenBLAS - Required for demucs.cpp CPU audio source separation",
+        "total_size_mb": 49,
+        "files": [
+          {"name": "libopenblas.dll", "size_mb": 49, "description": "OpenBLAS linear algebra library"}
+        ]
+      },
+
+      "onnx_optional_gpu": {
+        "description": "ONNX Runtime GPU - Optional, provides 10-15x faster separation with NVIDIA GPU",
+        "total_size_mb": 528,
+        "requires_nvidia_gpu": true,
+        "requires_cuda_runtime": true,
+        "files": [
+          {"name": "onnxruntime_providers_cuda.dll", "size_mb": 516, "description": "CUDA execution provider"},
+          {"name": "onnxruntime.dll", "size_mb": 12, "description": "ONNX Runtime core"},
+          {"name": "onnxruntime_providers_shared.dll", "size_kb": 24, "description": "Shared provider interface"}
+        ],
+        "external_dependencies": [
+          "NVIDIA GPU drivers (provides nvcuda.dll, cudart64*.dll)",
+          "CUDA Toolkit (version 11.x or 12.x recommended)"
+        ]
+      }
+    },
+
+    "executables": {
+      "main_app": {
+        "name": "SAMPLAR.exe",
+        "size_mb": 54,
+        "required": true
+      },
+      "demucs_cli": [
+        {"name": "demucs_mt_openblas.exe", "size_mb": 2.5, "description": "Multi-threaded demucs.cpp CLI (OpenBLAS - universal)"},
+        {"name": "demucs_mt.cpp.main.exe", "size_mb": 2.5, "description": "Legacy name for backward compatibility"}
+      ],
+      "utilities": [
+        {"name": "SM5LicenseCleaner.exe", "location": "build/SM5LicenseCleaner_artefacts/Release/", "required": false}
+      ],
+      "onnx_gpu_cli": {
+        "name": "demucs_onnx.exe",
+        "present_in_release": false,
+        "location_expected": "third_party/onnxruntime/bin/",
+        "note": "Must be built separately - not currently in third_party"
+      }
+    },
+
+    "models": {
+      "demucs_cpu": {
+        "file": "ggml-model-htdemucs-4s-f16.bin",
+        "size_mb": 80,
+        "location": "models/",
+        "required": true,
+        "description": "HTDemucs 4-stem model for audio source separation (GGML format)"
+      },
+      "lars_drum_separation": {
+        "location": "models/drumsep/",
+        "total_size_mb": 226,
+        "files": [
+          {"name": "my_scripted_module.pt", "size_mb": 37.6},
+          {"name": "my_scripted_module_kick.pt", "size_mb": 37.6},
+          {"name": "my_scripted_module_snare.pt", "size_mb": 37.6},
+          {"name": "my_scripted_module_hihat.pt", "size_mb": 37.6},
+          {"name": "my_scripted_module_toms.pt", "size_mb": 37.6},
+          {"name": "my_scripted_module_cymbals.pt", "size_mb": 37.6}
+        ],
+        "required": true,
+        "description": "TorchScript models for individual drum component isolation"
+      },
+      "onnx_gpu_model": {
+        "file": "htdemucs.ort",
+        "location": "third_party/onnxruntime/models/",
+        "size_bytes": 135,
+        "note": "Placeholder file only - actual model not yet provided"
+      }
+    },
+
+    "data_files": {
+      "pattern_databases": {
+        "location": "data/",
+        "total_size_mb": 1634,
+        "files": [
+          {"name": "midi_patterns.json", "size_mb": 1313, "description": "MIDI drum pattern database"},
+          {"name": "patterns_with_rolls.json", "size_mb": 208, "description": "Patterns with roll variations"},
+          {"name": "patterns_enhanced.json", "size_mb": 105, "description": "Enhanced pattern database"},
+          {"name": "patterns_rhythmic.json", "size_mb": 49, "description": "Rhythmic pattern database"},
+          {"name": "latin_patterns.json", "size_kb": 34, "description": "Latin rhythm patterns"}
+        ],
+        "note": "WARNING: Build output has DUPLICATE nested data folder (data/data/) with backup files totaling 3.3GB"
+      },
+      "samples": {
+        "location": "Samples/",
+        "size_mb": 5.3,
+        "description": "Default drum samples (General MIDI kit)"
+      }
+    },
+
+    "python_bridge": {
+      "location": "python_bridge/",
+      "files": ["demucs_separator.py", "result.json"],
+      "size_kb": 26,
+      "note": "Legacy Python bridge for Demucs - superseded by C++ CLI but still copied for fallback"
+    },
+
+    "vcredist_requirements": {
+      "required": true,
+      "version": "Visual C++ Redistributable 2022 (14.x)",
+      "reason": "Application compiled with MSVC 2022, requires vcruntime140.dll, msvcp140.dll, etc.",
+      "note": "Not bundled with application - user must install or bundler must include"
+    },
+
+    "hardcoded_paths": {
+      "found": false,
+      "notes": [
+        "Application uses juce::File::getSpecialLocation(currentExecutableFile).getParentDirectory() for relative paths",
+        "Models, DLLs, and data files are located relative to executable",
+        "No hardcoded absolute paths found in source code",
+        "Log file written to getCurrentWorkingDirectory() - may need fixing for portable deployment"
+      ]
+    },
+
+    "packaging_recommendations": {
+      "minimal_package": {
+        "description": "Minimum required for basic functionality (no GPU, no LARS)",
+        "estimated_size_mb": 150,
+        "contents": [
+          "SAMPLAR.exe (54MB)",
+          "demucs_mt_openblas.exe (2.5MB)",
+          "libopenblas.dll (49MB)",
+          "models/ggml-model-htdemucs-4s-f16.bin (80MB)",
+          "data/ folder (excluding backups)",
+          "Samples/ folder (optional)"
+        ]
+      },
+      "standard_package": {
+        "description": "Full CPU functionality with LARS drum separation",
+        "estimated_size_mb": 610,
+        "contents": [
+          "Everything from minimal_package",
+          "LibTorch DLLs (249MB)",
+          "models/drumsep/ LARS models (226MB)"
+        ]
+      },
+      "full_package_gpu": {
+        "description": "Full functionality including GPU acceleration",
+        "estimated_size_mb": 1140,
+        "contents": [
+          "Everything from standard_package",
+          "ONNX Runtime GPU DLLs (528MB)",
+          "demucs_onnx.exe (when available)"
+        ],
+        "external_requirements": [
+          "NVIDIA GPU drivers (user must have installed)",
+          "Visual C++ Redistributable 2022"
+        ]
+      }
+    },
+
+    "issues_found": {
+      "data_duplication": {
+        "severity": "high",
+        "description": "Build output has duplicated data files in data/data/ subfolder with .backup files",
+        "impact": "Release folder is 4.5GB when actual needed data is ~260MB",
+        "fix": "Review CMakeLists.txt copy commands to avoid duplicate copying"
+      },
+      "onnx_cli_missing": {
+        "severity": "medium",
+        "description": "demucs_onnx.exe is not present in third_party/onnxruntime/bin/",
+        "impact": "GPU acceleration not available without building demucs_onnx separately"
+      },
+      "vcredist_not_bundled": {
+        "severity": "low",
+        "description": "Visual C++ Redistributable must be installed separately",
+        "fix": "Bundle vc_redist.x64.exe with installer or use static linking"
+      },
+      "log_file_location": {
+        "severity": "low",
+        "description": "Debug log written to getCurrentWorkingDirectory() instead of app directory",
+        "file": "src/services/FullSongService.cpp:18",
+        "fix": "Use getSpecialLocation(currentExecutableFile).getParentDirectory() for log location"
+      }
+    }
+  }
+}

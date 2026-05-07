@@ -1,0 +1,135 @@
+{
+  "session_id": "drum-library-folder-redesign-2026-01-24",
+  "generated_at": "2026-01-24T00:00:00Z",
+  "task": "Redesign the Drum Library UI folder area",
+  "summary": "The Drum Library is NOT a separate page - it is a MODE within SampleBrowserPage activated by the libraryMode_ flag. The folder area consists of a TreeView (folderTreeView_) with FolderTreeItem nodes, a collapsible panel controlled by folderPanelToggle_, and custom painting in paint(). Redesign can safely modify the library mode-specific UI without affecting normal SampleBrowserPage behavior.",
+  "findings": [
+    {
+      "id": "F001",
+      "description": "DrumLibrary is a mode flag within SampleBrowserPage",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+      "line": 77,
+      "code": "bool libraryMode_ = false;  // True when showing tree view + grid layout",
+      "verified": true,
+      "verification_method": "Read file and confirmed line 77 contains the libraryMode_ boolean flag"
+    },
+    {
+      "id": "F002",
+      "description": "Folder tree view is a DroppableTreeView component",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+      "line": 78,
+      "code": "std::unique_ptr<DroppableTreeView> folderTreeView_;  // Accepts drag & drop from sample tiles",
+      "verified": true,
+      "verification_method": "Read file and confirmed line 78 declares the tree view"
+    },
+    {
+      "id": "F003",
+      "description": "Tree view width is fixed at 200 pixels",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+      "line": 82,
+      "code": "static constexpr int TREE_VIEW_WIDTH = 200;  // Fixed width for tree view",
+      "verified": true,
+      "verification_method": "Read file and confirmed line 82 defines TREE_VIEW_WIDTH = 200"
+    },
+    {
+      "id": "F004",
+      "description": "Collapsed panel width is 20 pixels",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+      "line": 88,
+      "code": "static constexpr int COLLAPSED_PANEL_WIDTH = 20;  // Width of collapsed toggle strip",
+      "verified": true,
+      "verification_method": "Read file and confirmed line 88 defines COLLAPSED_PANEL_WIDTH = 20"
+    },
+    {
+      "id": "F005",
+      "description": "FolderTreeItem is the TreeViewItem class for folder nodes",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\FolderTreeItem.h",
+      "line": 58,
+      "code": "class FolderTreeItem : public juce::TreeViewItem",
+      "verified": true,
+      "verification_method": "Read file and confirmed class declaration at line 58"
+    },
+    {
+      "id": "F006",
+      "description": "FolderTreeItem painting uses gold highlight (0xFFFFD700)",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\FolderTreeItem.h",
+      "line": 101,
+      "code": "static constexpr juce::uint32 GOLD_HIGHLIGHT = 0xFFFFD700;",
+      "verified": true,
+      "verification_method": "Read file and confirmed color constant at line 101"
+    },
+    {
+      "id": "F007",
+      "description": "Panel painting happens in SampleBrowserPage::paint() between lines 1549-1623",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "line": 1549,
+      "code": "// Draw elegant folder panel when in library mode (only when expanded)",
+      "verified": true,
+      "verification_method": "Read file and confirmed paint logic starts at line 1549"
+    },
+    {
+      "id": "F008",
+      "description": "Panel layout happens in SampleBrowserPage::resized() at lines 1732-1773",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "line": 1732,
+      "code": "if (libraryMode_) { folderPanelToggle_.setVisible(true);",
+      "verified": true,
+      "verification_method": "Read file and confirmed library mode layout logic at line 1732"
+    },
+    {
+      "id": "F009",
+      "description": "FolderTreeItem::paintItem() draws folder icon, name, count, and classification indicator",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\FolderTreeItem.cpp",
+      "line": 23,
+      "code": "void FolderTreeItem::paintItem(juce::Graphics& g, int width, int height)",
+      "verified": true,
+      "verification_method": "Read file and confirmed paintItem implementation at line 23"
+    },
+    {
+      "id": "F010",
+      "description": "Toggle button uses Unicode characters for collapse/expand",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "line": 792,
+      "code": "folderPanelToggle_.setButtonText(juce::CharPointer_UTF8(\"\\xc2\\xab\"));  // character",
+      "verified": true,
+      "verification_method": "Read file and confirmed toggle button text setup at line 792"
+    }
+  ],
+  "current_ui_structure": {
+    "folder_panel": {
+      "width_expanded": 200,
+      "width_collapsed": 20,
+      "background_color": "black",
+      "border_color": "0xFF3A3A45",
+      "header_background": "0xFF2A2A35",
+      "header_title": "FOLDERS",
+      "header_title_color": "0xFFFFD700 (Gold)"
+    },
+    "tree_items": {
+      "height": "auto (based on font)",
+      "icon_color": "0xFFFFD700 (Gold) or category color",
+      "text_color": "0xFFE0E0E0 (light grey) or category color",
+      "selected_highlight": "0xFFFFD700 (Gold) with 0.3 alpha fill",
+      "shows_sample_count": true,
+      "shows_classification_indicator": true
+    },
+    "toggle_button": {
+      "collapsed_symbol": ">> (Unicode)",
+      "expanded_symbol": "<< (Unicode)",
+      "background": "0xFF2A2A2A",
+      "text_color": "0xFFFFD700 (Gold)"
+    }
+  },
+  "files_safe_to_modify": [
+    "src/ui/Components/FolderTreeItem.h",
+    "src/ui/Components/FolderTreeItem.cpp"
+  ],
+  "files_require_caution": [
+    "src/ui/Pages/SampleBrowserPage.cpp (library mode specific paint/resized sections only)",
+    "src/ui/Pages/SampleBrowserPage.h (constants TREE_VIEW_WIDTH, COLLAPSED_PANEL_WIDTH)"
+  ],
+  "files_do_not_modify": [
+    "src/ui/Pages/SampleBrowserPage.cpp (non-library-mode sections)",
+    "src/ui/Pages/SampleBrowserPage.h (Tile class, grid logic, non-library members)"
+  ]
+}

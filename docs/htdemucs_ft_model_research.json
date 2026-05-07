@@ -1,0 +1,134 @@
+﻿{
+  "session_id": "adhoc",
+  "agent": "audio-research",
+  "created_at": "2026-03-13T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "research_question": "What are the exact model files (YAML config + .th weights) needed for htdemucs_ft to work offline with python-audio-separator (nomadkaraoke)?",
+
+    "search_strategy": {
+      "sources_consulted": [
+        "facebookresearch/demucs GitHub",
+        "nomadkaraoke/python-audio-separator GitHub",
+        "Derur/UVR-models HuggingFace",
+        "Politrees/UVR_resources HuggingFace",
+        "demucs.cpp (sevagh) GitHub",
+        "dl.fbaipublicfiles.com direct URL confirmation"
+      ],
+      "keywords": [
+        "htdemucs_ft yaml .th files",
+        "f7e0c4bc d12395a8 92cfc3b6 04573f0d",
+        "dl.fbaipublicfiles demucs hybrid_transformer",
+        "audio-separator demucs download model path"
+      ]
+    },
+
+    "findings": [
+      {
+        "title": "YAML Config File",
+        "detail": "The config file is named exactly: htdemucs_ft.yaml",
+        "size": "149 bytes",
+        "source": "https://huggingface.co/Politrees/UVR_resources/blob/main/models/Demucs/Demucs_v4/htdemucs_ft.yaml",
+        "notes": "This tiny YAML defines the bag-of-models ensemble pointing to 4 fine-tuned .th files. audio-separator expects this file by that exact name in the model_file_dir."
+      },
+      {
+        "title": "Model Weight Files — htdemucs_ft is a BAG OF 4 MODELS",
+        "detail": "Unlike htdemucs_6s (single .th file), htdemucs_ft consists of FOUR separate .th files, one fine-tuned per stem. All four must be present for offline operation.",
+        "files": [
+          {
+            "filename": "f7e0c4bc-ba3fe64a.th",
+            "stem": "drums (fine-tuned)",
+            "size_mb": 84.1,
+            "download_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/f7e0c4bc-ba3fe64a.th"
+          },
+          {
+            "filename": "d12395a8-e57c48e6.th",
+            "stem": "bass (fine-tuned)",
+            "size_mb": 84.1,
+            "download_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/d12395a8-e57c48e6.th"
+          },
+          {
+            "filename": "92cfc3b6-ef3bcb9c.th",
+            "stem": "other (fine-tuned)",
+            "size_mb": 84.1,
+            "download_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/92cfc3b6-ef3bcb9c.th"
+          },
+          {
+            "filename": "04573f0d-f3cf25b2.th",
+            "stem": "vocals (fine-tuned)",
+            "size_mb": 84.1,
+            "download_url": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/04573f0d-f3cf25b2.th"
+          }
+        ],
+        "total_size_mb": 336.4,
+        "huggingface_mirror": "https://huggingface.co/Derur/UVR-models/tree/main/htdemucs_ft"
+      },
+      {
+        "title": "Download Source — dl.fbaipublicfiles.com",
+        "detail": "audio-separator's demucs_separator uses the upstream facebookresearch/demucs pretrained.py download logic. The base URL is: https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/",
+        "notes": "The facebookresearch/demucs repo was archived read-only on 2025-01-01, but the fbaipublicfiles URLs remain live. HuggingFace mirrors (Derur/UVR-models, Politrees/UVR_resources) are reliable fallbacks."
+      },
+      {
+        "title": "Comparison with htdemucs_6s",
+        "detail": "htdemucs_6s uses ONE file: 5c90dfd2-34c22ccb.th (~84MB). htdemucs_ft uses FOUR files totaling ~337MB. This is the key architectural difference — ft is an ensemble of 4 separate fine-tuned models.",
+        "why_4x_slower": "audio-separator runs all 4 models sequentially and picks per-source output from the model fine-tuned for that source."
+      },
+      {
+        "title": "SAMPLAR Portable — models/ directory layout for offline use",
+        "detail": "Based on SAMPLAR_portable.json (TORCH_HOME=models, XDG_CACHE_HOME=models), demucs models should be pre-cached at:",
+        "paths": {
+          "yaml_config": "models/htdemucs_ft.yaml",
+          "th_weights_dir": "models/",
+          "all_files_needed": [
+            "models/htdemucs_ft.yaml",
+            "models/f7e0c4bc-ba3fe64a.th",
+            "models/d12395a8-e57c48e6.th",
+            "models/92cfc3b6-ef3bcb9c.th",
+            "models/04573f0d-f3cf25b2.th"
+          ]
+        },
+        "notes": "audio-separator passes --model_file_dir to demucs which sets the local cache root. All 5 files (1 yaml + 4 .th) must be in the same flat directory."
+      }
+    ],
+
+    "recommended_approach": "Pre-download all 5 files (htdemucs_ft.yaml + 4x .th weights) into SAMPLAR_Portable/models/ before shipping the portable build. Total ~337MB. Use dl.fbaipublicfiles.com URLs as primary, Derur/UVR-models HuggingFace as fallback.",
+
+    "implementation_roadmap": [
+      "1. Download htdemucs_ft.yaml (149 bytes) from Politrees/UVR_resources on HuggingFace",
+      "2. Download 4x .th files (~84.1MB each) from dl.fbaipublicfiles.com/demucs/hybrid_transformer/",
+      "3. Place all 5 files flat in SAMPLAR_Portable/models/",
+      "4. Pass --model_file_dir pointing to models/ when invoking audio-separator",
+      "5. Verify offline operation by disconnecting network and running a test separation"
+    ],
+
+    "potential_pitfalls": [
+      "htdemucs_ft needs ALL 4 .th files — missing any one causes runtime failure. Unlike htdemucs_6s (1 file), you cannot partially cache htdemucs_ft.",
+      "The YAML file is mandatory — without htdemucs_ft.yaml audio-separator cannot resolve the bag-of-models ensemble definition.",
+      "Total size is 337MB, not ~84MB like the single-model variants. Budget accordingly in the portable build.",
+      "dl.fbaipublicfiles.com is Meta's CDN and has been reliable, but the demucs repo is archived (read-only since 2025-01-01). URLs still resolve but no future updates.",
+      "File naming is hash-based (e.g. f7e0c4bc-ba3fe64a.th) — do not rename the files or demucs will fail checksum validation.",
+      "audio-separator by default caches to /tmp/audio-separator-models/ — for portable use you must explicitly pass --model_file_dir."
+    ],
+
+    "references": {
+      "peer_reviewed": [],
+      "professional": [
+        "facebookresearch/demucs GitHub (archived 2025-01-01): https://github.com/facebookresearch/demucs",
+        "nomadkaraoke/python-audio-separator: https://github.com/nomadkaraoke/python-audio-separator"
+      ],
+      "community": [
+        "Derur/UVR-models htdemucs_ft folder (all 4 .th files confirmed, 337MB total): https://huggingface.co/Derur/UVR-models/tree/main/htdemucs_ft",
+        "Politrees/UVR_resources htdemucs_ft.yaml: https://huggingface.co/Politrees/UVR_resources/blob/main/models/Demucs/Demucs_v4/htdemucs_ft.yaml",
+        "deepwiki demucs Models and Variants: https://deepwiki.com/facebookresearch/demucs/5.1-models-and-variants",
+        "demucs.cpp GGML sizes reference (81MB per model in GGML = ~84MB in .th): https://github.com/sevagh/demucs.cpp"
+      ],
+      "direct_download_urls": {
+        "yaml": "https://huggingface.co/Politrees/UVR_resources/raw/main/models/Demucs/Demucs_v4/htdemucs_ft.yaml",
+        "drums_th": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/f7e0c4bc-ba3fe64a.th",
+        "bass_th": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/d12395a8-e57c48e6.th",
+        "other_th": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/92cfc3b6-ef3bcb9c.th",
+        "vocals_th": "https://dl.fbaipublicfiles.com/demucs/hybrid_transformer/04573f0d-f3cf25b2.th"
+      }
+    }
+  }
+}

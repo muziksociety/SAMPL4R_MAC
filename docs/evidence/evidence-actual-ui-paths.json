@@ -1,0 +1,244 @@
+﻿{
+  "session_id": "re-investigation-2026-01-16",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T00:00:00Z",
+  "status": "complete",
+  "investigation_summary": "Critical re-investigation tracing ACTUAL UI paths (not deprecated code)",
+
+  "task_1_initial_page_ui_options": {
+    "file": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/Pages/InitialPage.cpp",
+    "ui_components": {
+      "process_mode_dropdown": {
+        "lines": "788-806",
+        "type": "juce::ComboBox",
+        "options": [
+          {"id": 1, "name": "Drum Stem", "enum_value": "ProcessMode::DrumStem"},
+          {"id": 2, "name": "Full Song", "enum_value": "ProcessMode::FullSong"}
+        ],
+        "default": "DrumStem",
+        "tooltip": "Drum Stem: Direct processing of drum loops\nFull Song: Extract drums from full song first (uses UVR)"
+      },
+      "drop_zone": {
+        "lines": "809-826",
+        "type": "juce::TextButton with DropZoneLookAndFeel",
+        "text": "DROP DRUM STEM OR CLICK TO BROWSE (or DROP FULL SONG depending on mode)",
+        "click_action": "Opens file browser (*.wav;*.aif;*.aiff;*.mp3;*.flac;*.ogg)"
+      },
+      "library_button": {
+        "lines": "849-850",
+        "type": "AnimatedBackdropButton",
+        "text": "BROWSE DRUM LIBRARY",
+        "callback": "onGoLibrary -> browser_.enterLibraryMode(); switchTo(3)"
+      },
+      "community_banner": {
+        "lines": "853-857",
+        "type": "CommunityBanner carousel",
+        "callback": "onGoCommunity -> community_.loadCommunityPage(); switchTo(7)"
+      }
+    },
+    "file_open_callback": {
+      "defined_at": "InitialPage.h:54",
+      "signature": "std::function<void(const juce::File&)> onOpenFile",
+      "wired_at": "MainWindow.cpp:263-340"
+    }
+  },
+
+  "task_2_full_song_workflow": {
+    "ui_entry_point": {
+      "file": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/MainWindow.cpp",
+      "line": "263-340",
+      "trigger": "initial_.onOpenFile callback when processMode_ == ProcessMode::FullSong"
+    },
+    "workflow_steps": [
+      {
+        "step": 1,
+        "action": "Check process mode",
+        "file": "MainWindow.cpp",
+        "line": "270",
+        "code": "if (processMode_ == InitialPage::ProcessMode::FullSong)"
+      },
+      {
+        "step": 2,
+        "action": "Initialize FullSongService",
+        "file": "MainWindow.cpp",
+        "lines": "281-286",
+        "code": "fullSongService_ = std::make_unique<samplar::FullSongService>(app->bus()); fullSongService_->initialise();"
+      },
+      {
+        "step": 3,
+        "action": "Show ProcessingPage with mode 2 (FullSong)",
+        "file": "MainWindow.cpp",
+        "lines": "289-292",
+        "code": "processing_.setProcessMode(2); switchTo(2);"
+      },
+      {
+        "step": 4,
+        "action": "Run separation in background thread",
+        "file": "MainWindow.cpp",
+        "lines": "295-333",
+        "service_call": "fullSongService_->separateDrums(f, cfg, \"fullSong_\")"
+      },
+      {
+        "step": 5,
+        "action": "On success: Load drum stem into WavePreviewPage",
+        "file": "MainWindow.cpp",
+        "lines": "329-330",
+        "code": "preview_.loadFile(result.drumStemFile); switchTo(1);"
+      }
+    ],
+    "service_called": {
+      "file": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/services/FullSongService.cpp",
+      "class": "FullSongService",
+      "method": "separateDrums",
+      "line": "145-210"
+    },
+    "external_dependencies": {
+      "backend_selection_priority": [
+        {
+          "priority": 1,
+          "name": "UVR (audio-separator)",
+          "type": "Python pip package installed globally",
+          "command": "audio-separator",
+          "check_method": "isUvrAvailable() at line 1043-1090",
+          "how_installed": "pip install audio-separator",
+          "model_download": "Auto-downloads on first use",
+          "speed": "FASTEST (~2-3 min for 5-min song)"
+        },
+        {
+          "priority": 2,
+          "name": "ONNX GPU (demucs_onnx.exe)",
+          "type": "C++ CLI executable",
+          "required_files": [
+            "demucs_onnx.exe (in app directory)",
+            "onnxruntime.dll",
+            "onnxruntime_providers_cuda.dll",
+            "onnxruntime_providers_shared.dll",
+            "models/htdemucs.ort"
+          ],
+          "gpu_requirement": "NVIDIA GPU with CUDA",
+          "check_method": "GpuDetector::detect() in src/utils/GpuDetector.h",
+          "speed": "10-15x faster than CPU (~2-3 min for 5-min song)"
+        },
+        {
+          "priority": 3,
+          "name": "demucs.cpp CPU",
+          "type": "C++ CLI executable",
+          "executables_searched": [
+            "demucs_mt_mkl.exe (Intel CPUs)",
+            "demucs_mt_blis.exe (AMD CPUs)",
+            "demucs_mt_openblas.exe (fallback)",
+            "demucs_mt.cpp.main.exe (legacy)"
+          ],
+          "required_model": "models/ggml-model-htdemucs-4s-f16.bin",
+          "check_method": "CpuOptimizer::findBestDemucsCliPath() in src/utils/CpuOptimizer.h",
+          "speed": "SLOWEST (~25-30 min for 5-min song)"
+        }
+      ],
+      "NO_PYTHON_SCRIPTS_USED": true,
+      "NO_PYTHON_SUBPROCESS_FOR_DEMUCS": true,
+      "NOTE": "UVR uses 'audio-separator' which is a Python package installed via pip, but invoked as a shell command NOT as a Python script"
+    }
+  },
+
+  "task_3_drum_stem_workflow": {
+    "ui_entry_point": {
+      "file": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/MainWindow.cpp",
+      "line": "335-339",
+      "trigger": "initial_.onOpenFile callback when processMode_ == ProcessMode::DrumStem"
+    },
+    "workflow": {
+      "step_1": {
+        "action": "Direct load into WavePreviewPage",
+        "file": "MainWindow.cpp",
+        "lines": "336-338",
+        "code": "preview_.loadFile(f); switchTo(1);"
+      }
+    },
+    "NO_SEPARATION_USED": true,
+    "note": "DrumStem mode assumes the input file IS already a drum stem/loop. No external tools or Python invoked."
+  },
+
+  "task_4_pattern_preview_dialog": {
+    "file": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/Components/PatternPreviewDialog.h",
+    "purpose": "Interactive dialog for reviewing and editing DETECTED DRUM PATTERNS (not for separation)",
+    "drum_separation_method": "NONE - This component does NOT perform drum separation",
+    "what_it_actually_does": {
+      "input": "MultiBandPatternExtractor::ExtractionResult (already analyzed audio)",
+      "features": [
+        "Waveform display of source audio",
+        "Grid overlay with hit markers",
+        "Click to toggle pattern cells",
+        "MIDI and Audio preview playback",
+        "Pattern quantization/editing",
+        "Save patterns to library"
+      ],
+      "dependencies_internal": [
+        "MultiBandPatternExtractor (src/utils/MultiBandPatternExtractor.h) - FFT-based onset detection",
+        "DrumCategoryPatternExtractor (src/utils/DrumCategoryPatternExtractor.h) - Category classification",
+        "IntelligentPatternClassifier (src/utils/IntelligentPatternClassifier.h) - ML clustering",
+        "LabeledHitDatabase (src/utils/ml/LabeledHitDatabase.h) - User classifications"
+      ],
+      "dependencies_external": "NONE - All pattern analysis is done in C++ via FFT and ML"
+    },
+    "LARS_STATUS": "LARS was a deprecated Python-based system. PatternPreviewDialog replaced its functionality with pure C++ implementations."
+  },
+
+  "evidence_summary": {
+    "python_usage_in_current_codebase": {
+      "direct_python_subprocess": false,
+      "python_scripts_invoked": "NONE",
+      "python_packages_as_cli": {
+        "audio-separator": {
+          "used_for": "UVR drum separation (Full Song workflow)",
+          "invoked_as": "CLI command 'audio-separator' via juce::ChildProcess",
+          "pip_package": "audio-separator",
+          "file": "FullSongService.cpp:1092-1286"
+        }
+      }
+    },
+    "c++_cli_executables_used": {
+      "demucs_onnx.exe": "GPU-accelerated ONNX separation",
+      "demucs_mt_*.exe": "CPU demucs.cpp separation",
+      "NOTE": "These are standalone C++ executables, not Python"
+    },
+    "workflow_summary": {
+      "DrumStem_mode": "File -> WavePreviewPage (direct, no separation)",
+      "FullSong_mode": "File -> FullSongService.separateDrums() -> [UVR/ONNX/demucs.cpp CLI] -> drums.wav -> WavePreviewPage"
+    }
+  },
+
+  "files_traced": [
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/Pages/InitialPage.cpp",
+      "purpose": "UI entry point with process mode selection"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/Pages/InitialPage.h",
+      "purpose": "InitialPage class definition with ProcessMode enum"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/MainWindow.cpp",
+      "purpose": "Main routing logic for file open and page navigation"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/services/FullSongService.cpp",
+      "purpose": "Drum separation service with multiple backend support"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/services/FullSongService.h",
+      "purpose": "FullSongService interface with Config and Result structs"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/utils/CpuOptimizer.h",
+      "purpose": "CPU detection for optimal demucs.cpp CLI selection"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/utils/GpuDetector.h",
+      "purpose": "GPU detection for ONNX CUDA acceleration"
+    },
+    {
+      "path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/src/ui/Components/PatternPreviewDialog.h",
+      "purpose": "Pattern editing dialog (NOT for separation)"
+    }
+  ]
+}

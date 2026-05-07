@@ -1,0 +1,186 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-15T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "investigation_scope": "PatternPreviewDialog result structure, callbacks, and database save workflow",
+
+    "result_struct": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+      "lines": "46-52",
+      "verified": true,
+      "complete_code": "struct Result {\n    bool accepted = false;\n    std::vector<PatternEntry> patterns;  // All patterns including subcategories\n    juce::String genre;\n    juce::String patternName;\n    float finalBpm = 0.0f;  // The BPM after any user override\n};",
+      "analysis": "Result struct contains all data needed for both database save AND step sequencer injection"
+    },
+
+    "pattern_entry_struct": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+      "lines": "38-44",
+      "verified": true,
+      "complete_code": "struct PatternEntry {\n    DrumCategory category = DrumCategory::Percussion;\n    juce::String displayName;       // \"KICK\", \"KICK - 808\", etc.\n    juce::String subcategoryName;   // \"808\", \"Acoustic\", etc. (empty for base categories)\n    std::vector<uint8_t> pattern;\n    bool isSubcategory = false;\n};",
+      "analysis": "PatternEntry has category, displayName, and pattern vector - exactly what DrumTrack needs"
+    },
+
+    "on_close_callback": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+      "line": 82,
+      "verified": true,
+      "declaration": "std::function<void(bool accepted)> onClose;",
+      "usage_file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.cpp",
+      "usage_lines": "2394-2418",
+      "analysis": "onClose is set in showDialogAsync to capture result and call user callback"
+    },
+
+    "show_dialog_async": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.cpp",
+      "lines": "2319-2427",
+      "verified": true,
+      "signature": "static void showDialogAsync(\n    juce::Component* parent,\n    const MultiBandPatternExtractor::ExtractionResult& extractionResult,\n    const juce::String& sourceFileName,\n    const juce::AudioBuffer<float>& sourceAudio,\n    double sampleRate,\n    const juce::StringArray& availableGenres,\n    std::function<void(Result)> callback,\n    std::function<void(DrumCategory, int)> midiCallback = nullptr,\n    std::function<void(float, float)> audioPlayCallback = nullptr,\n    std::function<void()> audioStopCallback = nullptr);",
+      "callback_pattern": "User callback receives Result struct with all pattern data when dialog closes"
+    },
+
+    "on_save_clicked": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.cpp",
+      "lines": "1732-1781",
+      "verified": true,
+      "flow": [
+        "1. result_.accepted = true",
+        "2. result_.patternName from patternNameEditor_.getText()",
+        "3. result_.genre from customGenreEditor_ or genreCombo_",
+        "4. result_.finalBpm = bpm_",
+        "5. Copy all rows to result_.patterns (skip empty patterns)",
+        "6. Call onClose(true)"
+      ],
+      "analysis": "Save builds Result from internal state, then triggers onClose callback"
+    },
+
+    "current_database_save_workflow": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "lines": "6844-6935",
+      "verified": true,
+      "flow": [
+        "1. SampleBrowserPage::learnPatternFromAudio() extracts pattern from audio",
+        "2. PatternPreviewDialog::showDialogAsync() opens dialog",
+        "3. Lambda callback receives Result when dialog closes",
+        "4. Callback iterates dialogResult.patterns",
+        "5. For each PatternEntry: db.learnPattern(name, category, pattern, genre)",
+        "6. db.save() persists to disk"
+      ],
+      "database_class": "UserPatternDatabase",
+      "database_method": "learnPattern(patternName, entry.category, entry.pattern, genre, entry.subcategoryName, entry.isSubcategory)"
+    },
+
+    "step_sequencer_api": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+      "verified": true,
+      "key_methods": {
+        "setCell": {
+          "line": 231,
+          "signature": "void setCell(int row, int step, bool on, bool repaintNow = true);",
+          "purpose": "Set individual step on/off"
+        },
+        "applyFlexiblePattern": {
+          "line": 238,
+          "signature": "void applyFlexiblePattern(const FlexiblePatternSet& pattern);",
+          "purpose": "Apply complete pattern set (clears and replaces all rows)"
+        },
+        "addTrackRow": {
+          "line": 239,
+          "signature": "void addTrackRow(const DrumTrack& track);",
+          "purpose": "Add single track row without clearing existing"
+        },
+        "setTempo": {
+          "line": 234,
+          "signature": "void setTempo(double bpm);",
+          "purpose": "Set sequencer tempo from detected BPM"
+        }
+      }
+    },
+
+    "step_sequencer_pointer_in_sample_browser": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+      "line": 385,
+      "verified": true,
+      "declaration": "std::unique_ptr<StepSequencerComponent> stepSequencer_;",
+      "analysis": "SampleBrowserPage owns StepSequencerComponent - can inject patterns directly"
+    },
+
+    "drum_track_struct": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\PatternLibrary.h",
+      "lines": "39-65",
+      "verified": true,
+      "complete_code": "struct DrumTrack {\n    int midiNote = 36;\n    juce::String name = \"Kick\";\n    DrumCategory category = DrumCategory::Kick;\n    std::vector<uint8_t> steps;\n    std::vector<uint8_t> velocities;\n    GridType gridType = GridType::Grid16;\n    // ...\n};",
+      "analysis": "DrumTrack can be constructed from PatternEntry data"
+    },
+
+    "flexible_pattern_set_struct": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\utils\\PatternLibrary.h",
+      "lines": "133-163",
+      "verified": true,
+      "complete_code": "struct FlexiblePatternSet {\n    juce::String name;\n    juce::String genre;\n    juce::String sourceFile;\n    double tempoBpm = 120.0;\n    int timeSignatureNum = 4;\n    int timeSignatureDenom = 4;\n    GridType gridType = GridType::Grid16;\n    std::vector<DrumTrack> tracks;\n    // ...\n};",
+      "analysis": "FlexiblePatternSet can be built from PatternPreviewDialog::Result"
+    },
+
+    "context_menu_trigger": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "lines": "405, 640-651",
+      "verified": true,
+      "menu_item_id": 400,
+      "menu_text": "Learn Pattern from Audio",
+      "event_published": "sample_browser.learn_pattern_from_audio",
+      "subscriber_line": 1251,
+      "analysis": "Right-click menu publishes event, subscriber calls learnPatternFromAudio()"
+    },
+
+    "integration_point_for_new_feature": {
+      "location": "Inside the showDialogAsync callback in SampleBrowserPage.cpp",
+      "lines": "6851-6931",
+      "analysis": "The callback already has access to dialogResult with all patterns AND 'this' pointer (SampleBrowserPage) has stepSequencer_ member",
+      "current_callback_capture": "[fileName]",
+      "required_capture": "[this, fileName]",
+      "why": "To capture 'this' pointer for stepSequencer_ access"
+    },
+
+    "conversion_mapping": {
+      "from_pattern_entry_to_drum_track": {
+        "entry.category": "track.category",
+        "entry.displayName": "track.name",
+        "entry.pattern": "track.steps",
+        "dialogResult.finalBpm": "patternSet.tempoBpm"
+      },
+      "verified": true
+    }
+  },
+
+  "evidence_summary": "PatternPreviewDialog returns Result struct with patterns vector (category, displayName, pattern steps) via async callback. Current workflow saves to UserPatternDatabase. SampleBrowserPage has stepSequencer_ pointer and can inject patterns using FlexiblePatternSet or addTrackRow(DrumTrack). Conversion from PatternEntry to DrumTrack is straightforward. The callback lambda needs 'this' capture to access stepSequencer_.",
+
+  "working_examples": [
+    {
+      "description": "Current database save in callback",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "lines": "6871-6904",
+      "pattern": "Iterate dialogResult.patterns, call db.learnPattern() for each"
+    },
+    {
+      "description": "applyFlexiblePattern implementation",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+      "lines": "3208-3265",
+      "pattern": "Clear grid, set tempo, add tracks from FlexiblePatternSet"
+    },
+    {
+      "description": "addTrackRow implementation",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+      "lines": "3267-3306",
+      "pattern": "Append single DrumTrack to existing grid without clearing"
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+      "location": "learnPatternFromAudio callback around line 6851",
+      "change": "Add step sequencer injection after database save"
+    }
+  ]
+}

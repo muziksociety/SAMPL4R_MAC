@@ -1,0 +1,19 @@
+build
+cmake-build-debug
+cmake-build-release
+
+# IDE stuff
+.idea
+
+dataset
+__pycache__
+stft_log.py
+debug_output.py
+
+.cache
+.vscode/settings.json
+
+# Sonic Visualizer project files
+*.sv
+
+node_modules/

@@ -1,0 +1,989 @@
+diff --git a/src/audio/SequencerAudioSource.cpp b/src/audio/SequencerAudioSource.cpp
+index 85be19b..0f274d0 100644
+--- a/src/audio/SequencerAudioSource.cpp
++++ b/src/audio/SequencerAudioSource.cpp
+@@ -70,7 +70,7 @@ void SequencerAudioSource::getNextAudioBlock(const juce::AudioSourceChannelInfo&
+         patternUpdatePending_.store(false, std::memory_order_release);
+     }
+ 
+-    if (schedule_.empty() || patternLengthSamples_ <= 0)
++    if (patternLengthSamples_ <= 0)
+         return;
+ 
+     const int numSamples = bufferToFill.numSamples;
+@@ -92,6 +92,9 @@ void SequencerAudioSource::getNextAudioBlock(const juce::AudioSourceChannelInfo&
+     }
+ 
+     // Process each sample in the block
++    const int totalSteps = totalSteps_.load(std::memory_order_acquire);
++    const int samplesPerStep = (totalSteps > 0) ? (patternLengthSamples_ / totalSteps) : patternLengthSamples_;
++
+     for (int i = 0; i < numSamples; ++i)
+     {
+         const int64_t currentPos = globalSamplePosition_ % patternLengthSamples_;
+@@ -122,9 +125,6 @@ void SequencerAudioSource::getNextAudioBlock(const juce::AudioSourceChannelInfo&
+                     triggerVoice(trigger.rowIndex);
+                 }
+ 
+-                // Update playhead step (atomic for UI)
+-                playheadStep_.store(trigger.stepIndex, std::memory_order_release);
+-
+                 ++nextTriggerIndex_;
+             }
+             else
+@@ -142,20 +142,15 @@ void SequencerAudioSource::getNextAudioBlock(const juce::AudioSourceChannelInfo&
+         // Advance global position
+         ++globalSamplePosition_;
+ 
+-        // Update playhead phase for smooth animation
+-        if (patternLengthSamples_ > 0)
++        // Update playhead step and phase from position (works even with no triggers)
++        if (totalSteps > 0 && samplesPerStep > 0)
+         {
+-            int totalSteps = totalSteps_.load(std::memory_order_acquire);
+-            if (totalSteps > 0)
+-            {
+-                int samplesPerStep = patternLengthSamples_ / totalSteps;
+-                if (samplesPerStep > 0)
+-                {
+-                    int posInStep = static_cast<int>(currentPos) % samplesPerStep;
+-                    float phase = static_cast<float>(posInStep) / static_cast<float>(samplesPerStep);
+-                    playheadPhase_.store(phase, std::memory_order_release);
+-                }
+-            }
++            int currentStep = static_cast<int>(currentPos / samplesPerStep) % totalSteps;
++            playheadStep_.store(currentStep, std::memory_order_release);
++
++            int posInStep = static_cast<int>(currentPos) % samplesPerStep;
++            float phase = static_cast<float>(posInStep) / static_cast<float>(samplesPerStep);
++            playheadPhase_.store(phase, std::memory_order_release);
+         }
+     }
+ 
+@@ -416,42 +411,42 @@ void SequencerAudioSource::rebuildSchedule()
+         {
+             if (step < (int)rows_[row].steps.size() && rows_[row].steps[step])
+             {
+-                if (rows_[row].sample.isValid())
++                // Schedule triggers even without samples (triggerVoice handles null buffers)
++                // This ensures playback/playhead works without loaded samples
++
++                // Check for roll data
++                bool hasRoll = false;
++                if (step < (int)rows_[row].rollData.size())
+                 {
+-                    // Check for roll data
+-                    bool hasRoll = false;
+-                    if (step < (int)rows_[row].rollData.size())
++                    const auto& rollData = rows_[row].rollData[step];
++                    if (rollData.rollCount > 1 || rollData.rollStyle != RollStyle::None)
+                     {
+-                        const auto& rollData = rows_[row].rollData[step];
+-                        if (rollData.rollCount > 1 || rollData.rollStyle != RollStyle::None)
++                        hasRoll = true;
++
++                        // Get roll trigger positions and velocities
++                        auto rollTriggers = rollData.getRollTriggers();
++                        for (const auto& [relPos, velocity] : rollTriggers)
+                         {
+-                            hasRoll = true;
+-
+-                            // Get roll trigger positions and velocities
+-                            auto rollTriggers = rollData.getRollTriggers();
+-                            for (const auto& [relPos, velocity] : rollTriggers)
+-                            {
+-                                ScheduledTrigger trigger;
+-                                // relPos is 0.0-1.0 within step
+-                                trigger.samplePosition = stepStartPos + static_cast<int>(relPos * samplesPerStep);
+-                                trigger.rowIndex = row;
+-                                trigger.stepIndex = step;
+-                                trigger.velocity = velocity;
+-                                schedule_.push_back(trigger);
+-                            }
++                            ScheduledTrigger trigger;
++                            // relPos is 0.0-1.0 within step
++                            trigger.samplePosition = stepStartPos + static_cast<int>(relPos * samplesPerStep);
++                            trigger.rowIndex = row;
++                            trigger.stepIndex = step;
++                            trigger.velocity = velocity;
++                            schedule_.push_back(trigger);
+                         }
+                     }
++                }
+ 
+-                    // If no roll, add single trigger
+-                    if (!hasRoll)
+-                    {
+-                        ScheduledTrigger trigger;
+-                        trigger.samplePosition = stepStartPos;
+-                        trigger.rowIndex = row;
+-                        trigger.stepIndex = step;
+-                        trigger.velocity = 1.0f;
+-                        schedule_.push_back(trigger);
+-                    }
++                // If no roll, add single trigger
++                if (!hasRoll)
++                {
++                    ScheduledTrigger trigger;
++                    trigger.samplePosition = stepStartPos;
++                    trigger.rowIndex = row;
++                    trigger.stepIndex = step;
++                    trigger.velocity = 1.0f;
++                    schedule_.push_back(trigger);
+                 }
+             }
+         }
+diff --git a/src/ui/Components/StepSequencerComponent.cpp b/src/ui/Components/StepSequencerComponent.cpp
+index c1e488a..1a52737 100644
+--- a/src/ui/Components/StepSequencerComponent.cpp
++++ b/src/ui/Components/StepSequencerComponent.cpp
+@@ -579,18 +579,16 @@ void StepSequencerComponent::resized() {
+         }
+     }
+ 
+-    // Transport buttons (Play/Stop) centered above channel rows, below top handle
++    // Transport buttons (Play/Stop) left-aligned, just above the channel rows
+     {
+         const int transportBtnH = 22;
+         const int transportBtnW = 28;
+         const int transportGap = 4;
+-        const int totalTransportW = transportBtnW * 2 + transportGap;
+ 
+-        // Center horizontally within the grid area (between labels and right panel)
+-        const int gridCenterX = seamLeftX + (seamRightX - seamLeftX) / 2;
+-        const int transportX = gridCenterX - totalTransportW / 2;
+-        // Position below the top resize handle (handle extends to Y~18)
+-        const int transportY = topHandleBounds().getBottom() + 2;
++        // Aligned with the row name text (after lock 18px + solo 18px icons)
++        const int transportX = b.getX() + 36;
++        // Just above the first row
++        const int transportY = rowContentTopY() - transportBtnH - 2;
+ 
+         // Hide buttons when component is too short (retracted/collapsed)
+         const bool showTransport = b.getHeight() >= 100;
+@@ -693,8 +691,7 @@ void StepSequencerComponent::resized() {
+                     int h = 14;
+                     int ctrlH = 24;
+ 
+-                    genreLabel_.setBounds(contentPad, cy, cw, h);
+-                    cy += h + 2;
++                    genreLabel_.setVisible(false);
+                     genreButton_.setBounds(contentPad, cy, cw, ctrlH);
+                     cy += ctrlH + 4;
+ 
+@@ -1507,8 +1504,9 @@ int StepSequencerComponent::rowContentTopY() const {
+     const int contentHeight = totalVisualRows * rowHeight;
+     const int availableHeight = getHeight();
+ 
+-    // Center rows vertically in the space below the header
+-    int offset = (availableHeight - contentHeight - headerH) / 2 + headerH;
++    // Center the combined block (header + rows) vertically
++    int totalBlock = headerH + contentHeight;
++    int offset = (availableHeight - totalBlock) / 2 + headerH;
+     return std::max(headerH, offset);
+ }
+ 
+@@ -2068,7 +2066,7 @@ void StepSequencerComponent::setupAccordionPanel() {
+ 
+     // --- PATTERN CONTENT ---
+     patternContent_ = std::make_unique<juce::Component>();
+-    genreButton_.setButtonText("Select Pattern...");
++    genreButton_.setButtonText("Patterns");
+     // Style as green borderless button (matching Generate button)
+     genreButton_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff228B22));  // Forest green
+     genreButton_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff32CD32)); // Lime green
+@@ -3222,7 +3220,7 @@ void StepSequencerComponent::applyPatternSet(const PatternSet& patternSet)
+         // Update current genre
+         currentGenreName_ = juce::String(patternSet.genre);
+         selectedGenreGuide_ = patternSet.genre;
+-        genreButton_.setButtonText(currentGenreName_.isNotEmpty() ? currentGenreName_ : "Select Pattern...");
++        genreButton_.setButtonText(currentGenreName_.isNotEmpty() ? currentGenreName_ : "Patterns");
+ 
+         // Update grid size if needed - use setBars() to properly sync numBars_ with grid size
+         int targetSteps = patternSet.getStepCount();
+diff --git a/src/ui/Pages/SampleBrowserPage.cpp b/src/ui/Pages/SampleBrowserPage.cpp
+index 3e8542c..751cd3e 100644
+--- a/src/ui/Pages/SampleBrowserPage.cpp
++++ b/src/ui/Pages/SampleBrowserPage.cpp
+@@ -83,6 +83,18 @@ SampleBrowserPage::Tile::Tile(int index, const File& f, AudioFormatManager& fm,
+         }
+     };
+ 
++    // TRIM: Confirm button (scissors icon) - hidden until trim handles are moved
++    addAndMakeVisible(trimConfirmBtn_);
++    trimConfirmBtn_.setButtonText(juce::String::fromUTF8("\xe2\x9c\x82"));  // ✂ scissors
++    trimConfirmBtn_.setTooltip("Apply trim to sample");
++    trimConfirmBtn_.setVisible(false);
++    trimConfirmBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff00cc44));
++    trimConfirmBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
++    trimConfirmBtn_.onClick = [this]{
++        if (auto* p = findParentComponentOfClass<SampleBrowserPage>())
++            p->applyTrim(index_);
++    };
++
+     // Initialize identity + display file and load waveform
+     setFile(f);
+ }
+@@ -184,6 +196,54 @@ void SampleBrowserPage::Tile::paint(Graphics& g)
+ 
+         g.setColour(drawColour);
+         thumb_.drawChannel(g, waveformArea.toNearestInt(), 0.0, durationSeconds, 0, 1.0f);
++
++        // TRIM HANDLES: Draw bracket handles on hover (always visible on hover)
++        if (trimHovered_ || trimDragging_)
++        {
++            float wX = waveformArea.getX();
++            float wW = waveformArea.getWidth();
++            float wY = waveformArea.getY();
++            float wH = waveformArea.getHeight();
++
++            // Dim regions outside trim range (only if trim moved from defaults)
++            if (trimStart_ > 0.001f || trimEnd_ < 0.999f)
++            {
++                g.setColour(juce::Colours::black.withAlpha(0.55f));
++                if (trimStart_ > 0.001f)
++                    g.fillRect(juce::Rectangle<float>(wX, wY, wW * trimStart_, wH));
++                if (trimEnd_ < 0.999f)
++                    g.fillRect(juce::Rectangle<float>(wX + wW * trimEnd_, wY, wW * (1.0f - trimEnd_), wH));
++            }
++
++            // Start bracket (green) - always show on hover
++            float startX = wX + wW * trimStart_;
++            g.setColour(juce::Colour(0xff00ff66).withAlpha(0.9f));
++            g.fillRect(juce::Rectangle<float>(startX, wY, 2.0f, wH));
++            g.fillRect(juce::Rectangle<float>(startX, wY, 6.0f, 2.0f));           // top bar
++            g.fillRect(juce::Rectangle<float>(startX, wY + wH - 2.0f, 6.0f, 2.0f)); // bottom bar
++
++            // End bracket (red) - always show on hover
++            float endX = wX + wW * trimEnd_;
++            g.setColour(juce::Colour(0xffff4444).withAlpha(0.9f));
++            g.fillRect(juce::Rectangle<float>(endX - 2.0f, wY, 2.0f, wH));
++            g.fillRect(juce::Rectangle<float>(endX - 6.0f, wY, 6.0f, 2.0f));           // top bar
++            g.fillRect(juce::Rectangle<float>(endX - 6.0f, wY + wH - 2.0f, 6.0f, 2.0f)); // bottom bar
++        }
++        // Show subtle trim indicators even when NOT hovered (if trim is set)
++        else if (trimStart_ > 0.001f || trimEnd_ < 0.999f)
++        {
++            float wX = waveformArea.getX();
++            float wW = waveformArea.getWidth();
++            float wY = waveformArea.getY();
++            float wH = waveformArea.getHeight();
++
++            // Light dim on trimmed regions
++            g.setColour(juce::Colours::black.withAlpha(0.35f));
++            if (trimStart_ > 0.001f)
++                g.fillRect(juce::Rectangle<float>(wX, wY, wW * trimStart_, wH));
++            if (trimEnd_ < 0.999f)
++                g.fillRect(juce::Rectangle<float>(wX + wW * trimEnd_, wY, wW * (1.0f - trimEnd_), wH));
++        }
+     }
+ 
+     float effectiveAlpha = playbackActive_ ? 1.0f : juce::jlimit(0.0f, 1.0f, playbackFadeAlpha_);
+@@ -191,11 +251,15 @@ void SampleBrowserPage::Tile::paint(Graphics& g)
+     if (playbackActive_ || playbackFading_)
+     {
+         const float progress = juce::jlimit(0.0f, 1.0f, playbackProgress_);
+-        float highlightWidth = waveformArea.getWidth() * juce::jmax(progress, 0.01f);
++        // Map progress to trim range so highlight only sweeps the active region
++        float trimRange = trimEnd_ - trimStart_;
++        float trimStartPx = waveformArea.getWidth() * trimStart_;
++        float trimWidthPx = waveformArea.getWidth() * trimRange;
++        float highlightWidth = trimWidthPx * juce::jmax(progress, 0.01f);
+         highlightWidth = juce::jmax(highlightWidth, 1.0f);
+-        highlightWidth = juce::jmin(highlightWidth, waveformArea.getWidth());
++        highlightWidth = juce::jmin(highlightWidth, trimWidthPx);
+ 
+-        juce::Rectangle<float> highlight = waveformArea.withWidth(highlightWidth);
++        juce::Rectangle<float> highlight = waveformArea.withX(waveformArea.getX() + trimStartPx).withWidth(highlightWidth);
+ 
+         if (effectiveAlpha <= 0.01f)
+             return;
+@@ -392,14 +456,76 @@ void SampleBrowserPage::Tile::resized()
+     // QOL FIX #3: Position regenerate button in the middle between checkbox and V button
+     int centerX = getWidth() / 2;
+     regenerateBtn_.setBounds(centerX - sz / 2, getHeight() - pad - sz, sz, sz);
++
++    // TRIM: Confirm button - centered in the waveform area
++    const int trimBtnW = 28;
++    const int trimBtnH = 20;
++    trimConfirmBtn_.setBounds(centerX - trimBtnW / 2, getHeight() / 2 - trimBtnH / 2, trimBtnW, trimBtnH);
++}
++
++void SampleBrowserPage::Tile::mouseDown(const MouseEvent& e)
++{
++    // Check if clicking near a trim handle
++    auto waveformArea = getLocalBounds().toFloat().reduced(6.0f, 6.0f);
++    float wX = waveformArea.getX();
++    float wW = waveformArea.getWidth();
++    float mx = (float)e.getPosition().x;
++    float my = (float)e.getPosition().y;
++
++    // Only handle trim if within waveform vertical area
++    if (my >= waveformArea.getY() && my <= waveformArea.getBottom())
++    {
++        float startX = wX + wW * trimStart_;
++        float endX = wX + wW * trimEnd_;
++        const float hitZone = 8.0f;  // pixels of grab zone
++
++        if (std::abs(mx - startX) < hitZone)
++        {
++            trimDragging_ = true;
++            activeTrimHandle_ = TrimHandle::Start;
++            return;
++        }
++        else if (std::abs(mx - endX) < hitZone)
++        {
++            trimDragging_ = true;
++            activeTrimHandle_ = TrimHandle::End;
++            return;
++        }
++    }
++
++    // Not a trim drag - let normal click handling proceed
++    // (Shift+click selection is handled via onTileClicked_ in mouseUp)
+ }
+ 
+ void SampleBrowserPage::Tile::mouseDrag(const MouseEvent& e)
+ {
++    // Handle trim dragging
++    if (trimDragging_)
++    {
++        auto waveformArea = getLocalBounds().toFloat().reduced(6.0f, 6.0f);
++        float wX = waveformArea.getX();
++        float wW = waveformArea.getWidth();
++        float normalized = juce::jlimit(0.0f, 1.0f, ((float)e.getPosition().x - wX) / wW);
++
++        if (activeTrimHandle_ == TrimHandle::Start)
++        {
++            trimStart_ = juce::jmin(normalized, trimEnd_ - 0.02f);  // Min 2% gap
++        }
++        else if (activeTrimHandle_ == TrimHandle::End)
++        {
++            trimEnd_ = juce::jmax(normalized, trimStart_ + 0.02f);
++        }
++        repaint();
++        return;
++    }
++
++    // Block DnD when trim is pending (user must confirm trim first)
++    if (hasPendingTrim()) return;
++
++    // Normal DnD behavior
+     if (! originalFile_.existsAsFile()) return;
+     if (auto* dnd = findParentComponentOfClass<juce::DragAndDropContainer>())
+     {
+-        // Build a description object with metadata and start internal DnD with drag image
+         auto* obj = new juce::DynamicObject();
+         obj->setProperty("file", originalFile_.getFullPathName());
+         obj->setProperty("tileIndex", index_);
+@@ -411,8 +537,61 @@ void SampleBrowserPage::Tile::mouseDrag(const MouseEvent& e)
+     }
+ }
+ 
++void SampleBrowserPage::Tile::mouseMove(const MouseEvent& e)
++{
++    // Change cursor when near trim handles
++    auto waveformArea = getLocalBounds().toFloat().reduced(6.0f, 6.0f);
++    float wX = waveformArea.getX();
++    float wW = waveformArea.getWidth();
++    float mx = (float)e.getPosition().x;
++    float my = (float)e.getPosition().y;
++
++    if (my >= waveformArea.getY() && my <= waveformArea.getBottom())
++    {
++        float startX = wX + wW * trimStart_;
++        float endX = wX + wW * trimEnd_;
++        const float hitZone = 8.0f;
++
++        if (std::abs(mx - startX) < hitZone || std::abs(mx - endX) < hitZone)
++        {
++            setMouseCursor(juce::MouseCursor::LeftRightResizeCursor);
++            return;
++        }
++    }
++    setMouseCursor(juce::MouseCursor::NormalCursor);
++}
++
++void SampleBrowserPage::Tile::mouseEnter(const MouseEvent& e)
++{
++    juce::ignoreUnused(e);
++    trimHovered_ = true;
++    repaint();
++}
++
++void SampleBrowserPage::Tile::mouseExit(const MouseEvent& e)
++{
++    juce::ignoreUnused(e);
++    trimHovered_ = false;
++    setMouseCursor(juce::MouseCursor::NormalCursor);
++    repaint();
++}
++
+ void SampleBrowserPage::Tile::mouseUp(const MouseEvent& e)
+ {
++    // End trim drag if active
++    if (trimDragging_)
++    {
++        trimDragging_ = false;
++        activeTrimHandle_ = TrimHandle::None;
++        // Show/hide confirm button based on whether trim is non-default
++        trimConfirmBtn_.setVisible(hasPendingTrim());
++        juce::Logger::writeToLog("[Tile] Trim set: start=" + juce::String(trimStart_, 3)
++                                 + " end=" + juce::String(trimEnd_, 3)
++                                 + " for " + originalFile_.getFileName());
++        repaint();
++        return;
++    }
++
+     if (e.mods.isPopupMenu())
+     {
+         auto t0 = juce::Time::getMillisecondCounterHiRes();
+@@ -494,6 +673,13 @@ void SampleBrowserPage::Tile::mouseUp(const MouseEvent& e)
+         juce::String moveLabel = batchMode ? "Move " + juce::String(selCount) + " Samples to Folder..." : "Move to Folder...";
+         m.addItem(700, moveLabel);
+ 
++        // Undo Trim option (only if a trim backup exists for this sample)
++        if (parentPage && parentPage->hasTrimBackup(index_))
++        {
++            m.addSeparator();
++            m.addItem(800, "Undo Trim");
++        }
++
+         // Capture batch mode state for the callback
+         m.showMenuAsync(juce::PopupMenu::Options(), [this, batchMode](int res){
+             if (res == 200) {
+@@ -742,6 +928,12 @@ void SampleBrowserPage::Tile::mouseUp(const MouseEvent& e)
+                     parentPage->moveSampleToFolder(index_);
+                 }
+             }
++            else if (res == 800)
++            {
++                // Undo Trim
++                if (auto* parentPage = findParentComponentOfClass<SampleBrowserPage>())
++                    parentPage->undoTrim(index_);
++            }
+         });
+         return;
+     }
+@@ -1547,6 +1739,9 @@ SampleBrowserPage::~SampleBrowserPage()
+ {
+     juce::Logger::writeToLog("[DESTRUCTOR] === SampleBrowserPage DESTRUCTOR START ===");
+ 
++    // Clean up trim backups (session-only temp files)
++    cleanupTrimBackups();
++
+     // CRITICAL: Stop timer FIRST to prevent timer callbacks during destruction
+     stopTimer();
+ 
+@@ -3356,8 +3551,9 @@ void SampleBrowserPage::classifyFolderSamples(const juce::File& folder, DrumCate
+     // Run file enumeration AND classification in background thread to avoid UI freeze
+     bool isManual = (category != DrumCategory::Other);
+     juce::Component::SafePointer<SampleBrowserPage> safeThis(this);
++    auto* analyzer = &drumAnalyzer_;  // Capture pointer to analyzer for background thread
+ 
+-    std::thread classifyThread([safeThis, folder, category, isManual]() mutable
++    std::thread classifyThread([safeThis, analyzer, folder, category, isManual]() mutable
+     {
+         // ===== PHASE 0: File enumeration (in background!) =====
+         juce::Array<juce::File> folderFiles;
+@@ -3409,7 +3605,7 @@ void SampleBrowserPage::classifyFolderSamples(const juce::File& folder, DrumCate
+             juce::String filePath = audioFile.getFullPathName();
+ 
+             // Run frequency analysis (this is the slow part)
+-            auto analysisResult = drumAnalyzer_.analyze(audioFile);
++            auto analysisResult = analyzer->analyze(audioFile);
+             juce::Colour frequencyBasedColor = analysisResult.color;
+ 
+             // Store results locally
+@@ -3556,42 +3752,6 @@ void SampleBrowserPage::classifyFolderAsCustom(const juce::File& folder, const C
+     juce::Logger::writeToLog("[SampleBrowserPage] Folder: " + folder.getFullPathName());
+     juce::Logger::writeToLog("[SampleBrowserPage] Custom Category: " + cat.name + " (letter: " + cat.letter + ")");
+ 
+-    // Collect files first (this is fast)
+-    juce::Array<juce::File> folderFiles;
+-    folder.findChildFiles(folderFiles, juce::File::findFiles, true,
+-        "*.wav;*.WAV;*.mp3;*.MP3;*.aif;*.AIF;*.aiff;*.AIFF;*.flac;*.FLAC;*.ogg;*.OGG");
+-
+-    // If direct scan found nothing, try getting all files and filtering manually
+-    if (folderFiles.isEmpty())
+-    {
+-        juce::Array<juce::File> allFiles;
+-        folder.findChildFiles(allFiles, juce::File::findFiles, true);
+-        for (const auto& file : allFiles)
+-        {
+-            juce::String ext = file.getFileExtension().toLowerCase();
+-            if (ext == ".wav" || ext == ".mp3" || ext == ".aif" || ext == ".aiff" ||
+-                ext == ".flac" || ext == ".ogg")
+-            {
+-                folderFiles.add(file);
+-            }
+-        }
+-    }
+-
+-    juce::Logger::writeToLog("[SampleBrowserPage] Found " + juce::String(folderFiles.size()) + " audio files");
+-
+-    if (folderFiles.isEmpty())
+-    {
+-        juce::Logger::writeToLog("[SampleBrowserPage] No files to classify");
+-        return;
+-    }
+-
+-    // Create and show progress dialog (same as folder classification)
+-    auto* dialog = new juce::AlertWindow("Classifying Samples",
+-        "Processing " + juce::String(folderFiles.size()) + " files as " + cat.name + "...",
+-        juce::MessageBoxIconType::NoIcon);
+-    dialog->addProgressBarComponent(classificationProgress_);
+-    dialog->enterModalState(true, nullptr, false);
+-
+     // Reset progress
+     classificationProgress_ = 0.0;
+ 
+@@ -3601,14 +3761,43 @@ void SampleBrowserPage::classifyFolderAsCustom(const juce::File& folder, const C
+     juce::Colour catColor = cat.color;
+     DrumCategory baseCategory = cat.baseCategory;
+     juce::String customCategoryId = cat.id.toString();  // UUID for ML training as own class
+-    int totalFiles = folderFiles.size();
+-
+-    // Run classification in background thread (SAME PATTERN AS classifyFolderSamples)
+-    // Custom categories train as their OWN class (not as base category)
+     bool doMLRecording = true;
+ 
+-    std::thread classifyThread([this, folderFiles = std::move(folderFiles), folder, catName, catLetter, catColor, baseCategory, customCategoryId, totalFiles, dialog, doMLRecording]() mutable
++    juce::Component::SafePointer<SampleBrowserPage> safeThis(this);
++
++    // Run file enumeration AND classification in background thread to avoid UI freeze
++    std::thread classifyThread([safeThis, folder, catName, catLetter, catColor, baseCategory, customCategoryId, doMLRecording]() mutable
+     {
++        // ===== PHASE 0: File enumeration (in background!) =====
++        juce::Array<juce::File> folderFiles;
++        folder.findChildFiles(folderFiles, juce::File::findFiles, true,
++            "*.wav;*.WAV;*.mp3;*.MP3;*.aif;*.AIF;*.aiff;*.AIFF;*.flac;*.FLAC;*.ogg;*.OGG");
++
++        // If direct scan found nothing, try getting all files and filtering manually
++        if (folderFiles.isEmpty())
++        {
++            juce::Array<juce::File> allFiles;
++            folder.findChildFiles(allFiles, juce::File::findFiles, true);
++            for (const auto& file : allFiles)
++            {
++                juce::String ext = file.getFileExtension().toLowerCase();
++                if (ext == ".wav" || ext == ".mp3" || ext == ".aif" || ext == ".aiff" ||
++                    ext == ".flac" || ext == ".ogg")
++                {
++                    folderFiles.add(file);
++                }
++            }
++        }
++
++        juce::Logger::writeToLog("[SampleBrowserPage] [BG] Found " + juce::String(folderFiles.size()) + " audio files");
++
++        if (folderFiles.isEmpty())
++        {
++            juce::Logger::writeToLog("[SampleBrowserPage] [BG] No files to classify");
++            return;
++        }
++
++        int totalFiles = folderFiles.size();
+         int count = 0;
+ 
+         // Thread-local storage for results (avoid UI thread access)
+@@ -3630,48 +3819,47 @@ void SampleBrowserPage::classifyFolderAsCustom(const juce::File& folder, const C
+ 
+             // Update progress on UI thread
+             double progress = static_cast<double>(count) / totalFiles;
+-            juce::MessageManager::callAsync([this, progress]()
++            juce::MessageManager::callAsync([safeThis, progress]()
+             {
+-                classificationProgress_ = progress;
++                if (safeThis == nullptr) return;
++                safeThis->classificationProgress_ = progress;
+             });
+         }
+ 
+         juce::Logger::writeToLog("[SampleBrowserPage] [ML-QUEUE] Prepared " +
+             juce::String(static_cast<int>(filesToProcess->size())) + " samples for custom category training");
+ 
+-        // Apply results on UI thread - update maps and close dialog quickly
+-        juce::MessageManager::callAsync([this, colorResults = std::move(colorResults),
++        // Apply results on UI thread - update maps
++        juce::MessageManager::callAsync([safeThis, colorResults = std::move(colorResults),
+                                          manualPaths = std::move(manualPaths),
+-                                         folder, catName, catColor, baseCategory, customCategoryId, count, dialog, filesToProcess, doMLRecording]()
++                                         folder, catName, catColor, baseCategory, customCategoryId, count, filesToProcess, doMLRecording]()
+         {
+-            juce::Logger::writeToLog("[SampleBrowserPage] Applying custom category classification results...");
++            if (safeThis == nullptr) return;
+ 
+-            // Update dialog to show we're applying results
+-            if (dialog != nullptr)
+-                dialog->setMessage("Applying results to " + juce::String(count) + " files...");
++            juce::Logger::writeToLog("[SampleBrowserPage] Applying custom category classification results...");
+ 
+             // Apply color results (fast - just map updates)
+             for (const auto& [path, color] : colorResults)
+             {
+-                eqWaveColorsByPath_[path] = color;
+-                manualCategoryOverridesByPath_[path] = DrumCategory::Custom;
++                safeThis->eqWaveColorsByPath_[path] = color;
++                safeThis->manualCategoryOverridesByPath_[path] = DrumCategory::Custom;
+             }
+ 
+             // Apply manual paths (fast - just set updates)
+             for (const auto& path : manualPaths)
+             {
+-                manuallyClassifiedPaths_.insert(path);
++                safeThis->manuallyClassifiedPaths_.insert(path);
+             }
+ 
+             // Update displayed tiles (fast - only visible tiles)
+             // Also track indices for EqDivider sync
+             std::vector<int> updatedIndices;
+-            for (int i = 0; i < files_.size(); ++i)
++            for (int i = 0; i < safeThis->files_.size(); ++i)
+             {
+-                if (files_[i].getFullPathName().startsWith(folder.getFullPathName()))
++                if (safeThis->files_[i].getFullPathName().startsWith(folder.getFullPathName()))
+                 {
+                     updatedIndices.push_back(i);
+-                    if (auto* tile = findTileForIndex(i))
++                    if (auto* tile = safeThis->findTileForIndex(i))
+                     {
+                         tile->setWaveformColour(catColor);
+                         tile->setManuallyClassified(true);
+@@ -3682,34 +3870,27 @@ void SampleBrowserPage::classifyFolderAsCustom(const juce::File& folder, const C
+             }
+ 
+             // Update EqDivider with custom category for all affected samples
+-            if (eqDivider_ && !updatedIndices.empty())
++            if (safeThis->eqDivider_ && !updatedIndices.empty())
+             {
+                 for (int idx : updatedIndices)
+                 {
+-                    eqDivider_->setSampleColor(idx, catColor);
+-                    eqDivider_->setSampleMLCategory(idx, DrumCategory::Custom);
++                    safeThis->eqDivider_->setSampleColor(idx, catColor);
++                    safeThis->eqDivider_->setSampleMLCategory(idx, DrumCategory::Custom);
+                 }
+-                eqDivider_->endProgressiveLoading();
++                safeThis->eqDivider_->endProgressiveLoading();
+                 juce::Logger::writeToLog("[SampleBrowserPage] [CUSTOM-FOLDER] Refreshed EqDivider with " +
+                     juce::String(static_cast<int>(updatedIndices.size())) + " custom category samples");
+             }
+ 
+             // Set folder color in tree view
+-            setFolderCategoryColor(folder, catColor);
++            safeThis->setFolderCategoryColor(folder, catColor);
+ 
+             // Save classifications
+-            saveClassifications();
++            safeThis->saveClassifications();
+ 
+             juce::Logger::writeToLog("[SampleBrowserPage] Classified " + juce::String(count) +
+                 " samples in folder as custom category: " + catName);
+ 
+-            // Close dialog NOW - UI is updated, user can continue working
+-            if (dialog != nullptr)
+-            {
+-                dialog->exitModalState(0);
+-                juce::MessageManager::callAsync([dialog]() { delete dialog; });
+-            }
+-
+             // Queue ML batch recording (non-blocking - uses background worker thread)
+             if (doMLRecording && filesToProcess && !filesToProcess->empty())
+             {
+@@ -3847,21 +4028,21 @@ void SampleBrowserPage::teardownAudioChainAsync(std::function<void()> onComplete
+     std::thread([this, onComplete = std::move(onComplete)]() {
+         juce::Logger::writeToLog("[ASYNC-BG] Background teardown started");
+ 
+-        // Step 4: Wait 35ms for any in-progress audio callback to complete
+-        juce::Thread::sleep(35);
++        // Step 4: Wait for any in-progress audio callback to complete
++        juce::Thread::sleep(15);
+ 
+         // Step 5: Remove transport from mixer (now safe - no callbacks running)
+         previewMixer_.removeAllInputs();
+ 
+         // Step 6: Stop transport + wait
+         transport_.stop();
+-        juce::Thread::sleep(10);
++        juce::Thread::sleep(5);
+ 
+         // Step 7: Clear transport source
+         transport_.setSource(nullptr);
+ 
+         // Step 8: Wait for TimeSliceThread (BufferingAudioSource) to complete
+-        juce::Thread::sleep(25);
++        juce::Thread::sleep(10);
+ 
+         // Step 9: Reset reader - NOW fully safe
+         reader_.reset();
+@@ -5571,6 +5752,15 @@ void SampleBrowserPage::playFileFromCache(const juce::File& f)
+         {
+             juce::Logger::writeToLog("[SampleBrowserPage] CACHE HIT - instant playback for: " + playbackFile.getFileName());
+ 
++            // SPAM-CLICK FIX: If a teardown is in progress, cancel pending and clear flag
++            // The teardown thread will still finish but its completion callback becomes a no-op
++            // because we've already started new cached playback
++            if (isAudioTransitioning_.load())
++            {
++                juce::Logger::writeToLog("[SampleBrowserPage] Interrupting transition for instant cache playback");
++                pendingPlayFile_ = juce::File();  // Cancel any queued file
++            }
++
+             // Stop any current cached playback instantly (no teardown needed for buffer source)
+             bufferSource_.stop();
+ 
+@@ -7713,6 +7903,198 @@ void SampleBrowserPage::learnAndApplyToSequencer(const juce::File& audioFile)
+     juce::Logger::writeToLog("[SampleBrowserPage] PatternPreviewDialog launched (async)");
+ }
+ 
++// ============ TRIM: Apply / Undo / Cleanup ============
++
++void SampleBrowserPage::applyTrim(int tileIndex)
++{
++    auto* tile = findTileForIndex(tileIndex);
++    if (!tile) return;
++
++    const auto& srcFile = tile->file();
++    float trimStart = tile->getTrimStart();
++    float trimEnd = tile->getTrimEnd();
++
++    if (trimStart < 0.001f && trimEnd > 0.999f)
++    {
++        juce::Logger::writeToLog("[Trim] No trim to apply for " + srcFile.getFileName());
++        return;
++    }
++
++    juce::Logger::writeToLog("[Trim] === APPLYING TRIM === " + srcFile.getFileName()
++                             + " start=" + juce::String(trimStart, 3)
++                             + " end=" + juce::String(trimEnd, 3));
++
++    // Read the original audio
++    std::unique_ptr<juce::AudioFormatReader> reader(formatManager_.createReaderFor(srcFile));
++    if (!reader)
++    {
++        juce::Logger::writeToLog("[Trim] ERROR: Could not read file: " + srcFile.getFullPathName());
++        return;
++    }
++
++    juce::int64 totalSamples = reader->lengthInSamples;
++    double sampleRate = reader->sampleRate;
++    int numChannels = (int)reader->numChannels;
++    int bitsPerSample = (int)reader->bitsPerSample;
++
++    juce::int64 startSample = (juce::int64)(trimStart * totalSamples);
++    juce::int64 endSample = (juce::int64)(trimEnd * totalSamples);
++    juce::int64 trimmedLength = endSample - startSample;
++
++    if (trimmedLength <= 0)
++    {
++        juce::Logger::writeToLog("[Trim] ERROR: Trimmed length is zero");
++        return;
++    }
++
++    // Read the trimmed portion
++    juce::AudioBuffer<float> trimmedBuffer(numChannels, (int)trimmedLength);
++    reader->read(&trimmedBuffer, 0, (int)trimmedLength, startSample, true, true);
++    reader.reset();  // Release file handle
++
++    // Save backup of original (if not already backed up)
++    juce::String filePath = srcFile.getFullPathName();
++    if (trimBackups_.find(filePath) == trimBackups_.end())
++    {
++        juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
++        juce::File backupFile = tempDir.getChildFile("sm5_trim_backup_" + juce::String(juce::Random::getSystemRandom().nextInt64()) + ".wav");
++        if (srcFile.copyFileTo(backupFile))
++        {
++            trimBackups_[filePath] = backupFile;
++            juce::Logger::writeToLog("[Trim] Backup saved: " + backupFile.getFullPathName());
++        }
++        else
++        {
++            juce::Logger::writeToLog("[Trim] WARNING: Could not create backup!");
++        }
++    }
++
++    // Write trimmed audio back to the original file
++    juce::File tempOutput = srcFile.getSiblingFile(srcFile.getFileNameWithoutExtension() + "_trimmed_tmp.wav");
++    {
++        std::unique_ptr<juce::AudioFormatWriter> writer(
++            juce::WavAudioFormat().createWriterFor(
++                new juce::FileOutputStream(tempOutput),
++                sampleRate, numChannels, bitsPerSample, {}, 0));
++
++        if (writer)
++        {
++            writer->writeFromAudioSampleBuffer(trimmedBuffer, 0, (int)trimmedLength);
++            writer.reset();  // Flush and close
++
++            // Replace original with trimmed version
++            if (tempOutput.moveFileTo(srcFile))
++            {
++                juce::Logger::writeToLog("[Trim] ✅ File trimmed successfully: " + srcFile.getFileName()
++                                         + " (" + juce::String(totalSamples) + " -> " + juce::String(trimmedLength) + " samples)");
++            }
++            else
++            {
++                // moveFileTo can fail on Windows - try copy + delete
++                if (tempOutput.copyFileTo(srcFile))
++                {
++                    tempOutput.deleteFile();
++                    juce::Logger::writeToLog("[Trim] ✅ File trimmed (copy fallback): " + srcFile.getFileName());
++                }
++                else
++                {
++                    juce::Logger::writeToLog("[Trim] ❌ ERROR: Could not replace original file");
++                    tempOutput.deleteFile();
++                    return;
++                }
++            }
++        }
++        else
++        {
++            juce::Logger::writeToLog("[Trim] ❌ ERROR: Could not create writer for trimmed file");
++            tempOutput.deleteFile();
++            return;
++        }
++    }
++
++    // Reset tile trim points and refresh waveform
++    tile->setTrimPoints(0.0f, 1.0f);
++    tile->setFile(srcFile);
++
++    // Invalidate and re-preload into cache for instant playback
++    if (sampleCache_)
++    {
++        sampleCache_->invalidateFile(srcFile);
++        juce::Array<juce::File> filesToPreload;
++        filesToPreload.add(srcFile);
++        sampleCache_->requestPreload(filesToPreload, true);
++    }
++
++    juce::Logger::writeToLog("[Trim] === TRIM COMPLETE ===");
++}
++
++void SampleBrowserPage::undoTrim(int tileIndex)
++{
++    auto* tile = findTileForIndex(tileIndex);
++    if (!tile) return;
++
++    juce::String filePath = tile->file().getFullPathName();
++    auto it = trimBackups_.find(filePath);
++    if (it == trimBackups_.end())
++    {
++        juce::Logger::writeToLog("[Trim] No backup found for: " + filePath);
++        return;
++    }
++
++    juce::File backupFile = it->second;
++    juce::File targetFile(filePath);
++
++    juce::Logger::writeToLog("[Trim] === UNDO TRIM === " + targetFile.getFileName());
++
++    if (backupFile.copyFileTo(targetFile))
++    {
++        // Remove backup entry
++        backupFile.deleteFile();
++        trimBackups_.erase(it);
++
++        // Reset tile and refresh
++        tile->setTrimPoints(0.0f, 1.0f);
++        tile->setFile(targetFile);
++
++        // Invalidate and re-preload into cache
++        if (sampleCache_)
++        {
++            sampleCache_->invalidateFile(targetFile);
++            juce::Array<juce::File> filesToPreload;
++            filesToPreload.add(targetFile);
++            sampleCache_->requestPreload(filesToPreload, true);
++        }
++
++        juce::Logger::writeToLog("[Trim] ✅ Undo trim successful");
++    }
++    else
++    {
++        juce::Logger::writeToLog("[Trim] ❌ ERROR: Could not restore backup");
++    }
++}
++
++bool SampleBrowserPage::hasTrimBackup(int tileIndex) const
++{
++    // Find the tile to get its file path
++    for (auto* tile : tiles_)
++    {
++        if (tile->sampleIndex() == tileIndex)
++            return trimBackups_.find(tile->file().getFullPathName()) != trimBackups_.end();
++    }
++    return false;
++}
++
++void SampleBrowserPage::cleanupTrimBackups()
++{
++    juce::Logger::writeToLog("[Trim] Cleaning up " + juce::String((int)trimBackups_.size()) + " trim backups");
++    for (auto& [path, backupFile] : trimBackups_)
++    {
++        if (backupFile.existsAsFile())
++            backupFile.deleteFile();
++    }
++    trimBackups_.clear();
++}
++
+ } // namespace sm5
+ 
+ void sm5::SampleBrowserPage::Tile::CircleButton::mouseUp(const juce::MouseEvent& e)
+diff --git a/src/ui/Pages/SampleBrowserPage.h b/src/ui/Pages/SampleBrowserPage.h
+index 3c9c224..4749631 100644
+--- a/src/ui/Pages/SampleBrowserPage.h
++++ b/src/ui/Pages/SampleBrowserPage.h
+@@ -180,8 +180,12 @@ private:
+              std::function<void()> onPlay, std::function<void()> onGenerate, juce::Colour engineColour);
+         void paint(juce::Graphics& g) override;
+         void resized() override;
++        void mouseDown(const juce::MouseEvent& e) override;
+         void mouseDrag(const juce::MouseEvent& e) override;
+         void mouseUp(const juce::MouseEvent& e) override;
++        void mouseMove(const juce::MouseEvent& e) override;
++        void mouseEnter(const juce::MouseEvent& e) override;
++        void mouseExit(const juce::MouseEvent& e) override;
+         void setSelected(bool s) { selected_ = s; selectToggle_.setToggleState(s, juce::dontSendNotification); repaint(); }
+         bool isSelected() const { return selected_; }
+         // Identity (original) file path used for editing
+@@ -256,6 +260,16 @@ private:
+         int sourceSongIndex_ { -1 };           // Index of source song in batch (-1 = unknown/single file)
+         juce::String sourceSongName_;          // Original filename of source song (for display/filtering)
+ 
++        // TRIM HANDLES: Start/end points for sample playback (0.0-1.0 normalized)
++        float trimStart_ { 0.0f };             // 0.0 = beginning of sample
++        float trimEnd_ { 1.0f };               // 1.0 = end of sample
++        enum class TrimHandle { None, Start, End };
++        TrimHandle activeTrimHandle_ { TrimHandle::None };
++        bool trimDragging_ { false };
++        bool trimHovered_ { false };           // Mouse is over the tile (show handles)
++        bool hasPendingTrim() const { return trimStart_ > 0.001f || trimEnd_ < 0.999f; }
++        juce::TextButton trimConfirmBtn_;      // Confirm trim button (appears when handles moved)
++
+         // Waveform tile + controls: checkbox (lower-left) and V button (lower-right)
+         juce::ToggleButton selectToggle_ { "" };
+         // Circular V button
+@@ -365,8 +379,20 @@ private:
+         void setClassifyOverrideCallback(std::function<void(int, DrumCategory, bool)> cb) { onClassifyOverride_ = std::move(cb); }
+         void setTileClickedCallback(std::function<void(int, bool)> cb) { onTileClicked_ = std::move(cb); }
+         juce::Colour getWaveformColour() const { return waveformColour_; }
++        // Trim point accessors (normalized 0.0-1.0)
++        float getTrimStart() const { return trimStart_; }
++        float getTrimEnd() const { return trimEnd_; }
++        void setTrimPoints(float start, float end) { trimStart_ = start; trimEnd_ = end; trimConfirmBtn_.setVisible(hasPendingTrim()); repaint(); }
+     };
+ 
++    // TRIM: Apply trim to file (destructive) with undo backup
++    void applyTrim(int tileIndex);
++    void undoTrim(int tileIndex);
++    bool hasTrimBackup(int tileIndex) const;
++    // Session-only backups: original file path → temp backup file path
++    std::map<juce::String, juce::File> trimBackups_;
++    void cleanupTrimBackups();  // Called on shutdown/folder change
++
+     // Map from sample index to edited display/playback file (if any)
+     std::map<int, juce::File> editedFiles_;
+ 

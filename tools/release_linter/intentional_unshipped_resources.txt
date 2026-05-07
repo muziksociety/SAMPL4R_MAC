@@ -1,0 +1,26 @@
+# SAMPLAR Release Linter — Intentional Unshipped Resources Allowlist
+#
+# Format: one token per line. Matched against directory names OR binary
+# basenames. Lines starting with # are comments.
+#
+# Add an entry ONLY if a resource is referenced in code but intentionally
+# not in installer_sm5.iss (because it's shipped via a wildcard, comes from
+# the OS, or is an optional/experimental feature). Always explain WHY.
+#
+# ---------------------------------------------------------------------------
+# Shipped via installer wildcards — the linter can't see inside wildcards.
+# Triaged 2026-04-10 via release_linter check #3.
+# ---------------------------------------------------------------------------
+# python\* and python\Scripts\* wildcards
+python.exe
+python3.dll
+python311.dll
+# audio-separator (UVR backend) is installed via pip into python/Scripts/
+# and ships with the portable Python environment via the wildcard.
+audio-separator.exe
+# models\* wildcard (LARS TorchScript drum separation models)
+my_scripted_module_kick.pt
+my_scripted_module_snare.pt
+my_scripted_module_hihat.pt
+my_scripted_module_cymbals.pt
+my_scripted_module_toms.pt

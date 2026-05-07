@@ -1,0 +1,19 @@
+{
+  "session_id": "beatgrid-fix-001",
+  "task": "Fix beat grid issues: 1) Green grid lines not visible, 2) Downbeat selector (red) doesn't appear when Auto unchecked - need better switch UI, 3) Tempo not detecting automatically",
+  "enhanced_task": "",
+  "started": "2025-12-08T10:30:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

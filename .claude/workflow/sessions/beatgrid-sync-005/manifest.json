@@ -1,0 +1,19 @@
+{
+  "session_id": "beatgrid-sync-005",
+  "task": "Fix 3 critical beat grid bugs: 1) Downbeat selector desyncs with grid when zoomed - the manual red marker doesn't stay aligned with grid lines during zoom. 2) Need much deeper zoom capability for accuracy - current max zoom is too shallow. 3) Downbeat slider measure is broken - doesn't change the measure/time signature of the downbeat grid which defines loop sizes.",
+  "enhanced_task": "",
+  "started": "2025-12-08T14:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

@@ -1,0 +1,117 @@
+﻿================================================================================
+                        SAMPLAR - INSTALLATION NOTES
+================================================================================
+
+Thank you for choosing SAMPLAR!
+
+SYSTEM REQUIREMENTS
+-------------------
+- Operating System: Windows 10 (64-bit) or later
+- Processor: Intel Core i5 or AMD equivalent (AVX2 support required)
+- RAM: 8 GB minimum, 16 GB recommended
+- Disk Space: 5 GB free space
+- Audio Interface: ASIO-compatible audio interface recommended
+
+INSTALLATION
+------------
+1. Run the installer (Samplar_Setup_v1.0.0.exe)
+2. Follow the on-screen instructions
+3. Choose installation directory (default: C:\Program Files\SAMPLAR)
+4. Wait for installation to complete
+5. Launch SAMPLAR from the Start Menu or Desktop shortcut
+
+FIRST RUN
+---------
+On first launch, you will be prompted to:
+1. Activate your license (requires internet connection)
+2. Configure your audio device
+3. Select your preferred audio settings
+
+LICENSE ACTIVATION
+------------------
+SAMPLAR requires activation to use all features.
+
+To activate:
+1. Launch SAMPLAR
+2. Click "Activate License" in the welcome dialog
+3. Enter your license key (received via email)
+4. Click "Activate"
+
+Your license is tied to your computer's hardware. You can deactivate and 
+reactivate on a different computer from the License menu.
+
+OPTIONAL COMPONENTS
+-------------------
+Python (Optional but Recommended):
+- SAMPLAR includes a Python bridge for advanced audio processing
+- For best performance, install Python 3.8 or later from python.org
+- The app will work without Python, but some features may be slower
+
+TROUBLESHOOTING
+---------------
+If you encounter issues:
+
+1. "Windows protected your PC" message:
+   - Click "More info" → "Run anyway"
+   - This is normal for new software; the app is code-signed and safe
+
+2. Audio device not detected:
+   - Install ASIO drivers for your audio interface
+   - Check Windows audio settings
+   - Restart the application
+
+3. License activation fails:
+   - Check your internet connection
+   - Verify your license key is correct
+   - Contact support@yourcompany.com
+
+4. Application crashes on startup:
+   - Update your graphics drivers
+   - Ensure you have the latest Windows updates
+   - Check the log file in: C:\Program Files\SAMPLAR\logs\
+
+UNINSTALLATION
+--------------
+To uninstall SAMPLAR:
+1. Go to Windows Settings → Apps → Apps & features
+2. Find "SAMPLAR" in the list
+3. Click "Uninstall"
+4. Follow the prompts
+
+Note: Your license and settings will be preserved unless you choose to 
+remove them during uninstallation.
+
+SUPPORT
+-------
+For help and support:
+- Email: support@yourcompany.com
+- Website: https://yourwebsite.com/support
+- User Guide: C:\Program Files\SAMPLAR\docs\USER_GUIDE.md
+
+UPDATES
+-------
+SAMPLAR will check for updates automatically (requires internet).
+You can also check manually from Help → Check for Updates.
+
+PRIVACY
+-------
+SAMPLAR respects your privacy:
+- No personal data is collected without your consent
+- License information is stored locally
+- No analytics or telemetry by default
+- See our Privacy Policy: https://yourwebsite.com/privacy
+
+CREDITS
+-------
+SAMPLAR uses the following open-source libraries:
+- JUCE Framework (https://juce.com/)
+- SoundTouch (https://www.surina.net/soundtouch/)
+- Demucs (https://github.com/facebookresearch/demucs)
+- OpenBLAS (https://www.openblas.net/)
+
+Thank you for using SAMPLAR!
+
+================================================================================
+Copyright (C) 2025 [Your Company Name]. All rights reserved.
+================================================================================
+

@@ -1,0 +1,24 @@
+{
+  "session_id": "wave-editor-behavior-001",
+  "task": "Investigate Wave Editor behavior differences between Sample Browser and Step Sequencer",
+  "enhanced_task": "",
+  "started": "2025-12-13T18:40:00Z",
+  "status": "in_progress",
+  "current_phase": "investigation",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "in_progress" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "issues": [
+    "Sample Browser: Waveform visuals don't update after editing",
+    "Step Sequencer: Editing multiple files contaminates first file with effects",
+    "Same widgets used in both places but behavior differs"
+  ]
+}

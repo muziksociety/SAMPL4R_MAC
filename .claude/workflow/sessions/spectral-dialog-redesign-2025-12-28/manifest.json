@@ -1,0 +1,26 @@
+{
+  "session_id": "spectral-dialog-redesign-2025-12-28",
+  "task": "Redesign SpectralSeparateDialog to match AI Separate (LarsDebugDialog) workflow - remove Mix and Export tabs, add Analysis tab with pattern detection per frequency band for MIDI output",
+  "enhanced_task": "Transform SpectralSeparateDialog from a mixing/export tool into a pattern analysis tool that uses FFT-based frequency separation, detects rhythmic patterns in each band, and displays them in a step sequencer preview for transfer to the main sequencer",
+  "started": "2025-12-28T12:00:00Z",
+  "completed": "2025-12-28T12:30:00Z",
+  "status": "completed",
+  "current_phase": "completed",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "completed" },
+    "design": { "status": "completed" },
+    "user-approval": { "status": "completed" },
+    "implementation": { "status": "completed" },
+    "build": { "status": "completed" },
+    "verification": { "status": "completed" },
+    "documentation": { "status": "completed" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "files_modified": [
+    "src/ui/Components/SpectralSeparateDialog.h",
+    "src/ui/Components/SpectralSeparateDialog.cpp",
+    "src/ui/Components/PatternPreviewDialog.cpp"
+  ],
+  "summary": "Redesigned SpectralSeparateDialog to match AI Separate workflow: Removed MixTab and ExportTab, added AnalysisTab with step sequencer preview for pattern detection. Added play button per band in WaveformsTab. Constructor now accepts bars/beatsPerBar and patterns callback. Pattern detection uses RMS-based onset detection reused from LarsDebugDialog."
+}

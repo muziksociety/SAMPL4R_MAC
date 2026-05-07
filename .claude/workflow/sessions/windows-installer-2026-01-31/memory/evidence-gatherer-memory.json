@@ -1,0 +1,55 @@
+﻿{
+  "session_id": "windows-installer-2026-01-31",
+  "agent": "evidence-gatherer",
+  "started_at": "2026-01-31",
+  "discovered_facts": {
+    "key_files": {
+      "installer_script": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\installer.iss:1",
+      "make_installer_ps1": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\make_installer.ps1:1",
+      "build_installer_complete_ps1": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build_installer_complete.ps1:1",
+      "portable_builder": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\000portable.ps1:1",
+      "build_portable_ps1": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build_portable.ps1:1",
+      "main_cmakelists": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\CMakeLists.txt:1",
+      "main_icon": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\JuceLibraryCode\\icon.ico",
+      "portable_folder": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\SAMPLAR_Portable"
+    },
+    "key_names": {
+      "application_name": "SAMPLAR",
+      "application_exe": "SAMPLAR.exe",
+      "portable_folder_name": "Samplar_Portable",
+      "installer_name_pattern": "samplar_Setup_v{version}.exe",
+      "inno_setup_path": "C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
+      "version": "2.0.0"
+    },
+    "key_patterns": {
+      "installer_flow": "CMake build -> portable version -> Inno Setup .iss -> installer .exe",
+      "python_embedding": "portable_cache/python + audio-separator + models",
+      "libtorch_embedding": "third_party/libtorch + torch*.dll files",
+      "vc_runtime_handling": "Downloaded/bundled in installer_dependencies, auto-installed by .iss"
+    }
+  },
+  "progress": {
+    "completed": [
+      "Session initialized",
+      "Found 000portable.ps1 (22KB ancient portable builder)",
+      "Found installer.iss Inno Setup script (v2.0.0)",
+      "Found make_installer.ps1 quick builder",
+      "Found build_installer_complete.ps1 full build pipeline",
+      "Found build_portable.ps1 portable creation script",
+      "Found CMakeLists.txt with version 2.0.0",
+      "Found main icon at build/SM5App_artefacts/JuceLibraryCode/icon.ico",
+      "Found SAMPLAR_Portable folder with pre-built contents",
+      "Identified Python embedding strategy (portable_cache)",
+      "Identified LibTorch embedding (third_party/libtorch)"
+    ],
+    "in_progress": [
+      "Detailed build chain mapping",
+      "Dependency analysis"
+    ],
+    "warnings": [
+      "000portable.ps1 is old (22KB) - newer scripts available",
+      "Multiple builder scripts exist - need clarity on which is current",
+      "installer.iss references 'Samplar_Portable' folder (not SAMPLAR_Portable)"
+    ]
+  }
+}

@@ -1,0 +1,178 @@
+{
+  "session_id": "python-demucs-investigation",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-16T00:00:00.000Z",
+  "status": "complete",
+  "data": {
+    "summary": "Python IS being used for audio separation via 'audio-separator' package (UVR backend)",
+
+    "python_usage": {
+      "method": "CLI subprocess call to 'audio-separator' command",
+      "package_name": "audio-separator",
+      "package_version": "0.40.0",
+      "pip_install": "pip install audio-separator",
+      "cli_location": "C:\\Users\\Muzik\\AppData\\Local\\Programs\\Python\\Python313\\Scripts\\audio-separator.exe",
+      "python_location": "C:\\Users\\Muzik\\AppData\\Local\\Programs\\Python\\Python313",
+      "is_system_python": true,
+      "bundled_python": false
+    },
+
+    "backend_selection": {
+      "priority_order": [
+        "1. UVR/audio-separator (fastest, Python-based)",
+        "2. demucs_onnx.exe (ONNX GPU, C++ native)",
+        "3. demucs_mt.exe (demucs.cpp CPU, C++ native)"
+      ],
+      "current_default": "Auto mode - tries UVR first if available",
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+      "backend_enum_lines": "46-51"
+    },
+
+    "uvr_integration": {
+      "check_availability": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+        "function": "isUvrAvailable()",
+        "line_start": 1043,
+        "line_end": 1090,
+        "description": "Checks if 'audio-separator --version' returns exit code 0"
+      },
+      "separation_call": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+        "function": "separateAudioUVR()",
+        "line_start": 1092,
+        "line_end": 1286,
+        "description": "Calls 'audio-separator <input> --model_filename <model> --output_dir <dir> --output_format WAV [--single_stem Drums]'"
+      }
+    },
+
+    "cli_arguments": {
+      "command": "audio-separator",
+      "args": [
+        "<input_file_path>",
+        "--model_filename <model_name>",
+        "--output_dir <temp_dir>",
+        "--output_format WAV",
+        "--single_stem Drums (optional, for drums-only mode)"
+      ],
+      "default_model": "htdemucs_6s.yaml",
+      "code_reference": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.cpp",
+        "lines": "1111-1125"
+      }
+    },
+
+    "config_options": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\services\\FullSongService.h",
+      "struct": "Config",
+      "uvr_settings": {
+        "uvrModelName": {
+          "type": "juce::String",
+          "default": "htdemucs_6s.yaml",
+          "options": [
+            "htdemucs_6s.yaml (6-stem)",
+            "htdemucs_ft.yaml (4-stem best quality)",
+            "kuielab_b_drums.onnx (drums-only fastest)"
+          ],
+          "line": 82
+        },
+        "uvrOutputFormat": {
+          "type": "juce::String",
+          "default": "WAV",
+          "line": 85
+        },
+        "uvrDrumsOnly": {
+          "type": "bool",
+          "default": true,
+          "description": "Extract only drums stem (faster, skips other stems)",
+          "line": 88
+        }
+      }
+    },
+
+    "pip_dependencies": {
+      "audio_separator_requires": [
+        "audioop-lts",
+        "beartype",
+        "diffq-fixed",
+        "einops",
+        "julius",
+        "librosa",
+        "ml_collections",
+        "numpy",
+        "onnx-weekly",
+        "onnx2torch-py313",
+        "pydub",
+        "pyyaml",
+        "requests",
+        "resampy",
+        "rotary-embedding-torch",
+        "samplerate",
+        "scipy",
+        "six",
+        "soundfile",
+        "torch",
+        "tqdm"
+      ]
+    },
+
+    "demucs_models_needed": {
+      "uvr_backend": {
+        "auto_download": true,
+        "location": "Downloaded automatically on first use by audio-separator",
+        "models": [
+          "htdemucs_6s.yaml",
+          "htdemucs_ft.yaml"
+        ]
+      },
+      "cpp_backend": {
+        "auto_download": false,
+        "location": "Must be placed in 'models/' folder next to executable",
+        "models": [
+          "ggml-model-htdemucs-4s-f16.bin (for demucs.cpp CPU)",
+          "htdemucs.ort (for demucs_onnx GPU)"
+        ]
+      }
+    },
+
+    "separate_python_bridge": {
+      "exists": true,
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\python_bridge\\demucs_separator.py",
+      "currently_used": false,
+      "description": "Alternative Python bridge using direct Demucs library. NOT currently integrated with C++ code. Appears to be development/testing code.",
+      "requires": [
+        "torch",
+        "torchaudio",
+        "demucs"
+      ]
+    },
+
+    "installation_requirements": {
+      "for_uvr_backend": [
+        "1. Install Python 3.10+ (system Python)",
+        "2. pip install audio-separator",
+        "3. Ensure 'audio-separator' is in PATH",
+        "4. Models auto-download on first use"
+      ],
+      "for_cpp_backends": [
+        "1. demucs_mt.exe or demucs_onnx.exe next to application",
+        "2. models/ggml-model-htdemucs-4s-f16.bin (for CPU)",
+        "3. models/htdemucs.ort (for GPU)"
+      ]
+    },
+
+    "code_evidence": {
+      "uvr_availability_check": {
+        "code": "juce::ChildProcess test;\njuce::StringArray args;\nargs.add(\"audio-separator\");\nargs.add(\"--version\");\nbool started = test.start(args);",
+        "location": "FullSongService.cpp:1047-1052"
+      },
+      "uvr_separation_call": {
+        "code": "juce::StringArray args;\nargs.add(\"audio-separator\");\nargs.add(input.getFullPathName());\nargs.add(\"--model_filename\");\nargs.add(cfg.uvrModelName);\nargs.add(\"--output_dir\");\nargs.add(tempDir.getFullPathName());\nargs.add(\"--output_format\");\nargs.add(cfg.uvrOutputFormat);\nif (cfg.uvrDrumsOnly) {\n    args.add(\"--single_stem\");\n    args.add(\"Drums\");\n}",
+        "location": "FullSongService.cpp:1111-1125"
+      },
+      "backend_selection_logic": {
+        "code": "bool useUvr = false;\nif (cfg.backend == SeparationBackend::UVR) {\n    useUvr = true;\n} else if (cfg.backend == SeparationBackend::Auto) {\n    if (isUvrAvailable()) {\n        useUvr = true;\n    }\n}",
+        "location": "FullSongService.cpp:81-96"
+      }
+    }
+  }
+}

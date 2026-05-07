@@ -1,0 +1,180 @@
+﻿{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-15T18:15:00Z",
+  "status": "complete",
+  "data": {
+    "investigation_task": "Analyze SampleBrowserPage right-click context menu implementation",
+
+    "findings": {
+      "context_menu_definition": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "function": "SampleBrowserPage::Tile::mouseUp",
+        "line_start": 375,
+        "line_end": 722,
+        "description": "Right-click context menu is created inside the Tile::mouseUp method when e.mods.isPopupMenu() returns true",
+        "menu_creation_line": 395,
+        "code_snippet": "juce::PopupMenu m;\n\n// Show batch indicator header if in batch mode\nif (batchMode)\n{\n    m.addSectionHeader(juce::String(selCount) + \" samples selected\");\n    m.addSeparator();\n}\n\nm.addItem(200, \"Edit Sample\");\nm.addItem(400, \"Learn Pattern from Audio\");"
+      },
+
+      "learn_pattern_menu_item": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line": 405,
+        "menu_id": 400,
+        "label": "Learn Pattern from Audio",
+        "code": "m.addItem(400, \"Learn Pattern from Audio\");"
+      },
+
+      "menu_callback_handler": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line_start": 458,
+        "line_end": 692,
+        "description": "Menu callback is defined as a lambda in showMenuAsync",
+        "code_pattern": "m.showMenuAsync(juce::PopupMenu::Options(), [this, batchMode](int res){"
+      },
+
+      "item_400_handler": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line_start": 640,
+        "line_end": 652,
+        "description": "Handler for menu item 400 publishes event to EventBus",
+        "code": "else if (res == 400)\n{\n    // Learn Pattern from Audio\n    if (auto* app = dynamic_cast<juce::JUCEApplication*>(juce::JUCEApplication::getInstance()))\n    if (auto* smApp = dynamic_cast<samplar::App*>(app))\n    {\n        juce::DynamicObject::Ptr o = new juce::DynamicObject();\n        o->setProperty(\"file\", originalFile_.getFullPathName());\n        o->setProperty(\"index\", index_);\n        smApp->bus().publish(\"sample_browser.learn_pattern_from_audio\", juce::var(o.get()));\n        juce::Logger::writeToLog(\"[Tile] Learn Pattern from Audio: \" + originalFile_.getFileName());\n    }\n}"
+      },
+
+      "event_subscription": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line_start": 1251,
+        "line_end": 1259,
+        "event_topic": "sample_browser.learn_pattern_from_audio",
+        "description": "SampleBrowserPage constructor subscribes to the learn_pattern event",
+        "code": "learnPatternSub_ = smApp->bus().subscribe(\"sample_browser.learn_pattern_from_audio\", [this](const juce::var& v){\n    if (!v.isObject()) return;\n    auto* o = v.getDynamicObject();\n    juce::String filePath = o->getProperty(\"file\").toString();\n    juce::File audioFile(filePath);\n    if (audioFile.existsAsFile()) {\n        learnPatternFromAudio(audioFile);\n    }\n});"
+      },
+
+      "learn_pattern_function": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "function": "SampleBrowserPage::learnPatternFromAudio",
+        "line_start": 6639,
+        "line_end": 6910,
+        "description": "Main function that handles pattern learning from audio loops",
+        "flow": [
+          "1. Load audio file into buffer (line 6659-6685)",
+          "2. Extract patterns using MultiBandPatternExtractor (line 6688-6689)",
+          "3. Validate extraction results (line 6691-6726)",
+          "4. Get genre list from UserPatternDatabase (line 6729-6734)",
+          "5. Show PatternPreviewDialog for user editing (line 6844-6851)",
+          "6. On dialog accept, save patterns to UserPatternDatabase (line 6872-6904)"
+        ],
+        "key_observation": "Currently saves patterns to database only - does NOT inject into StepSequencer"
+      },
+
+      "pattern_preview_dialog_callback": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line_start": 6844,
+        "line_end": 6906,
+        "description": "PatternPreviewDialog callback only saves to UserPatternDatabase",
+        "code_excerpt": "PatternPreviewDialog::showDialogAsync(\n    this,  // parent component\n    extractionResult,\n    fileName,\n    audioBuffer,\n    sampleRate,\n    genres,\n    [fileName](PatternPreviewDialog::Result dialogResult)\n    {\n        // ... callback saves to UserPatternDatabase but does NOT inject to sequencer\n    }\n);"
+      }
+    },
+
+    "step_sequencer_integration": {
+      "component_access": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+        "line": 385,
+        "member": "std::unique_ptr<StepSequencerComponent> stepSequencer_",
+        "description": "SampleBrowserPage has direct ownership of StepSequencerComponent"
+      },
+
+      "pattern_application_methods": [
+        {
+          "method": "StepSequencerComponent::applyPatternSet",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line_start": 2963,
+          "line_end": 3088,
+          "description": "Applies a PatternSet to the grid by matching categories",
+          "takes": "const PatternSet& patternSet"
+        },
+        {
+          "method": "StepSequencerComponent::applyFlexiblePattern",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line_start": 3208,
+          "line_end": 3265,
+          "description": "Applies a FlexiblePatternSet which clears all rows and creates new ones",
+          "takes": "const FlexiblePatternSet& pattern"
+        },
+        {
+          "method": "StepSequencerComponent::setCell",
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+          "line": 1251,
+          "description": "Sets individual cell on/off",
+          "signature": "void setCell(int row, int step, bool on, bool repaintNow = true)"
+        }
+      ]
+    },
+
+    "pattern_preview_dialog_result_structure": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+      "line_start": 38,
+      "line_end": 52,
+      "structures": {
+        "PatternEntry": {
+          "line": 38,
+          "members": [
+            "DrumCategory category",
+            "juce::String displayName",
+            "juce::String subcategoryName",
+            "std::vector<uint8_t> pattern",
+            "bool isSubcategory"
+          ]
+        },
+        "Result": {
+          "line": 46,
+          "members": [
+            "bool accepted",
+            "std::vector<PatternEntry> patterns",
+            "juce::String genre",
+            "juce::String patternName",
+            "float finalBpm"
+          ]
+        }
+      }
+    },
+
+    "pattern_set_structure": {
+      "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternLibraryDialog.h",
+      "line_start": 38,
+      "line_end": 73,
+      "members": [
+        "std::string name",
+        "std::string genre",
+        "bool isUserPattern",
+        "int gridSize",
+        "std::map<DrumCategory, RhythmicPattern> patterns",
+        "std::map<juce::String, SubcategoryPattern> subcategoryPatterns"
+      ]
+    }
+  },
+
+  "summary": {
+    "current_flow": [
+      "1. User right-clicks on loop tile in SampleBrowserPage",
+      "2. Context menu shows 'Learn Pattern from Audio' (item 400)",
+      "3. Click publishes event to EventBus: 'sample_browser.learn_pattern_from_audio'",
+      "4. SampleBrowserPage handler calls learnPatternFromAudio()",
+      "5. MultiBandPatternExtractor analyzes audio and extracts patterns",
+      "6. PatternPreviewDialog shown for user to review/edit patterns",
+      "7. On 'Save Patterns' click, patterns saved to UserPatternDatabase ONLY",
+      "8. StepSequencer is NOT updated with the learned pattern"
+    ],
+
+    "gap_identified": "The PatternPreviewDialog callback at lines 6844-6906 saves patterns to database but does NOT inject them into the stepSequencer_. The SampleBrowserPage has direct access to stepSequencer_ (member variable), and StepSequencerComponent has applyPatternSet() method that could be called to inject the learned pattern.",
+
+    "key_integration_points": [
+      "SampleBrowserPage::stepSequencer_ - direct member access",
+      "StepSequencerComponent::applyPatternSet(PatternSet) - method to inject patterns",
+      "PatternPreviewDialog::Result - contains patterns and finalBpm",
+      "Need to convert PatternPreviewDialog::Result to PatternSet format"
+    ]
+  },
+
+  "verified": true
+}

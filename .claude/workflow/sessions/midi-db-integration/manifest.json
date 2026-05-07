@@ -1,0 +1,19 @@
+{
+  "session_id": "midi-db-integration",
+  "task": "Integrate the JSON MIDI pattern database (data/midi_patterns.json with 9542 patterns) into the C++ app for use in pattern generation. This requires: 1) Adding JSON parsing capability (nlohmann/json or similar), 2) Creating a MidiPatternDatabase service that loads patterns at runtime, 3) Modifying generatePattern() to select and apply real patterns from the database based on genre, 4) Updating the genre dropdown to use genres from the database",
+  "enhanced_task": "",
+  "started": "2025-12-06T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

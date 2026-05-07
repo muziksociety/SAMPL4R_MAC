@@ -1,0 +1,19 @@
+{
+  "session_id": "kick-detection-consistency-2026-01-13",
+  "task": "Fix kick detection consistency in Step 6.6 linear regression - currently detecting kicks at inconsistent points within transients (some at onset, some at peak) causing regression to overshoot to 94.54 BPM instead of correct 94.25 BPM. Need to detect ALL kicks at the SAME consistent point (e.g., always at onset threshold crossing, or always at peak) so the drift measurement is accurate and forces correct alignment.",
+  "enhanced_task": "",
+  "started": "2026-01-13T13:15:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

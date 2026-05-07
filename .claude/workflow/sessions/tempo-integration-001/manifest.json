@@ -1,0 +1,19 @@
+{
+  "session_id": "tempo-integration-001",
+  "task": "Plan integration: Pass tempo/BPM and downbeat information from WavePreviewPage to ProcessingPage. Need to either eliminate the redundant tempo/loop slicing controls on ProcessingPage OR reuse them with the information collected from WavePreviewPage (detected/manual BPM, detected/manual downbeat, detected loops). This should create a seamless workflow where the user sets tempo/downbeat once in WavePreviewPage and that data flows to ProcessingPage.",
+  "enhanced_task": "",
+  "started": "2025-12-09T08:26:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

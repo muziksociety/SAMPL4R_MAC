@@ -1,0 +1,33 @@
+{
+  "session_id": "zoom-grid-alignment-2026-01-11",
+  "task": "BUG FIX: In Step 2 (Downbeat) grid process, when zooming with mouse wheel, the beat grid lines shift position relative to the waveform transients. The grid and waveform should stay perfectly aligned at all zoom levels.",
+  "enhanced_task": "",
+  "started": "2026-01-11T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "context": {
+    "user_theory": "The actual waveform might be moving when zooming, not just the grid",
+    "attempted_fixes": [
+      "Fixed zoomCursorFraction_ calculation to use waveformBounds_ instead of getWidth()",
+      "Added coordinate callback delegation from BeatGridOverlay to parent WavePreviewPage",
+      "Fixed panning code to use waveformBounds_ instead of getLocalBounds().reduced(20)"
+    ],
+    "key_files": [
+      "src/ui/Pages/WavePreviewPage.cpp",
+      "src/ui/Components/BeatGridOverlay.cpp",
+      "src/ui/Components/BeatGridOverlay.h"
+    ],
+    "symptom": "Grid lines shift relative to waveform transients when zooming in/out"
+  }
+}

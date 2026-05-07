@@ -1,0 +1,282 @@
+﻿{
+  "session_id": "step25-processing-2026-01-17",
+  "integration_summary": "Complete code path tracing for Step 2.5 PROCESSING integration",
+
+  "code_paths": [
+    {
+      "path_name": "Step Navigation Flow",
+      "description": "User navigates between workflow steps via pill buttons or Continue button",
+      "trace": [
+        {
+          "step": 1,
+          "component": "WavePreviewPage::continueButton_",
+          "file": "WavePreviewPage.cpp",
+          "line": "2169-2176",
+          "action": "onClick calls transitionToStep2() or transitionToStep3()"
+        },
+        {
+          "step": 2,
+          "component": "WavePreviewPage::transitionToStep2()",
+          "file": "WavePreviewPage.cpp",
+          "line": "2561-2631",
+          "action": "Validates hasSelection(), locks selection, updates currentStep_, auto-zooms, calls updateWorkflowState()"
+        },
+        {
+          "step": 3,
+          "component": "WavePreviewPage::updateWorkflowState()",
+          "file": "WavePreviewPage.cpp",
+          "line": "~2450 (inferred)",
+          "action": "Updates visibility of step controls, calls updateStepPills(), setStep2ControlsVisible(), etc."
+        },
+        {
+          "step": 4,
+          "component": "WavePreviewPage::updateStepPills()",
+          "file": "WavePreviewPage.cpp",
+          "line": "3089-3149",
+          "action": "Colors pills based on current step (active/completed/disabled)"
+        }
+      ],
+      "new_integration_points": [
+        "Add Step25 to enum",
+        "Add stepPill25_ button",
+        "Add transitionToStep25() method",
+        "Add transitionToStep3FromStep25() method",
+        "Add setStep25ControlsVisible() method",
+        "Add Step25 case to updateStepPills()",
+        "Add Step25 case to updateWorkflowState()"
+      ]
+    },
+    {
+      "path_name": "Audio Processing Chain",
+      "description": "Audio buffer processed through effects chain",
+      "trace": [
+        {
+          "step": 1,
+          "component": "User adjusts effect parameter",
+          "action": "Slider onChange triggers parameter update"
+        },
+        {
+          "step": 2,
+          "component": "PreSliceProcessingService::setGateParameter()",
+          "action": "Updates processor parameter, marks buffer dirty"
+        },
+        {
+          "step": 3,
+          "component": "PreSliceProcessingService::processBuffer()",
+          "action": "Apply gate->expander->compressor->limiter->EQ chain to buffer"
+        },
+        {
+          "step": 4,
+          "component": "WavePreviewPage waveform redraw",
+          "action": "thumbnail updated from processed buffer, repaint() called"
+        }
+      ],
+      "new_integration_points": [
+        "Create PreSliceProcessingService with effect chain",
+        "Connect UI sliders to service parameters",
+        "Implement processBuffer() with proper chain order",
+        "Trigger waveform redraw after processing"
+      ]
+    },
+    {
+      "path_name": "Threshold Line Overlay",
+      "description": "Draggable threshold lines on waveform",
+      "trace": [
+        {
+          "step": 1,
+          "component": "ThresholdLineOverlay::paint()",
+          "action": "Draws horizontal lines at Y positions corresponding to threshold dB values"
+        },
+        {
+          "step": 2,
+          "component": "ThresholdLineOverlay::mouseDown()",
+          "action": "Hit test which line is clicked, start drag"
+        },
+        {
+          "step": 3,
+          "component": "ThresholdLineOverlay::mouseDrag()",
+          "action": "Calculate new threshold from Y position, call onThresholdChanged callback"
+        },
+        {
+          "step": 4,
+          "component": "WavePreviewPage callback",
+          "action": "Update effect parameter and waveform"
+        }
+      ],
+      "pattern_reference": "BeatGridOverlay for draggable elements",
+      "new_integration_points": [
+        "Create ThresholdLineOverlay component",
+        "Add to WavePreviewPage as member",
+        "Position with setBounds(waveArea) in resized()",
+        "Connect onThresholdChanged to effect updates"
+      ]
+    },
+    {
+      "path_name": "Preset Save/Load",
+      "description": "User saves/loads processing presets",
+      "trace": [
+        {
+          "step": 1,
+          "component": "ProcessingPresetManager::savePreset()",
+          "action": "Gather all effect parameters, serialize to JSON"
+        },
+        {
+          "step": 2,
+          "component": "File write to userApplicationDataDirectory",
+          "action": "Samplar/processing_presets/[presetname].json"
+        },
+        {
+          "step": 3,
+          "component": "ProcessingPresetManager::loadPreset()",
+          "action": "Read JSON, deserialize, apply to all effects"
+        },
+        {
+          "step": 4,
+          "component": "UI update",
+          "action": "Sync all sliders to loaded values, redraw waveform"
+        }
+      ],
+      "pattern_reference": "UserPatternDatabase for JSON persistence",
+      "new_integration_points": [
+        "Create ProcessingPresetManager class",
+        "Define ProcessingPreset struct with toJson/fromJson",
+        "Add preset ComboBox + Save/Load buttons to UI",
+        "Implement factory presets array"
+      ]
+    },
+    {
+      "path_name": "Live Waveform Update",
+      "description": "Waveform redraws in real-time as parameters change",
+      "trace": [
+        {
+          "step": 1,
+          "component": "Parameter slider onChange",
+          "action": "Update effect parameter"
+        },
+        {
+          "step": 2,
+          "component": "PreSliceProcessingService::processBuffer()",
+          "action": "Apply effects to a COPY of the original buffer"
+        },
+        {
+          "step": 3,
+          "component": "WavePreviewPage::setProcessedBuffer()",
+          "action": "Update internal processed buffer reference"
+        },
+        {
+          "step": 4,
+          "component": "WavePreviewPage::repaint()",
+          "action": "Trigger redraw with processed waveform"
+        }
+      ],
+      "thread_safety_notes": [
+        "Processing must happen on background thread",
+        "Use AsyncUpdater to safely update UI",
+        "Keep original buffer untouched",
+        "Only update thumbnail after processing complete"
+      ],
+      "new_integration_points": [
+        "Add processedBuffer_ member to WavePreviewPage",
+        "Add processedThumbnail_ for displaying processed waveform",
+        "Implement background processing with ThreadPool or Thread",
+        "Use MessageManager::callAsync for UI updates"
+      ]
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "file": "src/ui/Pages/WavePreviewPage.h",
+      "changes": [
+        "Add Step25_Processing to WorkflowStep enum (between Step2 and Step3)",
+        "Add stepPill25_ TextButton member",
+        "Add Step 2.5 control members (effect sliders, preset combo)",
+        "Add processedBuffer_ and processedThumbnail_ members",
+        "Add ThresholdLineOverlay unique_ptr member",
+        "Add PreSliceProcessingService unique_ptr member",
+        "Add transitionToStep25() declaration",
+        "Add transitionToStep3FromStep25() declaration",
+        "Add setStep25ControlsVisible() declaration"
+      ]
+    },
+    {
+      "file": "src/ui/Pages/WavePreviewPage.cpp",
+      "changes": [
+        "Update resized() to position stepPill25_ and Step 2.5 controls",
+        "Update updateStepPills() with Step25 case",
+        "Update updateWorkflowState() with Step25 handling",
+        "Update onStepPillClicked() for pill 25 navigation",
+        "Implement transitionToStep25()",
+        "Implement transitionToStep3FromStep25()",
+        "Implement setStep25ControlsVisible()",
+        "Add drawProcessedWaveform() for processed buffer display",
+        "Connect effect sliders to PreSliceProcessingService",
+        "Handle preset save/load UI"
+      ]
+    },
+    {
+      "file": "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.h",
+      "changes": [
+        "Add ExpanderProcessor class",
+        "Add dryWetMix parameter to CompressorProcessor",
+        "Enhance NoiseGateProcessor with attack/release/hold parameters"
+      ]
+    },
+    {
+      "file": "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.cpp",
+      "changes": [
+        "Implement ExpanderProcessor methods",
+        "Modify CompressorProcessor::process() for dry/wet blend",
+        "Modify NoiseGateProcessor with proper envelope"
+      ]
+    }
+  ],
+
+  "files_to_create": [
+    {
+      "file": "src/services/PreSliceProcessingService.h",
+      "purpose": "Service coordinating Gate->Expander->Compressor->Limiter->EQ chain"
+    },
+    {
+      "file": "src/services/PreSliceProcessingService.cpp",
+      "purpose": "Implementation of processing service"
+    },
+    {
+      "file": "src/ui/Components/ThresholdLineOverlay.h",
+      "purpose": "Transparent overlay for draggable threshold lines"
+    },
+    {
+      "file": "src/ui/Components/ThresholdLineOverlay.cpp",
+      "purpose": "Implementation with paint(), mouse handling"
+    },
+    {
+      "file": "src/utils/ProcessingPresetManager.h",
+      "purpose": "Preset save/load with factory presets"
+    },
+    {
+      "file": "src/utils/ProcessingPresetManager.cpp",
+      "purpose": "JSON persistence implementation"
+    }
+  ],
+
+  "cmake_updates": [
+    "Add new source files to CMakeLists.txt target_sources"
+  ],
+
+  "thread_safety_considerations": [
+    {
+      "issue": "Heavy audio processing on UI thread blocks UI",
+      "solution": "Use background thread (juce::Thread or ThreadPool) for processBuffer()"
+    },
+    {
+      "issue": "Updating UI from background thread is unsafe",
+      "solution": "Use juce::MessageManager::callAsync() or AsyncUpdater"
+    },
+    {
+      "issue": "Buffer access during processing",
+      "solution": "Process a COPY of the original buffer, keep original untouched"
+    }
+  ],
+
+  "integration_verified": true
+}

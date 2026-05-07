@@ -1,0 +1,108 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-01-15T00:30:00Z",
+  "status": "complete",
+  "data": {
+    "bug_location": null,
+    "feature_implementation_context": {
+      "description": "Adding right-click menu option in Sample Browser for loops that opens PatternPreviewDialog and injects resulting pattern into StepSequencer",
+      "required_files_to_modify": [
+        {
+          "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+          "reason": "Contains stepSequencer_ member, context menu handling, and PatternPreviewDialog integration"
+        }
+      ]
+    },
+    "complete_code_analysis": {
+      "StepSequencer_applyPatternSet": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 2963,
+        "signature": "void applyPatternSet(const PatternSet& patternSet)",
+        "purpose": "Apply pattern set to existing grid rows by matching category",
+        "verified": true
+      },
+      "StepSequencer_addTrackRow": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 3267,
+        "signature": "void addTrackRow(const DrumTrack& track)",
+        "purpose": "Dynamically add new row to sequencer grid",
+        "verified": true
+      },
+      "StepSequencer_applyFlexiblePattern": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 3208,
+        "signature": "void applyFlexiblePattern(const FlexiblePatternSet& pattern)",
+        "purpose": "Replace all rows with new flexible pattern set",
+        "verified": true
+      },
+      "PatternSet_structure": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternLibraryDialog.h",
+        "line": 38,
+        "fields": ["name", "genre", "isUserPattern", "gridSize", "patterns", "subcategoryPatterns"],
+        "verified": true
+      },
+      "PatternPreviewDialog_Result": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.h",
+        "line": 46,
+        "fields": ["accepted", "patterns", "genre", "patternName", "finalBpm"],
+        "verified": true
+      },
+      "stepSequencer_ownership": {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+        "line": 385,
+        "declaration": "std::unique_ptr<StepSequencerComponent> stepSequencer_",
+        "visibility": "private",
+        "owner": "SampleBrowserPage",
+        "verified": true
+      }
+    },
+    "working_examples": [
+      {
+        "name": "learnPatternFromAudio existing implementation",
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line": 6643,
+        "description": "Existing method that opens PatternPreviewDialog for audio files - pattern is extracted and shown for save/cancel",
+        "relevance": "Same dialog used, can follow same pattern but add step sequencer injection on accept"
+      },
+      {
+        "name": "PatternLibraryDialog integration",
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 2940,
+        "description": "openPatternLibraryDialog() shows modal dialog, on selection calls applyPatternSet()",
+        "relevance": "Proven pattern for dialog -> applyPatternSet() flow"
+      }
+    ],
+    "pattern_analysis": {
+      "existing_context_menu_pattern": {
+        "description": "Right-click context menus in SampleBrowserPage tiles",
+        "location": "Need to locate existing tile context menu code",
+        "action_needed": "Add new menu item for 'Learn Pattern & Apply to Sequencer'"
+      },
+      "dialog_callback_pattern": {
+        "description": "PatternPreviewDialog::showDialogAsync() with callback",
+        "example": "showDialogAsync(parent, result, fileName, audio, sampleRate, genres, callback, ...)",
+        "callback_signature": "std::function<void(Result)>"
+      },
+      "result_to_PatternSet_conversion": {
+        "from_type": "PatternPreviewDialog::Result",
+        "to_type": "PatternSet",
+        "conversion_steps": [
+          "Create PatternSet with result.patternName, result.genre, isUserPattern=true",
+          "For each PatternEntry in result.patterns:",
+          "  If entry.isSubcategory: add to subcategoryPatterns map",
+          "  Else: add RhythmicPattern to patterns map keyed by entry.category"
+        ]
+      }
+    },
+    "git_context": {
+      "related_commits": "Pattern preview and library dialog work completed in previous sessions",
+      "files_modified_recently": [
+        "PatternPreviewDialog.cpp - Jan 11 2026",
+        "StepSequencerComponent.cpp - Jan 7 2026",
+        "PatternLibraryDialog.cpp - Jan 6 2026"
+      ]
+    },
+    "evidence_summary": "StepSequencer is owned by SampleBrowserPage (private member). Primary injection method is applyPatternSet(PatternSet). PatternPreviewDialog returns Result which must be converted to PatternSet. No EventBus topics exist for StepSequencer - direct member access required. Working example exists in learnPatternFromAudio() for dialog usage. No visual flash mechanism exists - pattern application triggers repaint() showing new data."
+  }
+}

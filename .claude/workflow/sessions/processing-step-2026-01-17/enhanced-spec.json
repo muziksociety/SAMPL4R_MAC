@@ -1,0 +1,140 @@
+{
+  "session_id": "processing-step-2026-01-17",
+  "original_request": "Add a new Step 2.5 PROCESSING between Step 2 (Downbeat/Beat Grid) and Step 3 (Slice) in WavePreviewPage with Gate, Expansion, Compression, Limiting, and EQ effects",
+  "enhanced_specification": {
+    "title": "Step 2.5 PROCESSING - Pre-Slice Audio Effects Chain",
+    "summary": "Insert a new workflow step between Tempo (Step 2) and Slice (Step 3) that allows users to apply dynamics and EQ processing to the selected audio region BEFORE slicing. This makes the resulting sample slices cleaner by removing noise, controlling dynamics, and shaping tone.",
+
+    "deliverables": [
+      "New WorkflowStep enum value: Step25_Processing (between Step2_DownbeatLoops and Step3_SampleSlice)",
+      "New step pill button: '2.5 PROCESSING' in the step navigation tabs",
+      "Processing control panel with 5 effect sections",
+      "Backend processing service to apply effects to audio buffer",
+      "Real-time preview of processed audio (affects playback)",
+      "Processed audio buffer passed to Step 3 for slicing"
+    ],
+
+    "effects_to_implement": {
+      "gate": {
+        "description": "Noise Gate - Silences audio below threshold to remove background noise",
+        "parameters": [
+          { "name": "threshold", "type": "dB", "range": "-60 to 0", "default": "-40" },
+          { "name": "attack", "type": "ms", "range": "0.1 to 50", "default": "1" },
+          { "name": "release", "type": "ms", "range": "1 to 500", "default": "50" },
+          { "name": "hold", "type": "ms", "range": "0 to 200", "default": "10" }
+        ],
+        "existing_code": "NoiseGateProcessor in DynamicEffectsProcessor.h (needs parameter enhancement)"
+      },
+      "expander": {
+        "description": "Dynamic Expander - Reduces gain below threshold, opposite of compressor",
+        "parameters": [
+          { "name": "threshold", "type": "dB", "range": "-60 to 0", "default": "-30" },
+          { "name": "ratio", "type": "ratio", "range": "1:1 to 1:10", "default": "1:2" },
+          { "name": "attack", "type": "ms", "range": "0.1 to 50", "default": "5" },
+          { "name": "release", "type": "ms", "range": "1 to 500", "default": "100" }
+        ],
+        "existing_code": "NONE - Must be created new (JUCE lacks native expander, must implement)"
+      },
+      "compressor": {
+        "description": "Dynamic Compressor - Reduces dynamic range by attenuating loud signals",
+        "parameters": [
+          { "name": "threshold", "type": "dB", "range": "-60 to 0", "default": "-12" },
+          { "name": "ratio", "type": "ratio", "range": "1:1 to 20:1", "default": "4:1" },
+          { "name": "attack", "type": "ms", "range": "0.1 to 100", "default": "10" },
+          { "name": "release", "type": "ms", "range": "1 to 1000", "default": "100" },
+          { "name": "makeupGain", "type": "dB", "range": "0 to 24", "default": "0" }
+        ],
+        "existing_code": "CompressorProcessor in DynamicEffectsProcessor.h - REUSE"
+      },
+      "limiter": {
+        "description": "Brick-Wall Limiter - Hard ceiling to prevent clipping",
+        "parameters": [
+          { "name": "ceiling", "type": "dBFS", "range": "-12 to 0", "default": "-0.1" },
+          { "name": "release", "type": "ms", "range": "1 to 100", "default": "10" }
+        ],
+        "existing_code": "LimiterProcessor in DynamicEffectsProcessor.h - REUSE"
+      },
+      "eq": {
+        "description": "3-Band EQ - Low/Mid/High tone shaping",
+        "parameters": [
+          { "name": "lowGain", "type": "dB", "range": "-12 to +12", "default": "0" },
+          { "name": "midGain", "type": "dB", "range": "-12 to +12", "default": "0" },
+          { "name": "highGain", "type": "dB", "range": "-12 to +12", "default": "0" }
+        ],
+        "existing_code": "EQProcessor in DynamicEffectsProcessor.h - REUSE"
+      }
+    },
+
+    "workflow_changes": {
+      "enum_modification": {
+        "file": "src/ui/Pages/WavePreviewPage.h",
+        "line": 21,
+        "change": "Add Step25_Processing between Step2_DownbeatLoops and Step3_SampleSlice"
+      },
+      "step_pills": {
+        "description": "Add 4th pill button for Step 2.5",
+        "new_pill": "stepPill25_ { '2.5 PROCESS' }"
+      },
+      "transitions": {
+        "from_step2": "transitionToStep25() - Lock tempo grid, show processing controls",
+        "from_step25": "transitionToStep3() - Apply processing to audio buffer, pass to slice step"
+      }
+    },
+
+    "audio_flow": {
+      "step1": "User selects region -> lockedSelectionStart_, lockedSelectionEnd_",
+      "step2": "User adjusts tempo grid -> currentBeatGrid_",
+      "step25_new": "User configures effects -> effects applied to audio buffer -> processedAudioBuffer_",
+      "step3": "Slice uses processedAudioBuffer_ instead of original"
+    },
+
+    "scope": {
+      "files_to_modify": [
+        "src/ui/Pages/WavePreviewPage.h - Add Step25_Processing enum, new member variables, method declarations",
+        "src/ui/Pages/WavePreviewPage.cpp - Implement new step UI, transitions, processing logic",
+        "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.h - Add ExpanderProcessor class",
+        "src/ui/WaveEditor/sm4port/DynamicEffectsProcessor.cpp - Implement ExpanderProcessor"
+      ],
+      "files_to_create": [
+        "src/services/PreSliceProcessingService.h - Optional: dedicated service for processing",
+        "src/services/PreSliceProcessingService.cpp"
+      ]
+    },
+
+    "out_of_scope": [
+      "Multi-band compression (single-band only)",
+      "Sidechain processing",
+      "Parallel compression (NY compression)",
+      "Mid/Side processing",
+      "Saving/loading effect presets (future feature)",
+      "Undo/redo for processing changes"
+    ],
+
+    "assumptions": [
+      "Processing is applied to the entire selected region (not per-slice)",
+      "Processing is destructive to the workflow buffer (but original file untouched)",
+      "User can preview processed audio in real-time during playback",
+      "Processing order is fixed: Gate -> Expander -> Compressor -> Limiter -> EQ",
+      "Each effect can be individually bypassed via toggle",
+      "Step 2.5 is optional - user can skip directly to Step 3 if no processing needed"
+    ],
+
+    "ui_requirements": {
+      "control_layout": "Horizontal strip of 5 effect modules in control panel area",
+      "per_effect_ui": [
+        "Enable/bypass toggle button",
+        "2-4 sliders per effect for main parameters",
+        "Compact display (must fit in existing control panel height)"
+      ],
+      "visual_feedback": "Gain reduction meters for compressor/limiter (optional, nice-to-have)"
+    },
+
+    "thread_safety": [
+      "Audio processing must NOT happen on UI thread",
+      "Use background thread for processing when user clicks 'Apply'",
+      "Or: process in real-time during preview playback (preferred)"
+    ]
+  },
+  "clarifications_needed": "None - specification is complete",
+  "created_at": "2026-01-17T00:00:00Z"
+}

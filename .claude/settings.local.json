@@ -1,0 +1,112 @@
+﻿{
+  "permissions": {
+    "allow": [
+      "Bash(cmd /c \"dir B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\Release\\logs\")",
+      "Bash(del \"B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\Release\\logs\\SAMPLAR_console.log\")",
+      "Bash(cmd /c \"dir /s /b B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\Release\\*.log 2>nul\")",
+      "SlashCommand(/orchestrate Add automatic pattern generation to step sequencer - create intelligent drum patterns for kick, snare, perc, and hihat based on common rhythmic templates and genre styles)",
+      "SlashCommand(/orchestrate:*)",
+      "Bash(powershell -Command:*)",
+      "Bash(dir /s /b \"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\")",
+      "Bash(cmd /c \"dir /b \"\"B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\800000_Drum_Percussion_MIDI_Archive[6_19_15]\"\" 2>nul\")",
+      "Bash(pip show:*)",
+      "Bash(if not exist \"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\tools\" mkdir \"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\tools\")",
+      "Bash(cmd /c \"if not exist \"\"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\tools\"\" mkdir \"\"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\tools\"\"\")",
+      "Bash(cmd /c \"if not exist \"\"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\data\"\" mkdir \"\"b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\data\"\"\")",
+      "Bash(cmd /c:*)",
+      "Bash(cmake:*)",
+      "Bash(dir:*)",
+      "Bash(cat:*)",
+      "Bash(cmake --build:*)",
+      "Bash(cmd.exe //c \"taskkill //PID 161752 //F\")",
+      "Bash(cmd /c \"dir /b B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\")",
+      "Bash(cmd.exe /c \"taskkill -PID 161752 -F\")",
+      "Bash(cmd /c \"cd /d B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5 && cmake --build build --config Release\")",
+      "Bash(cmd.exe /c \"taskkill -PID 161636 -F\")",
+      "Bash(cmd.exe /c \"taskkill -F -IM Sample*\")",
+      "Bash(dir \"B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\Release\\logs\")",
+      "Bash(cd:*)",
+      "Bash(start \"\" \"B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\build\\SM5App_artefacts\\Release\\SAMPLAR.exe\")",
+      "Bash(git add:*)",
+      "Bash(git commit:*)",
+      "Bash(git push:*)",
+      "Bash(taskkill:*)",
+      "Bash(timeout /t:*)",
+      "Bash(findstr:*)",
+      "Bash(timeout:*)",
+      "Bash(tasklist:*)",
+      "Bash(rm:*)",
+      "Skill(orchestrate)",
+      "Skill(orchestrate:*)",
+      "Bash(ls:*)",
+      "Bash(start \"\" \"build/SM5App_artefacts/Release/SAMPLAR.exe\")",
+      "Bash(start \"\" \"B:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build/SM5App_artefacts/Release/SAMPLAR.exe\")",
+      "Bash(start \"\" \"b:\\\\SANTI\\\\SAMPLE_MONSTA\\\\sample_monsta4\\\\Sample_monsta5\\\\build\\\\SM5App_artefacts\\\\Release\\\\SAMPLAR.exe\")",
+      "mcp__plugin_context-mode_context-mode__ctx_batch_execute",
+      "mcp__plugin_context-mode_context-mode__ctx_execute",
+      "Bash(python tools/release_linter/check_engines.py --json tools/release_linter/last_engine_report.json)",
+      "Bash(echo \"EXIT=$?\")",
+      "Bash(python tools/release_linter/check_engines.py --quiet)",
+      "Bash(python tools/release_linter/check_engines.py)",
+      "mcp__plugin_context-mode_context-mode__ctx_search",
+      "Bash(rm -rf \"C:/Program Files/Common Files/VST3/SAMPLAR.vst3\")",
+      "Read(//c/Program Files/Common Files/VST3/**)",
+      "Bash(graphify query *)",
+      "Bash(\"b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build/SM5App_artefacts/Release/SAMPLAR.exe\")",
+      "PowerShell(cmake --build b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build --config Release --target SM5Plugin 2>&1 | Select-String -Pattern \"error|\\\\.vcxproj ->\" | Select-Object -Last 5; $src = \"b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build/SM5Plugin_artefacts/Release/VST3/SAMPLAR.vst3\"; $dst = \"C:/Program Files/Common Files/VST3/SAMPLAR.vst3\"; if \\(Test-Path $src\\) { if \\(Test-Path $dst\\) { Remove-Item $dst -Recurse -Force }; Copy-Item $src $dst -Recurse -Force; Write-Output \"Deployed: $dst\" } else { Write-Output \"Build artefact missing: $src\" })",
+      "PowerShell(Stop-Process -Name \"SAMPLAR\" -Force -ErrorAction SilentlyContinue; cmake --build b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build --config Release --target SM5App SM5Plugin 2>&1 | Select-String -Pattern \"error|\\\\.vcxproj ->\" | Select-Object -Last 4; cd b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5; git add src/mentor/ui/MentorPage.cpp; git commit -m \"fix\\(mentor\\): scrollbar in section list now visible \\(12px thumb, contrasting colors\\)\" | Select-Object -Last 2; $src = \"b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5/build/SM5Plugin_artefacts/Release/VST3/SAMPLAR.vst3\"; $dst = \"C:/Program Files/Common Files/VST3/SAMPLAR.vst3\"; if \\(Test-Path $src\\) { if \\(Test-Path $dst\\) { Remove-Item $dst -Recurse -Force }; Copy-Item $src $dst -Recurse -Force; Write-Output \"Deployed: $dst\" })",
+      "Bash(git log *)",
+      "PowerShell(.\\\\000portable.ps1 -SkipPythonSetup -SkipModelDownload 2>&1)",
+      "PowerShell(.\\\\001installer.ps1 2>&1)",
+      "PowerShell($ErrorActionPreference = \"Stop\")",
+      "PowerShell(exit 0)"
+    ],
+    "deny": [],
+    "ask": []
+  },
+  "hooks": {
+    "SubagentStart": [
+      {
+        "matcher": "architect|frontend-architect",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/verify-evidence-gate.py"
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/verify-user-approval.py"
+          }
+        ]
+      },
+      {
+        "matcher": "Read|Grep|Glob",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/remind-yourself.py"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "python .claude/hooks/auto-format-cpp.py"
+          }
+        ]
+      }
+    ]
+  },
+  "prompt": "Before starting any work, run 'bd onboard' to understand the current project state and available issues."
+}

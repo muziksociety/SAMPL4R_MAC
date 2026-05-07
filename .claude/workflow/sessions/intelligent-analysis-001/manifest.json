@@ -1,0 +1,19 @@
+{
+  "session_id": "intelligent-analysis-001",
+  "task": "Intelligent Sample Analysis Pipeline: 1) Detect TEMPO from loops/audio files 2) Detect DOWNBEAT position 3) SLICE LOOPS into individual hits based on tempo/transients 4) Classify individual samples (kicks, snares, hihats) 5) Store all metadata (tempo, slices, classifications) 6) Display loops AND sliced samples in sample browser with proper organization.",
+  "enhanced_task": "",
+  "started": "2025-12-07T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

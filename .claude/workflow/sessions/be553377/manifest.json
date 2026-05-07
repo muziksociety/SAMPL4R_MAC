@@ -1,0 +1,19 @@
+{
+  "session_id": "be553377",
+  "task": "Crash on third sample switch - investigate cumulative state issue",
+  "enhanced_task": "",
+  "started": "2025-12-02T12:00:00Z",
+  "status": "in_progress",
+  "current_phase": "investigation",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "in_progress" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

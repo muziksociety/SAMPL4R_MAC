@@ -1,0 +1,91 @@
+﻿END USER LICENSE AGREEMENT (EULA)
+SAMPLAR
+
+IMPORTANT - READ CAREFULLY: This End User License Agreement ("EULA") is a legal agreement between you (either an individual or a single entity) and SAMPLAR for the SAMPLAR software product, which includes computer software and may include associated media, printed materials, and online or electronic documentation ("Software").
+
+By installing, copying, or otherwise using the Software, you agree to be bound by the terms of this EULA. If you do not agree to the terms of this EULA, do not install or use the Software.
+
+1. GRANT OF LICENSE
+SAMPLAR grants you the following rights:
+- Installation and Use: You may install and use one copy of the Software on a single computer.
+- Backup Copy: You may make one backup copy of the Software for archival purposes.
+
+2. DESCRIPTION OF OTHER RIGHTS AND LIMITATIONS
+- Limitations on Reverse Engineering: You may not reverse engineer, decompile, or disassemble the Software.
+- Rental: You may not rent, lease, or lend the Software.
+- Transfer: You may not transfer your rights under this EULA to another party without written consent from SAMPLAR.
+- Termination: Without prejudice to any other rights, SAMPLAR may terminate this EULA if you fail to comply with its terms and conditions.
+
+3. COPYRIGHT
+All title and copyrights in and to the Software (including but not limited to any images, photographs, animations, video, audio, music, text, and "applets" incorporated into the Software) are owned by SAMPLAR or its suppliers.
+
+4. LIMITED WARRANTY
+SAMPLAR warrants that the Software will perform substantially in accordance with the accompanying documentation for a period of 90 days from the date of receipt.
+
+5. DISCLAIMER OF WARRANTIES
+THE SOFTWARE IS PROVIDED "AS IS" WITHOUT WARRANTY OF ANY KIND, EITHER EXPRESS OR IMPLIED, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE.
+
+6. LIMITATION OF LIABILITY
+IN NO EVENT SHALL SAMPLAR BE LIABLE FOR ANY SPECIAL, INCIDENTAL, INDIRECT, OR CONSEQUENTIAL DAMAGES WHATSOEVER ARISING OUT OF THE USE OF OR INABILITY TO USE THE SOFTWARE.
+
+7. THIRD-PARTY COMPONENTS
+This Software includes the following third-party components:
+- JUCE Framework (https://juce.com/) - Subject to JUCE license terms
+- SoundTouch Audio Processing Library - LGPL License
+- PyTorch/LibTorch - BSD License
+- OpenBLAS - BSD License
+- Python 3.11 - PSF License
+- audio-separator - MIT License
+
+8. PRIVACY
+SAMPLAR respects your privacy. The Software:
+- Does not collect personal information without your consent
+- Does not transmit data to third parties
+- Stores license information locally on your computer
+- May collect anonymous usage statistics (opt-in only)
+
+9. UPDATES
+SAMPLAR may provide updates to the Software. Updates may be installed automatically or require manual installation.
+
+10. GOVERNING LAW
+This EULA shall be governed by applicable laws.
+
+11. CONTACT INFORMATION
+SAMPLAR
+Email: support@samplemonsta.com
+
+Copyright (C) 2026 SAMPLAR. All rights reserved.
+
+---
+
+THIRD-PARTY LICENSES
+
+JUCE Framework
+Copyright (c) 2020 - Raw Material Software Limited
+Licensed under GPL v3 or Commercial License
+https://juce.com/juce-7-licence/
+
+SoundTouch Audio Processing Library
+Copyright (c) Olli Parviainen
+Licensed under LGPL v2.1
+https://www.surina.net/soundtouch/
+
+PyTorch/LibTorch
+Copyright (c) Meta Platforms, Inc.
+Licensed under BSD License
+https://pytorch.org/
+
+OpenBLAS
+Copyright (c) OpenBLAS contributors
+Licensed under BSD 3-Clause License
+https://www.openblas.net/
+
+Python 3.11
+Copyright (c) Python Software Foundation
+Licensed under PSF License
+https://www.python.org/
+
+audio-separator
+Licensed under MIT License
+https://github.com/nomadkaraoke/audio-separator
+

@@ -1,0 +1,29 @@
+{
+  "session_id": "20251206_102937",
+  "task": "Add draggable MIDI export area to step sequencer left panel",
+  "enhanced_task": "",
+  "started": "2025-12-06T10:29:37Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5",
+  "feature_details": {
+    "description": "Add a new draggable area at the top of the step sequencer left panel that allows users to drag MIDI data out of the app",
+    "requirements": [
+      "New area at TOP of left panel (pushes existing items down)",
+      "Area represents MIDI content from the step sequencer",
+      "User can click and drag FROM this area to external apps (DAW, file explorer)",
+      "MIDI file is saved immediately on every sequencer click",
+      "Real-time sync: marking 1 note immediately makes it available in the draggable MIDI"
+    ]
+  }
+}

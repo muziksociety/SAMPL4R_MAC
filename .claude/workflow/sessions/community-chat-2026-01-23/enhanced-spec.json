@@ -1,0 +1,75 @@
+﻿{
+  "session_id": "community-chat-2026-01-23",
+  "original_request": "Find the community button on the sample browser and separate it to turn it into a new Chat implementation. Study, plan and present in ASCII mockups the best way to turn that into a chat, including the plan of what we need to add to license_server. Present the entire plan first.",
+  "enhanced_specification": {
+    "title": "Community Chat System - Native In-App Real-Time Chat",
+    "summary": "Transform the existing Community button in SampleBrowserPage from a web browser redirect into a native JUCE chat component with real-time messaging capabilities. This involves creating a new ChatPage component for SAMPLAR, adding WebSocket/REST API endpoints to the license_server, and implementing message storage in PostgreSQL.",
+    "deliverables": [
+      "ChatPage.h/.cpp - New native JUCE chat component (replacing or alongside CommunityPage)",
+      "ChatService.* - SAMPLAR client service for WebSocket connections and message handling",
+      "license_server/plugins/chat_service/ - New chat plugin for backend",
+      "Database schema additions for chat_messages, chat_rooms, and chat_users tables",
+      "WebSocket endpoint for real-time messaging",
+      "REST API endpoints for message history and user presence"
+    ],
+    "scope": {
+      "files_to_create": {
+        "sm5": [
+          "src/ui/Pages/ChatPage.h",
+          "src/ui/Pages/ChatPage.cpp",
+          "src/services/ChatService.h",
+          "src/services/ChatService.cpp"
+        ],
+        "license_server": [
+          "plugins/chat_service/__init__.py",
+          "plugins/chat_service/chat_service.py",
+          "plugins/chat_service/websocket_handler.py",
+          "plugins/chat_service/message_store.py"
+        ]
+      },
+      "files_to_modify": {
+        "sm5": [
+          "src/ui/Pages/SampleBrowserPage.h (button behavior)",
+          "src/ui/Pages/SampleBrowserPage.cpp (button click handler)",
+          "src/ui/MainWindow.cpp (add ChatPage to stack, navigation)",
+          "CMakeLists.txt (add new source files)"
+        ],
+        "license_server": [
+          "Database schema (new tables)"
+        ]
+      },
+      "ui_changes": [
+        "New ChatPage replacing/complementing CommunityPage",
+        "Message list with sender info and timestamps",
+        "Text input field with send button",
+        "User presence indicators (online/offline)",
+        "Optional: room/channel selector"
+      ],
+      "backend_additions": [
+        "WebSocket endpoint for real-time messaging",
+        "REST endpoints for message history",
+        "Message persistence in PostgreSQL",
+        "User authentication via existing JWT system",
+        "Rate limiting for spam prevention"
+      ]
+    },
+    "out_of_scope": [
+      "File sharing/image uploads (can be added later)",
+      "Voice/video chat",
+      "Private messaging (focus on community chat first)",
+      "Message reactions/emoji reactions",
+      "User blocking/muting (can be added later)"
+    ],
+    "assumptions": [
+      "Use existing JWT authentication from license system",
+      "WebSocket library available (JUCE supports raw sockets, may need wrapper)",
+      "PostgreSQL database already deployed on Render.com",
+      "Users have existing accounts in the license system",
+      "Single global chat room initially (can expand to multiple rooms later)"
+    ],
+    "clarifications_needed": [],
+    "specification_complete": true
+  },
+  "created_at": "2026-01-23T00:00:00Z",
+  "status": "approved_by_orchestrator"
+}

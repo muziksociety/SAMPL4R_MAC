@@ -1,0 +1,167 @@
+{
+  "session_id": "vst3-midi-cleanup",
+  "agent": "audio-research",
+  "created_at": "2026-04-06T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "research_question": "How do VST3 samplers properly kill all voices and clear audio buffers when switching between instrument modes/programs, with full thread safety?",
+    "search_strategy": {
+      "sources_searched": ["JUCE forum", "JUCE GitHub (Synthesiser.cpp, SamplerPluginDemo.h)", "JUCE official docs", "timur.audio", "KVR Audio forum", "Steinberg VST3 dev portal", "Native Instruments community"],
+      "keywords": ["allNotesOff", "turnOffAllVoices", "clearSounds", "clearCurrentNote", "stopNote allowTailOff false", "CriticalSection Synthesiser", "SpinLock audio thread", "SamplerPluginDemo command queue", "VST3 program change voice kill"]
+    },
+    "findings": [
+      {
+        "id": 1,
+        "title": "JUCE Synthesiser uses a CriticalSection that covers both renderNextBlock and allNotesOff",
+        "source": "https://forum.juce.com/t/criticalsection-in-the-synthesizer-class/53961",
+        "quality": "High — JUCE core developer discussion",
+        "summary": "The juce::Synthesiser class owns a CriticalSection (its 'lock' member). Every method that touches the voices array — renderNextBlock, allNotesOff, clearSounds, clearVoices, noteOn, noteOff — acquires this lock via ScopedLock. This means calls to allNotesOff() and clearSounds() from the message thread will block until the current audio callback finishes, and vice versa. It is NOT lock-free, but it is correct and standard in JUCE.",
+        "key_pattern": "const ScopedLock sl(lock); // held in renderNextBlock AND in allNotesOff/clearSounds",
+        "applicability": "HIGH — this is the built-in mechanism SAMPLAR should rely on"
+      },
+      {
+        "id": 2,
+        "title": "allNotesOff() with allowTailOff=false is the correct 'hard kill' primitive",
+        "source": "https://docs.juce.com/master/classSynthesiser.html",
+        "quality": "High — official JUCE documentation",
+        "summary": "Synthesiser::allNotesOff(channel, allowTailOff) iterates all voices, calls voice->stopNote(1.0f, allowTailOff) on those matching the channel (or all voices if channel=0), then clears sustain/sostenuto state. With allowTailOff=false, each voice MUST call clearCurrentNote() immediately inside stopNote(), setting itself inactive and releasing its sound reference. With allowTailOff=true the voice can fade out across subsequent renderNextBlock calls.",
+        "key_pattern": "synthesiser.allNotesOff(0, false); // channel 0 = all channels, immediate kill",
+        "parameters": {
+          "channel": "0 = all MIDI channels",
+          "allowTailOff": "false = immediate silence, no release envelope"
+        },
+        "applicability": "HIGH — call this FIRST in any mode-switch sequence"
+      },
+      {
+        "id": 3,
+        "title": "clearCurrentNote() is mandatory inside stopNote() when allowTailOff=false",
+        "source": "https://docs.juce.com/master/classSynthesiserVoice.html",
+        "quality": "High — official JUCE documentation",
+        "summary": "If a custom SynthesiserVoice subclass overrides stopNote(), it MUST call clearCurrentNote() when allowTailOff is false. clearCurrentNote() sets currentlyPlayingNote=-1 and currentlyPlayingSound=nullptr, making the voice available for reuse. Failing to call it leaves the voice in a 'zombie' state — it appears inactive but still holds a shared_ptr/ReferenceCountedObject reference to the SamplerSound, preventing the old sound from being freed after clearSounds().",
+        "key_pattern": "void stopNote(float velocity, bool allowTailOff) override { if (!allowTailOff) { clearCurrentNote(); resetPlaybackState(); } }",
+        "pitfall": "If you null the AudioBuffer* in the SamplerSound BEFORE voices have called clearCurrentNote(), a voice still in mid-render can dereference the null pointer on the audio thread."
+      },
+      {
+        "id": 4,
+        "title": "Correct hard-reset sequence: allNotesOff then clearSounds",
+        "source": "https://github.com/juce-framework/JUCE/blob/master/examples/Plugins/SamplerPluginDemo.h",
+        "quality": "High — official JUCE example code",
+        "summary": "The SamplerPluginDemo uses a command queue (FIFO) to pass sound-change commands from the message thread to the audio thread. When replacing sounds, the sequence is: (1) enqueue a SetSamples command, (2) the audio thread dequeues it at the top of processBlock, (3) the audio thread calls synthesiser.clearSounds(), then synthesiser.addSound(newSound). The voices are NOT individually stopped first because clearSounds() itself causes voices whose currentlyPlayingSound no longer exists in the sounds array to become orphaned — JUCE's renderNextBlock detects this and stops orphaned voices automatically on next render. However, for an IMMEDIATE hard stop (no waiting for next render), explicitly call allNotesOff(0, false) BEFORE clearSounds().",
+        "recommended_sequence": [
+          "1. synthesiser.allNotesOff(0, false)  // kills all voices instantly, calls clearCurrentNote() on each",
+          "2. synthesiser.clearSounds()           // removes all SamplerSound references (now safe, no voices hold them)",
+          "3. synthesiser.addSound(newSound)      // load the new sound",
+          "4. (optional) synthesiser.clearVoices() + re-add voices  // only if voice TYPE changes"
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Thread-safe buffer pointer swap: SpinLock + ReferenceCountedObject pattern",
+        "source": "https://docs.juce.com/master/tutorial_looping_audio_sample_buffer_advanced.html",
+        "quality": "High — official JUCE tutorial",
+        "summary": "When audio buffers are owned by SamplerSounds via ReferenceCountedObjectPtr, the audio thread holds a ref-count as long as a voice is playing. The message thread can safely replace the sound in the Synthesiser.sounds array (under the Synthesiser CriticalSection) without deleting the old buffer — the ref count keeps it alive until the last voice releases it via clearCurrentNote(). For raw pointer scenarios (e.g., a custom engine with AudioBuffer* pointers), use a SpinLock to gate reads in processBlock, or use std::atomic<AudioBuffer*> with a sentinel null-check at the top of every read path.",
+        "key_pattern": "juce::SpinLock::ScopedLockType lock(bufferLock); auto* buf = currentBuffer.get(); if (buf == nullptr) return;",
+        "pitfall": "std::mutex is FORBIDDEN on the audio thread. SpinLock is acceptable for very short critical sections. For longer swaps, use a lock-free FIFO (AbstractFifo) to send the new pointer to the audio thread."
+      },
+      {
+        "id": 6,
+        "title": "VST3 program change does NOT auto-trigger voice cleanup",
+        "source": "https://forum.juce.com/t/midi-program-change-forwarding-for-vst3/47161",
+        "quality": "Medium — JUCE forum, verified by multiple contributors",
+        "summary": "VST3 does not natively pass MIDI program change messages through to AudioProcessor::processBlock in JUCE. The host uses IUnitInfo::getProgramName and setParamNormalized on the program parameter instead. If you rely on MIDI program change for mode switching, you must either (a) map it manually from incoming MIDI CC, or (b) handle the AudioProcessorParameter callback on the message thread and trigger your reset sequence from there. Professional samplers like Kontakt have the same VST3 limitation — program change in VST3 is an automation parameter, not a MIDI event.",
+        "applicability": "HIGH — if SAMPLAR uses MIDI program change for mode switching, it needs a manual handler"
+      },
+      {
+        "id": 7,
+        "title": "VST3 'All Sound Off' (CC120) vs 'All Notes Off' (CC123) distinction",
+        "source": "https://community.native-instruments.com/discussion/7114/midi-all-sound-off-command-with-kontakt",
+        "quality": "Medium — NI community, professional users",
+        "summary": "CC123 (All Notes Off) is like a sustain pedal release — voices in release phase continue playing. CC120 (All Sound Off) is an immediate hard stop — voices must go silent NOW. Professional samplers (Kontakt, Battery) respond to CC120 as a hard kill. JUCE's allNotesOff() with allowTailOff=false is semantically equivalent to CC120. If you send CC123 instead and have voices with long release envelopes, audio can continue playing for seconds after the mode switch, creating the dangling audio problem.",
+        "recommendation": "Always use CC120-equivalent (allowTailOff=false) for mode switches, never CC123-equivalent"
+      },
+      {
+        "id": 8,
+        "title": "Transport state reset: what else must be cleared beyond voices",
+        "source": "https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Processing.html",
+        "quality": "High — official Steinberg VST3 documentation",
+        "summary": "Beyond voice active flags, a hard reset must clear: (1) MIDI note-on tracking arrays (notes held per channel), (2) sustain pedal state, (3) sostenuto state, (4) pitch bend per channel, (5) aftertouch state, (6) any per-voice filter/envelope state that accumulates (filters left at mid-point produce a click on next note-on), (7) any ring buffers used for reverb/delay tails, (8) the Synthesiser's lastPitchWheelValues array. JUCE's Synthesiser stores sustain/sostenuto in sustainPedalsDown[] and sostenutoKeys[] — these are NOT cleared by allNotesOff() alone; clearSounds() does not clear them either. You must call allNotesOff() AND manually reset these arrays, or re-call prepareToPlay().",
+        "full_reset_state_list": [
+          "synthesiser.allNotesOff(0, false)",
+          "synthesiser.clearSounds()",
+          "Per-voice: filter states, envelope states, playback position",
+          "sustainPedalsDown[] — reset via allNotesOff with correct implementation",
+          "lastPitchWheelValues[] — JUCE resets in handlePitchWheel",
+          "Ring buffers for delay/reverb tails — must be cleared separately",
+          "Any std::atomic<bool> isPlaying flags in custom engines"
+        ]
+      }
+    ],
+    "recommended_approach": "Use the JUCE Synthesiser CriticalSection as the synchronization primitive — it is already held during renderNextBlock, so calling allNotesOff(0, false) then clearSounds() from the message thread is safe. Do NOT attempt lock-free tricks with the Synthesiser class itself; its design assumes the CriticalSection approach. For custom engines that bypass Synthesiser, use a lock-free command FIFO (AbstractFifo or a single-producer single-consumer queue) to pass the 'reset' command to the audio thread, which executes it at the top of processBlock before rendering.",
+    "implementation_roadmap": [
+      "Step 1: From message thread, call synthesiser.allNotesOff(0, false) — this acquires Synthesiser's CriticalSection and kills all voices immediately",
+      "Step 2: Each voice's stopNote(velocity, false) must call clearCurrentNote() — verify your custom voice subclasses do this",
+      "Step 3: Call synthesiser.clearSounds() — now safe because no voice holds a currentlyPlayingSound reference",
+      "Step 4: For custom AudioBuffer* pointers outside of Synthesiser: use std::atomic<AudioBuffer*> with a null-guard in processBlock, or use a SpinLock-guarded swap",
+      "Step 5: Reset accumulated state: pitch wheel, sustain pedal arrays, per-voice filter states",
+      "Step 6: Load new sounds with synthesiser.addSound(newSamplerSound)",
+      "Step 7: If using a custom engine (not Synthesiser): enqueue a 'hard reset' command via AbstractFifo SPSC queue; audio thread processes it at the TOP of processBlock before reading any voice state"
+    ],
+    "potential_pitfalls": [
+      {
+        "pitfall": "Not calling clearCurrentNote() in stopNote(false) leaves zombie voices holding sound refs",
+        "prevention": "Override stopNote() in every custom voice class, always call clearCurrentNote() when allowTailOff==false"
+      },
+      {
+        "pitfall": "Nulling AudioBuffer* on message thread while audio thread is mid-read causes a crash",
+        "prevention": "Always use atomic swap or SpinLock; never directly null a buffer pointer used in processBlock without synchronization"
+      },
+      {
+        "pitfall": "Using CC123 (All Notes Off) instead of CC120 (All Sound Off) — voices with release envelopes keep playing",
+        "prevention": "Always pass allowTailOff=false to allNotesOff() for mode switches"
+      },
+      {
+        "pitfall": "Filter/DSP state not reset — causes audio click or wrong timbre on first note after mode switch",
+        "prevention": "After voice kill, reset all per-voice filter and envelope objects (call reset() or equivalent)"
+      },
+      {
+        "pitfall": "Using std::mutex on the audio thread (forbidden in real-time context)",
+        "prevention": "Use juce::SpinLock for short critical sections, AbstractFifo for passing commands to audio thread"
+      },
+      {
+        "pitfall": "VST3 MIDI program change not reaching processBlock — mode switch never fires",
+        "prevention": "Implement mode switch as an AudioProcessorParameter callback, not a MIDI event handler"
+      },
+      {
+        "pitfall": "Delay/reverb tails from previous mode playing through after switch",
+        "prevention": "Explicitly clear ring buffers and convolution states; they are NOT cleared by voice management"
+      },
+      {
+        "pitfall": "clearVoices() called when only sounds need changing — destroys voice objects unnecessarily",
+        "prevention": "Only call clearVoices() if the voice TYPE changes; sounds can be swapped without touching voice objects"
+      }
+    ],
+    "references": {
+      "official_juce": [
+        "Synthesiser Class Reference — https://docs.juce.com/master/classSynthesiser.html",
+        "SynthesiserVoice Class Reference — https://docs.juce.com/master/classSynthesiserVoice.html",
+        "SamplerVoice Class Reference — https://docs.juce.com/master/classSamplerVoice.html",
+        "SamplerPluginDemo.h — https://github.com/juce-framework/JUCE/blob/master/examples/Plugins/SamplerPluginDemo.h",
+        "Synthesiser.cpp source — https://github.com/juce-framework/JUCE/blob/master/modules/juce_audio_basics/synthesisers/juce_Synthesiser.cpp",
+        "Looping Audio Advanced Tutorial — https://docs.juce.com/master/tutorial_looping_audio_sample_buffer_advanced.html"
+      ],
+      "juce_forum": [
+        "CriticalSection in the Synthesizer class — https://forum.juce.com/t/criticalsection-in-the-synthesizer-class/53961",
+        "MidiMessage allNotesOff question — https://forum.juce.com/t/midimessage-allnotesoff-question/31262",
+        "VST3 Programs and MIDI Program Changes — https://forum.juce.com/t/vst3-programs-and-midi-program-changes/35148",
+        "MIDI Program Change forwarding for VST3 — https://forum.juce.com/t/midi-program-change-forwarding-for-vst3/47161",
+        "VST3 Wrapper and MIDI AllNotesOff bug — https://forum.juce.com/t/bug-vst3-wrapper-and-midi-allnotesoff-event/32054",
+        "Obtaining Locks on Audio Thread — https://forum.juce.com/t/obtaining-locks-on-audio-thread/51632"
+      ],
+      "professional": [
+        "Using locks in real-time audio processing safely (Timur Doumler) — https://timur.audio/using-locks-in-real-time-audio-processing-safely",
+        "VST3 Processing FAQ (Steinberg) — https://steinbergmedia.github.io/vst3_dev_portal/pages/FAQ/Processing.html",
+        "MIDI All Sound Off with Kontakt — https://community.native-instruments.com/discussion/7114/midi-all-sound-off-command-with-kontakt"
+      ]
+    }
+  }
+}

@@ -1,0 +1,277 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "risk-analyst",
+  "created_at": "2026-01-15T01:00:00Z",
+  "status": "complete",
+  "data": {
+    "feature_name": "Learn & Apply to Sequencer Right-Click Menu Option",
+    "risk_level": "MEDIUM",
+    "categories_analyzed": [
+      "UI Components",
+      "Thread Safety",
+      "State Management",
+      "Data Conversion",
+      "User Experience"
+    ],
+    "risks": [
+      {
+        "id": "R1",
+        "category": "User Experience",
+        "risk": "User cancels PatternPreviewDialog after saving to database - pattern saved but not applied to sequencer",
+        "severity": "LOW",
+        "mitigation": "Result.accepted only returns true when user clicks 'Save Patterns'. If canceled (Result.accepted = false), simply do not apply to sequencer. This is expected behavior - database save and sequencer injection are coupled in this feature.",
+        "blocking": false
+      },
+      {
+        "id": "R2",
+        "category": "User Experience",
+        "risk": "StepSequencer has user-edited pattern that will be overwritten without warning",
+        "severity": "HIGH",
+        "mitigation": "MUST implement overwrite warning. Check if grid has any non-zero cells before applyPatternSet(). Show confirmation dialog: 'This will modify your current pattern. Continue?' Options: [Cancel] [Apply & Merge] [Apply & Replace]. Consider offering 'Merge' mode that OR's new pattern with existing.",
+        "blocking": false
+      },
+      {
+        "id": "R3",
+        "category": "Thread Safety",
+        "risk": "PatternPreviewDialog callback may execute on wrong thread",
+        "severity": "MEDIUM",
+        "mitigation": "Verified: showDialogAsync() uses DialogWindow::LaunchOptions which runs modally on message thread. The callback passed to showDialogAsync is invoked from onClose handler within JUCE message thread context. Safe to call applyPatternSet() directly. Add defensive jassert(juce::MessageManager::getInstance()->isThisTheMessageThread()).",
+        "blocking": false
+      },
+      {
+        "id": "R4",
+        "category": "Data Conversion",
+        "risk": "Pattern has 32/48/64 steps but StepSequencer is configured for 16 steps - data loss or crash",
+        "severity": "HIGH",
+        "mitigation": "applyPatternSet() at line 2982-2992 already handles this - calls setBars() to resize grid if targetSteps != current grid size. However, verify setBars() clamps to valid range (1-4 bars = 16-64 steps). For patterns > 64 steps, truncation will occur. Log warning if pattern exceeds max supported steps.",
+        "blocking": false
+      },
+      {
+        "id": "R5",
+        "category": "UI Components",
+        "risk": "Adding many dynamic rows via addTrackRow() causes performance/memory issues",
+        "severity": "LOW",
+        "mitigation": "addTrackRow() at line 3267 is O(1) append operation. Each row adds: 1 grid vector, 1 File, 5 bools/enums, 1 ChannelGenerateButton. Memory per row is ~200 bytes + button component. Even 20 rows = ~4KB + 20 buttons. Acceptable. Consider cap at 16 rows for UI sanity.",
+        "blocking": false
+      },
+      {
+        "id": "R6",
+        "category": "Data Conversion",
+        "risk": "Pattern contains DrumCategory::Unknown or DrumCategory::Custom with no matching sequencer row",
+        "severity": "MEDIUM",
+        "mitigation": "applyPatternSet() at line 2999-3071 iterates existing rows and matches by category. Unknown/Custom categories won't match any row and pattern data is silently dropped. For 'Learn & Apply' feature, should create new row via addTrackRow() for unmatched categories. Evidence shows subcategoryPatterns are matched by name, not category.",
+        "blocking": false
+      },
+      {
+        "id": "R7",
+        "category": "State Management",
+        "risk": "No undo support - user cannot revert sequencer to previous state",
+        "severity": "MEDIUM",
+        "mitigation": "Codebase has saveState() calls (18 occurrences) but no UndoManager integration found. saveState() persists to preferences, not undo stack. For MVP: Document that action is not undoable. Future: Implement getState()/setState() capture before applyPatternSet() and store in undo stack.",
+        "blocking": false
+      },
+      {
+        "id": "R8",
+        "category": "Data Conversion",
+        "risk": "PatternPreviewDialog::Result to PatternSet conversion loses subcategory information",
+        "severity": "HIGH",
+        "mitigation": "Result contains PatternEntry with isSubcategory flag, subcategoryName, and displayName. Must convert properly: for each PatternEntry where isSubcategory=true, create SubcategoryPattern and add to PatternSet.subcategoryPatterns map. Evidence report shows this conversion path at lines 90-95.",
+        "blocking": false
+      },
+      {
+        "id": "R9",
+        "category": "UI Components",
+        "risk": "Visual highlight on affected rows not implemented - user doesn't see what changed",
+        "severity": "LOW",
+        "mitigation": "applyPatternSet() calls repaint() at line 3076. This repaints entire grid but doesn't highlight changed rows. For MVP: repaint() is sufficient - cells visually update. Future enhancement: flash affected rows with temporary highlight color (e.g., 500ms yellow fade).",
+        "blocking": false
+      },
+      {
+        "id": "R10",
+        "category": "Thread Safety",
+        "risk": "stepSequencer_ pointer may be null when callback executes",
+        "severity": "LOW",
+        "mitigation": "Evidence shows stepSequencer_ is owned by SampleBrowserPage (unique_ptr at line 385). Dialog callback captures 'this' (SampleBrowserPage). Use SafePointer pattern: juce::Component::SafePointer<SampleBrowserPage> safeThis(this). Check safeThis and stepSequencer_ before use.",
+        "blocking": false
+      },
+      {
+        "id": "R11",
+        "category": "Data Conversion",
+        "risk": "gridSize mismatch between PatternSet and current StepSequencer bars",
+        "severity": "MEDIUM",
+        "mitigation": "PatternSet.gridSize can be 12, 16, 24, 32, 48, 64 steps. StepSequencer setBars() supports 1-16 bars (16-256 steps). The applyPatternSet() function handles this at line 2985-2992 by calling setBars(targetBars) where targetBars = (targetSteps + 15) / 16 clamped to 1-4. Patterns > 64 steps will be clamped to 4 bars.",
+        "blocking": false
+      },
+      {
+        "id": "R12",
+        "category": "State Management",
+        "risk": "Sequencer tempo may differ from pattern BPM - tempo conflict",
+        "severity": "MEDIUM",
+        "mitigation": "PatternPreviewDialog::Result includes finalBpm field. After applyPatternSet(), should call stepSequencer_->setTempo(result.finalBpm) to sync tempo. This ensures sequencer plays at correct BPM for the learned pattern. Warn user if tempo differs by > 10 BPM from current.",
+        "blocking": false
+      }
+    ],
+    "edge_cases": [
+      {
+        "input": "Empty pattern (all PatternEntry.pattern vectors are zero)",
+        "expected": "Sequencer grid cleared or unchanged",
+        "risk": "User confusion - pattern applied but no visible change",
+        "handling": "Check if any pattern has active steps before applying. Show info message if no pattern detected."
+      },
+      {
+        "input": "Pattern with only subcategories (no base Kick/Snare/HiHat)",
+        "expected": "New rows created for subcategories",
+        "risk": "applyPatternSet() only matches existing rows - subcategory-only patterns won't apply",
+        "handling": "For each unmatched subcategory in PatternSet, call addTrackRow() with appropriate DrumTrack."
+      },
+      {
+        "input": "Sequencer already has 16 rows (maximum)",
+        "expected": "No new rows added, only matching rows updated",
+        "risk": "Potential UI overflow or pattern data loss",
+        "handling": "Check getRowCount() before addTrackRow(). If at max, only update existing matching rows."
+      },
+      {
+        "input": "Dialog canceled immediately (before any interaction)",
+        "expected": "No changes to sequencer",
+        "risk": "None - Result.accepted = false",
+        "handling": "Check Result.accepted first, return early if false."
+      },
+      {
+        "input": "Rapid repeated 'Learn & Apply' on multiple loops",
+        "expected": "Each application updates sequencer correctly",
+        "risk": "Accumulated rows from multiple patterns could exceed limits",
+        "handling": "Consider 'Replace All' mode that clears sequencer before applying new pattern."
+      },
+      {
+        "input": "Pattern with triplet grid (12/24 steps) applied to binary sequencer",
+        "expected": "Grid resized appropriately",
+        "risk": "Triplet quantization may not feel correct on binary grid",
+        "handling": "setBars() handles resize. Document that triplet patterns may need manual adjustment."
+      }
+    ],
+    "known_problems_from_research": [
+      {
+        "source": "Codebase precedent - applyPatternSet() line 2999-3071",
+        "problem": "Categories without existing rows are silently skipped",
+        "applies_to": "Patterns with Custom/Unknown categories",
+        "solution": "Feature must add dynamic rows for unmatched categories using addTrackRow()"
+      },
+      {
+        "source": "Codebase precedent - learnPatternFromAudio() line 6643",
+        "problem": "Existing implementation only saves to database, doesn't inject to sequencer",
+        "applies_to": "This feature extends that workflow",
+        "solution": "Add callback logic after showDialogAsync() to also call applyPatternSet()"
+      },
+      {
+        "source": "Codebase - saveState() calls",
+        "problem": "No undo mechanism exists for sequencer operations",
+        "applies_to": "User expectation of Ctrl+Z to revert",
+        "solution": "Document limitation or implement state snapshot before apply"
+      }
+    ],
+    "codebase_precedents": [
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "line": 2940,
+        "description": "openPatternLibraryDialog() shows modal dialog, on selection calls applyPatternSet()",
+        "relevance": "Proven pattern for dialog -> applyPatternSet() flow - use same structure"
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "line": 6643,
+        "description": "learnPatternFromAudio() extracts patterns and shows PatternPreviewDialog",
+        "relevance": "Exact starting point - extend callback to inject to sequencer"
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\PatternPreviewDialog.cpp",
+        "line": 4451,
+        "description": "AddCategoryDialog::showDialogAsync uses SafePointer pattern",
+        "relevance": "Use same SafePointer pattern for callback safety"
+      }
+    ],
+    "recommendations_for_architect": {
+      "must_have": [
+        "SafePointer usage in callback to prevent dangling reference",
+        "Check stepSequencer_ != nullptr before calling applyPatternSet()",
+        "Convert PatternPreviewDialog::Result to PatternSet correctly (including subcategories)",
+        "Handle Result.accepted = false case (return early)",
+        "Sync sequencer tempo with Result.finalBpm after pattern application"
+      ],
+      "should_have": [
+        "Overwrite confirmation dialog if sequencer has non-empty pattern",
+        "Create dynamic rows for unmatched categories via addTrackRow()",
+        "Log all operations for debugging (function entry, result status, pattern stats)",
+        "Handle grid size mismatch gracefully (log warning if truncation occurs)"
+      ],
+      "nice_to_have": [
+        "Visual flash/highlight on affected rows after pattern applied",
+        "Undo support via state snapshot before applyPatternSet()",
+        "Merge mode option (OR patterns instead of replace)",
+        "Row count limit check before adding dynamic rows"
+      ]
+    },
+    "test_cases_for_verification": [
+      {
+        "id": "TC1",
+        "scenario": "User cancels PatternPreviewDialog",
+        "steps": ["Right-click loop file", "Select 'Learn & Apply'", "Click Cancel in dialog"],
+        "expected": "Sequencer remains unchanged",
+        "risk_addressed": "R1"
+      },
+      {
+        "id": "TC2",
+        "scenario": "Apply to sequencer with existing pattern",
+        "steps": ["Create pattern in sequencer manually", "Right-click loop", "Learn & Apply new pattern"],
+        "expected": "Confirmation dialog appears (if implemented) or pattern replaced",
+        "risk_addressed": "R2"
+      },
+      {
+        "id": "TC3",
+        "scenario": "Pattern with 32 steps to 16-step sequencer",
+        "steps": ["Learn pattern from 32-step loop", "Save and apply"],
+        "expected": "Sequencer resizes to 2 bars (32 steps)",
+        "risk_addressed": "R4"
+      },
+      {
+        "id": "TC4",
+        "scenario": "Pattern with only percussion subcategories",
+        "steps": ["Learn pattern from conga/shaker loop", "Save and apply"],
+        "expected": "New rows created for Conga, Shaker etc.",
+        "risk_addressed": "R6"
+      },
+      {
+        "id": "TC5",
+        "scenario": "Rapid navigation away during dialog",
+        "steps": ["Start Learn & Apply", "Navigate to different page", "Complete dialog"],
+        "expected": "No crash - SafePointer handles invalidation",
+        "risk_addressed": "R10"
+      },
+      {
+        "id": "TC6",
+        "scenario": "Pattern BPM differs from sequencer tempo",
+        "steps": ["Sequencer at 120 BPM", "Learn 140 BPM loop", "Apply"],
+        "expected": "Sequencer tempo updates to 140 BPM",
+        "risk_addressed": "R12"
+      },
+      {
+        "id": "TC7",
+        "scenario": "Empty pattern (no hits detected)",
+        "steps": ["Learn pattern from ambient/pad audio", "Try to save and apply"],
+        "expected": "User informed no patterns detected OR empty pattern applied",
+        "risk_addressed": "Edge case: empty pattern"
+      }
+    ],
+    "risk_summary": {
+      "total_risks": 12,
+      "by_severity": {
+        "CRITICAL": 0,
+        "HIGH": 3,
+        "MEDIUM": 5,
+        "LOW": 4
+      },
+      "blocking_risks": 0
+    },
+    "overall_assessment": "Feature is LOW-MEDIUM risk. No critical blocking issues. Three HIGH severity risks require attention: R2 (overwrite warning), R4 (step count mismatch handled by existing code), R8 (subcategory conversion). The codebase already provides solid infrastructure via applyPatternSet() and addTrackRow(). Main implementation work is Result-to-PatternSet conversion and optional UX enhancements like overwrite confirmation.",
+    "recommendation": "PROCEED with implementation. Address HIGH risks R2, R4, R8 in design. All other risks have acceptable mitigations or are existing codebase behaviors."
+  }
+}

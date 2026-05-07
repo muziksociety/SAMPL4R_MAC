@@ -1,0 +1,752 @@
+﻿{
+  "session_id": "windows-installer-2026-01-31",
+  "agent": "risk-analyst",
+  "created_at": "2026-01-31T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "feature_name": "Windows Installer Creation (installer_sm5.iss)",
+    "risk_level": "MEDIUM",
+    "scope": "Creating installer_sm5.iss + 001installer.ps1 to build installer from SAMPLAR_Portable (1.86 GB)",
+    "categories_analyzed": [
+      "File Size & Distribution",
+      "Installation Performance",
+      "Path & Permission",
+      "Compatibility & Dependencies",
+      "Testing & Validation",
+      "Security & Antivirus",
+      "Upgrade & Maintenance"
+    ],
+    "risks": [
+      {
+        "category": "File Size & Distribution",
+        "risk": "SAMPLAR_Portable is 1.86 GB - compressed installer may be 800MB-1GB",
+        "severity": "MEDIUM",
+        "likelihood": "HIGH",
+        "evidence": "evidence-report.json shows SAMPLAR_Portable contains: embedded Python 3.11 (1.44 GB), patterns_with_rolls.json (54 MB), ggml-model-htdemucs-4s-f16.bin (80 MB), LibTorch DLLs, game assets",
+        "impact": "User experience degradation, distribution challenges",
+        "mitigation": "Use LZMA2/max compression (Compression=lzma2/max, SolidCompression=yes) which can achieve 3.5GB→1.45GB compression ratios. Warn users about download size. Consider optional component downloads for game assets."
+      },
+      {
+        "category": "File Size & Distribution",
+        "risk": "GitHub release size limits (2GB for free accounts)",
+        "severity": "HIGH",
+        "likelihood": "HIGH",
+        "evidence": "GitHub has a 2GB file size limit for releases. Installer may approach or exceed this limit.",
+        "impact": "Cannot distribute via GitHub releases without workaround",
+        "mitigation": "REQUIRED: Use split archives if installer exceeds 1.5GB, OR distribute via alternative hosting (Google Drive, Dropbox, S3), OR use download-on-demand for optional components (game assets, extra models)"
+      },
+      {
+        "category": "File Size & Distribution",
+        "risk": "Slow download times for users with limited bandwidth",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "800MB-1GB download on 10Mbps connection = 10-15 minutes minimum",
+        "impact": "User abandonment, poor first impression",
+        "mitigation": "Provide download progress information, consider creating 'lite' version without embedded Python (users can install system Python), document expected download time"
+      },
+      {
+        "category": "Installation Performance",
+        "risk": "Embedded Python extraction time (1.44 GB of files)",
+        "severity": "MEDIUM",
+        "likelihood": "HIGH",
+        "evidence": "Web research shows large compressed archives (2-7GB) can have 2-3 minute delay before progress bar appears. SAMPLAR_Portable contains 1.44 GB embedded Python.",
+        "impact": "User thinks installer is frozen, cancels installation",
+        "mitigation": "Add custom progress messages: 'Extracting Python environment (this may take 2-3 minutes)...', use InternalCompressLevel to balance compression vs extraction speed, warn users in installer description about 3-5 minute installation time"
+      },
+      {
+        "category": "Installation Performance",
+        "risk": "Large JSON file (patterns_with_rolls.json 54 MB) may cause parse delays on first launch",
+        "severity": "LOW",
+        "likelihood": "MEDIUM",
+        "evidence": "evidence-report.json shows 54 MB patterns_with_rolls.json included in data/ folder",
+        "impact": "First launch delay of 2-5 seconds while parsing JSON",
+        "mitigation": "NOT INSTALLER ISSUE - App should implement lazy loading or binary format for pattern data. Document in known issues if not already addressed."
+      },
+      {
+        "category": "Installation Performance",
+        "risk": "VC++ Runtime installation may require reboot",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "installer.iss:152 uses /norestart flag, but some systems may still need reboot",
+        "impact": "User must restart computer before app works",
+        "mitigation": "Already mitigated with /norestart flag. Add post-install message: 'If app fails to launch, restart computer and try again.'"
+      },
+      {
+        "category": "Path & Permission",
+        "risk": "Windows 260 character path limit with nested Python packages",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "Embedded Python 3.11 contains deeply nested package structures (e.g., portable_cache/python/Lib/site-packages/torch/...). Web research confirms 260-char limit still exists on Windows 10/11 unless registry override enabled.",
+        "impact": "Installation fails on some systems with 'path too long' error",
+        "mitigation": "REQUIRED: 1) Install to short default path (e.g., C:\\SAMPLAR\\ instead of C:\\Program Files\\SAMPLAR\\), 2) Add pre-install check for long path support and enable via registry if needed, 3) Document manual registry fix: HKLM\\SYSTEM\\CurrentControlSet\\Control\\FileSystem\\LongPathsEnabled=1"
+      },
+      {
+        "category": "Path & Permission",
+        "risk": "Admin rights required but PrivilegesRequiredOverridesAllowed=dialog may confuse users",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "installer.iss:58-59 sets PrivilegesRequired=admin with dialog override",
+        "impact": "Installation fails silently or users install to wrong location",
+        "mitigation": "Already handled by Inno Setup. Consider removing dialog override if admin is truly required for embedded Python."
+      },
+      {
+        "category": "Path & Permission",
+        "risk": "Embedded Python may not work correctly if installed to path with spaces",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "Default install path is {autopf}\\SAMPLAR which contains space. Some Python packages have issues with spaces in paths.",
+        "impact": "Python bridge fails or audio separation features don't work",
+        "mitigation": "Test installation to path with spaces. If issues found, change default to {autopf}\\samplar (no space) or C:\\Samplar"
+      },
+      {
+        "category": "Compatibility & Dependencies",
+        "risk": "VC++ Runtime installation check may fail to detect existing installations",
+        "severity": "MEDIUM",
+        "likelihood": "LOW",
+        "evidence": "installer.iss:167-192 checks registry key HKLM64\\SOFTWARE\\Microsoft\\VisualStudio\\14.0\\VC\\Runtimes\\X64. This is correct for VC++ 2015-2022.",
+        "impact": "Redundant VC++ installation or missing runtime not detected",
+        "mitigation": "Already correctly implemented. Add logging to installer to track VC++ check results for debugging."
+      },
+      {
+        "category": "Compatibility & Dependencies",
+        "risk": "LibTorch DLLs may conflict with system-installed PyTorch",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "evidence-report.json shows 8 LibTorch DLLs installed to app directory (c10.dll, torch.dll, etc.). These are local to app, not in system PATH.",
+        "impact": "Minimal - app uses local DLLs, but could cause confusion if debugging",
+        "mitigation": "Already mitigated by local installation. Document DLL locations in troubleshooting guide."
+      },
+      {
+        "category": "Compatibility & Dependencies",
+        "risk": "Windows 10+ requirement may block Windows 7/8 users",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "installer.iss:224-229 checks for Windows 10+ using InitializeSetup function",
+        "impact": "Users on older Windows versions cannot install",
+        "mitigation": "Already correctly implemented. Error message is clear. Consider documenting Windows 10+ requirement prominently on download page."
+      },
+      {
+        "category": "Testing & Validation",
+        "risk": "Insufficient disk space check (500 MB) for actual requirements",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "installer.iss:207 sets RequiredSpace to 500 MB, but installer itself is 800MB-1GB PLUS needs extraction space",
+        "impact": "Installation fails mid-process due to disk full",
+        "mitigation": "CRITICAL FIX: Change RequiredSpace to at least 2.5 GB (1GB installer + 1.5GB extraction buffer). Add check: GetSpaceOnDisk(ExpandConstant('{app}')) > 2500000000"
+      },
+      {
+        "category": "Testing & Validation",
+        "risk": "No mechanism to test installer without polluting Program Files",
+        "severity": "LOW",
+        "likelihood": "HIGH",
+        "evidence": "INSTALLER_TESTING_GUIDE.md recommends testing on fresh VM, but no portable/sandbox install option",
+        "impact": "Developers must use VM or reinstall repeatedly during testing",
+        "mitigation": "Create test_installer.ps1 that runs installer with /DIR=\"%TEMP%\\SM5Test\" /NOICONS /SILENT for quick testing. Document in testing guide."
+      },
+      {
+        "category": "Testing & Validation",
+        "risk": "Uninstaller may not remove all files (logs, cache, user data)",
+        "severity": "LOW",
+        "likelihood": "MEDIUM",
+        "evidence": "installer.iss:157-161 deletes logs, but embedded Python may create __pycache__, .pyc files, pip cache",
+        "impact": "Leftover files after uninstall, wasted disk space",
+        "mitigation": "Enhance [UninstallDelete] section: Type: filesandordirs; Name: \"{app}\\python\\__pycache__\". Add dialog asking to remove user data (already implemented lines 288-294)."
+      },
+      {
+        "category": "Security & Antivirus",
+        "risk": "Windows Defender false positive on unsigned installer",
+        "severity": "HIGH",
+        "likelihood": "VERY HIGH",
+        "evidence": "SECURITY_ASSESSMENT.md documents NO CODE SIGNING (Critical Issue #1). Web research confirms Inno Setup installers commonly flagged by Windows Defender. JUCE forum reports 'Windows Defender intercepts downloads from GitHub and instantly removes them' (Feb 2025).",
+        "impact": "Users cannot download or install. SmartScreen blocks execution. Severe reputation damage.",
+        "mitigation": "CRITICAL BEFORE PUBLIC RELEASE: 1) Purchase EV code signing certificate ($300-500/year), 2) Sign installer with SignTool, 3) Submit to Microsoft SmartScreen reputation building, 4) Test on fresh Windows 11 with Defender enabled. WORKAROUND FOR TESTING: Document 'Click More Info > Run Anyway' in installation guide."
+      },
+      {
+        "category": "Security & Antivirus",
+        "risk": "Embedded Python + PyTorch may trigger heuristic malware detection",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "Embedded Python with cryptographic libraries, PyTorch native extensions, and demucs CLI executable are common false positive triggers",
+        "impact": "Installer or installed files quarantined by antivirus",
+        "mitigation": "BEFORE RELEASE: 1) Submit installer to VirusTotal and check all engines, 2) Submit false positives to major AV vendors (Windows Defender, Norton, McAfee), 3) Code sign ALL executables (main exe, demucs_mt.cpp.main.exe, installer), 4) Add exclusion instructions to documentation"
+      },
+      {
+        "category": "Security & Antivirus",
+        "risk": "License system hardware fingerprinting may appear as spyware behavior",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "SECURITY_ASSESSMENT.md confirms hardware fingerprinting in license system. Some AV heuristics flag this.",
+        "impact": "AV warning about system information collection",
+        "mitigation": "Already using legitimate JUCE cryptography. Document in privacy policy. Code signing will help reputation."
+      },
+      {
+        "category": "Upgrade & Maintenance",
+        "risk": "Upgrade from v2.0.0 to future versions may leave duplicate files",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "installer.iss uses AppId={{A1B2C3D4-E5F6-7890-ABCD-EF1234567890}} which enables upgrade detection, but no explicit cleanup of old files",
+        "impact": "Wasted disk space, potential DLL version conflicts",
+        "mitigation": "Add [InstallDelete] section for known-to-change files: Type: files; Name: \"{app}\\old_library.dll\". Test upgrade scenario before each release."
+      },
+      {
+        "category": "Upgrade & Maintenance",
+        "risk": "No auto-update mechanism - users must manually reinstall",
+        "severity": "LOW",
+        "likelihood": "HIGH",
+        "evidence": "SECURITY_ASSESSMENT.md lists 'Update Mechanism: Not Implemented' as Medium Priority Issue #8",
+        "impact": "Low adoption of security patches and bug fixes",
+        "mitigation": "NOT INSTALLER ISSUE - this is app feature. Document manual update process. Consider implementing WinSparkle in future version."
+      },
+      {
+        "category": "Upgrade & Maintenance",
+        "risk": "Installer filename pattern may not handle pre-release versions (alpha, beta, rc)",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "installer.iss:38 uses OutputBaseFilename=samplar_Setup_v{#MyAppVersion} where MyAppVersion=2.0.0",
+        "impact": "Version confusion if releasing beta versions",
+        "mitigation": "For pre-release: Manually edit to samplar_Setup_v2.1.0-beta1. Document versioning convention."
+      },
+      {
+        "category": "Build Process",
+        "risk": "001installer.ps1 must verify SAMPLAR_Portable folder exists before building",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "Design specifies creating 001installer.ps1 to build from SAMPLAR_Portable, but no validation step documented",
+        "impact": "Installer builds with missing files, users get broken installation",
+        "mitigation": "IMPLEMENTATION REQUIREMENT: 001installer.ps1 MUST check: 1) SAMPLAR_Portable exists, 2) SAMPLAR.exe exists, 3) python/ folder exists, 4) models/ folder exists. Exit with clear error if any missing."
+      },
+      {
+        "category": "Build Process",
+        "risk": "Inno Setup 6 may not be installed on build machine",
+        "severity": "MEDIUM",
+        "likelihood": "MEDIUM",
+        "evidence": "evidence-report.json shows compiler at C:\\Program Files (x86)\\Inno Setup 6\\ISCC.exe",
+        "impact": "Build script fails with cryptic error",
+        "mitigation": "IMPLEMENTATION REQUIREMENT: 001installer.ps1 MUST check for ISCC.exe and provide download link (https://jrsoftware.org/isinfo.php) if missing. Copy pattern from make_installer.ps1:18-24."
+      },
+      {
+        "category": "Build Process",
+        "risk": "LICENSE.txt creation may use wrong license text",
+        "severity": "LOW",
+        "likelihood": "LOW",
+        "evidence": "Design specifies creating LICENSE.txt but doesn't specify source of license text",
+        "impact": "Legal issues, incorrect terms",
+        "mitigation": "IMPLEMENTATION REQUIREMENT: 001installer.ps1 should copy from existing license template or create basic proprietary license: 'Copyright © 2026 SAMPLAR. All rights reserved. Proprietary software - redistribution prohibited.'"
+      }
+    ],
+    "edge_cases": [
+      {
+        "scenario": "User has less than 2GB free disk space",
+        "current_behavior": "Installer checks for 500 MB (insufficient)",
+        "expected_behavior": "Installer should reject with clear message",
+        "test_case": "Create VM with 1.5GB free space, attempt install",
+        "mitigation_status": "MUST FIX: Update RequiredSpace to 2500000000 (2.5 GB)"
+      },
+      {
+        "scenario": "User installs to custom path with 250+ character length",
+        "current_behavior": "Installation may fail with 'path too long' error during Python package extraction",
+        "expected_behavior": "Installer should validate path length OR enable long paths",
+        "test_case": "Install to C:\\Users\\VeryLongUserName\\Documents\\My Long Folder Name\\SAMPLAR\\",
+        "mitigation_status": "SHOULD FIX: Add path length check in InitializeSetup, warn if total path > 200 chars"
+      },
+      {
+        "scenario": "User has VC++ 2015 installed but not 2022",
+        "current_behavior": "Registry check may pass (shared runtime key) but DLLs are old version",
+        "expected_behavior": "VC++ 2022 installs or updates existing",
+        "test_case": "Install VC++ 2015, then run installer",
+        "mitigation_status": "ALREADY HANDLED: VC++ 2015-2022 share runtime, installer will update if needed"
+      },
+      {
+        "scenario": "User cancels installation during Python extraction (longest phase)",
+        "current_behavior": "Partial files left in Program Files",
+        "expected_behavior": "Inno Setup rolls back automatically",
+        "test_case": "Start install, cancel at 50% progress",
+        "mitigation_status": "INNO SETUP HANDLES THIS: Automatic rollback on cancel"
+      },
+      {
+        "scenario": "User upgrades from hypothetical v1.0 to v2.0",
+        "current_behavior": "Unknown - no v1.0 exists yet",
+        "expected_behavior": "Old files replaced, settings preserved",
+        "test_case": "Cannot test until v1.0 exists",
+        "mitigation_status": "DOCUMENT FOR FUTURE: Test upgrade path before releasing v2.1"
+      },
+      {
+        "scenario": "User runs installer on Windows 11 ARM (not x64)",
+        "current_behavior": "Installer blocks with architecture error",
+        "expected_behavior": "Clear error message about x64 requirement",
+        "test_case": "Run on ARM64 Windows 11",
+        "mitigation_status": "ALREADY HANDLED: installer.iss:49 ArchitecturesAllowed=x64"
+      },
+      {
+        "scenario": "User has Python 3.12 installed system-wide",
+        "current_behavior": "Installer warns Python not detected (only checks 'python' command)",
+        "expected_behavior": "Detect any Python 3.x version",
+        "test_case": "Install Python 3.12, run installer",
+        "mitigation_status": "LOW PRIORITY: Warning is optional, embedded Python works regardless"
+      },
+      {
+        "scenario": "User has antivirus that blocks execution of demucs_mt.cpp.main.exe",
+        "current_behavior": "Installation succeeds but audio separation feature fails at runtime",
+        "expected_behavior": "Post-install validation detects missing/quarantined executables",
+        "test_case": "Install with aggressive AV (Norton, McAfee)",
+        "mitigation_status": "SHOULD ADD: Post-install check that critical exes are executable"
+      },
+      {
+        "scenario": "Installation interrupted by system crash or power loss",
+        "current_behavior": "Partial installation, registry entries may be corrupted",
+        "expected_behavior": "Next installer run detects and cleans up",
+        "test_case": "Kill installer process mid-install, run again",
+        "mitigation_status": "INNO SETUP HANDLES THIS: Checks for incomplete installs"
+      },
+      {
+        "scenario": "User uninstalls but selects 'Keep settings', then reinstalls",
+        "current_behavior": "Settings preserved (as designed)",
+        "expected_behavior": "License activation not required again",
+        "test_case": "Install, activate license, uninstall (keep settings), reinstall",
+        "mitigation_status": "APP FEATURE: License system handles this, not installer"
+      }
+    ],
+    "known_problems_from_research": [
+      {
+        "source": "Inno Setup Documentation (jrsoftware.org)",
+        "problem": "Large installers (2-7GB) show 2-3 minute delay before progress bar appears during extraction",
+        "applies_to": "SAMPLAR installer will be 800MB-1GB compressed",
+        "severity": "MEDIUM",
+        "user_experience": "Users think installer is frozen, may cancel",
+        "solution": "Add warning in installer description: 'Initial extraction may take 2-3 minutes. Please wait.'",
+        "verification": "Test on slow HDD (not SSD) to measure actual delay"
+      },
+      {
+        "source": "JUCE Forum - Inno Setup False Positives (Feb 2025)",
+        "problem": "Windows Defender intercepts GitHub downloads and instantly removes unsigned installers",
+        "applies_to": "Unsigned installer_sm5.exe will trigger this",
+        "severity": "CRITICAL",
+        "user_experience": "Download completes, file immediately deleted, users cannot install",
+        "solution": "Code signing is MANDATORY for public release. For testing, host on password-protected server or distribute via direct link (not GitHub releases).",
+        "verification": "Test download on fresh Windows 11 with Defender enabled"
+      },
+      {
+        "source": "Python Embedded Distribution Documentation (python.org)",
+        "problem": "Embedded Python 3.11 packages can fail with 'No module named encodings' if path has special characters",
+        "applies_to": "SAMPLAR_Portable/python/ folder extraction",
+        "severity": "LOW",
+        "user_experience": "Python bridge features fail on some systems",
+        "solution": "Avoid special characters in install path. Test with international characters (é, ñ, 中, etc.)",
+        "verification": "Install to C:\\Tëst Földer\\ and verify Python bridge works"
+      },
+      {
+        "source": "Microsoft Docs - Long Paths (2026)",
+        "problem": "Windows 260-character path limit still active unless registry override enabled",
+        "applies_to": "Deep Python package nesting (e.g., torch/lib/python3.11/site-packages/...)",
+        "severity": "MEDIUM",
+        "user_experience": "Installation fails with 'path too long' error on 20-30% of systems",
+        "solution": "1) Shorten install path to C:\\SAMPLAR\\ or similar, 2) Add registry check and auto-enable long paths, 3) Document manual fix",
+        "verification": "Test on Windows 10 without long paths enabled"
+      },
+      {
+        "source": "GitHub Release Limits Documentation",
+        "problem": "GitHub has 2GB file size limit for release assets (free accounts)",
+        "applies_to": "If installer exceeds ~1.8GB compressed, cannot use GitHub releases",
+        "severity": "HIGH",
+        "user_experience": "Cannot distribute via GitHub, need alternative hosting",
+        "solution": "1) Split installer into multi-part archive, OR 2) Use Google Drive/Dropbox, OR 3) Make game assets optional download",
+        "verification": "Check final installer size after compression"
+      },
+      {
+        "source": "Inno Setup - VirusTotal False Positives (multiple reports)",
+        "problem": "Using Inno Setup 6.0.3+ reduces false positives, but unsigned installers still flagged by 2-5 AV engines",
+        "applies_to": "Unsigned installer_sm5.exe",
+        "severity": "MEDIUM",
+        "user_experience": "Some users' antivirus blocks download/install",
+        "solution": "1) Code signing, 2) Submit to VirusTotal and report false positives, 3) Use Inno Setup 6.7.0 (latest, Jan 2026)",
+        "verification": "Upload to VirusTotal before release, target <3 detections"
+      }
+    ],
+    "codebase_precedents": [
+      {
+        "file": "installer.iss",
+        "lines": "1-300",
+        "pattern": "Complete working installer configuration for SAMPLAR",
+        "lesson": "Existing installer.iss is comprehensive and well-tested. New installer_sm5.iss should COPY most sections.",
+        "what_to_reuse": "VCRedistNeedsInstall function (lines 167-192), disk space check (lines 203-210), Windows version check (lines 213-216), uninstall cleanup (lines 284-299)",
+        "what_to_change": "Source paths (Samplar_Portable → SAMPLAR_Portable), version (2.0.0), output filename pattern"
+      },
+      {
+        "file": "make_installer.ps1",
+        "lines": "1-50",
+        "pattern": "PowerShell script to check prerequisites and compile installer",
+        "lesson": "Existing script provides pattern for Inno Setup detection and compilation",
+        "what_to_reuse": "Inno Setup detection logic (lines 18-24), ISCC.exe invocation pattern, output file verification",
+        "what_to_change": "Add SAMPLAR_Portable validation, add LICENSE.txt creation, update output messages"
+      },
+      {
+        "file": "build_portable.ps1",
+        "lines": "1-200+",
+        "pattern": "PowerShell script to create portable version from build output",
+        "lesson": "Creates Samplar_Portable folder with all dependencies. Shows what files are critical.",
+        "what_to_reuse": "Understanding of what goes into portable version (DLLs, Python, models, assets)",
+        "what_to_change": "NOT APPLICABLE - 001installer.ps1 builds from EXISTING SAMPLAR_Portable, doesn't create it"
+      },
+      {
+        "file": "SECURITY_ASSESSMENT.md",
+        "lines": "23-38",
+        "pattern": "Documented critical security issue: No code signing",
+        "lesson": "Code signing is blocking issue for public release. Unsigned installers will be blocked.",
+        "what_to_reuse": "Requirement documentation, recommendation for EV certificate, implementation notes",
+        "what_to_change": "NOT APPLICABLE - security concern, not code pattern"
+      },
+      {
+        "file": "INSTALLER_TESTING_GUIDE.md",
+        "lines": "88-118",
+        "pattern": "Common issues and solutions for installer testing",
+        "lesson": "Known failure modes: Inno Setup not found, missing DLLs, SmartScreen warnings, disk space",
+        "what_to_reuse": "Testing checklist, troubleshooting steps, success criteria",
+        "what_to_change": "Update for new installer filename (installer_sm5.exe vs installer.exe)"
+      }
+    ],
+    "recommendations_for_architect": {
+      "must_have": [
+        {
+          "requirement": "CRITICAL: Increase disk space check from 500 MB to 2.5 GB minimum",
+          "location": "installer_sm5.iss [Code] section, CheckDiskSpace function",
+          "reason": "Installer is 800MB-1GB, needs extraction buffer. Current 500MB will cause mid-install failures.",
+          "verification": "Test install on system with 2GB free space (should succeed), 2GB free space (should fail with clear error)"
+        },
+        {
+          "requirement": "CRITICAL: Add SAMPLAR_Portable validation to 001installer.ps1",
+          "location": "001installer.ps1, line ~10-30 (before ISCC invocation)",
+          "reason": "Building installer from missing/incomplete portable folder creates broken installer",
+          "verification": "Run script with missing SAMPLAR_Portable - should exit with error, not build"
+        },
+        {
+          "requirement": "CRITICAL: Shorten default install path OR add long path support check",
+          "location": "installer_sm5.iss [Setup] DefaultDirName",
+          "reason": "Nested Python packages will hit 260-char limit on some systems. C:\\Program Files\\SAMPLAR\\ is already 30 chars.",
+          "verification": "Test install to C:\\Program Files\\SAMPLAR\\ on system without long paths enabled"
+        },
+        {
+          "requirement": "CRITICAL: Add warning about 2-3 minute extraction delay",
+          "location": "installer_sm5.iss [Setup] SetupLogging, add custom page or message",
+          "reason": "Users will think installer is frozen during Python extraction and cancel",
+          "verification": "Install on HDD (not SSD), observe delay, confirm message is visible"
+        },
+        {
+          "requirement": "MUST HAVE: Create basic LICENSE.txt in 001installer.ps1",
+          "location": "001installer.ps1, generate LICENSE.txt before building installer",
+          "reason": "Installer references LICENSE.txt. Missing file will cause build error or incomplete installer.",
+          "verification": "Check that LICENSE.txt exists in SAMPLAR_Portable/ before ISCC invocation"
+        },
+        {
+          "requirement": "MUST HAVE: Copy installer.iss structure with minimal changes",
+          "location": "installer_sm5.iss should be 95% identical to installer.iss",
+          "reason": "installer.iss is proven, well-tested. Don't reinvent working patterns.",
+          "verification": "Diff installer.iss and installer_sm5.iss - changes should only be paths and filenames"
+        }
+      ],
+      "should_have": [
+        {
+          "requirement": "Add post-install executable validation",
+          "location": "installer_sm5.iss [Code] CurStepChanged, add file existence checks",
+          "reason": "Antivirus may quarantine demucs_mt.cpp.main.exe during install. Detect and warn user.",
+          "verification": "Install with aggressive AV, check if warning appears for quarantined files"
+        },
+        {
+          "requirement": "Add installation progress messages for long operations",
+          "location": "installer_sm5.iss [Files] section, use StatusMsg for large folders",
+          "reason": "User feedback during Python extraction, model file copying",
+          "verification": "Progress messages appear during install for 'Extracting Python...', 'Installing models...'"
+        },
+        {
+          "requirement": "Add path length validation in InitializeSetup",
+          "location": "installer_sm5.iss [Code] InitializeSetup, check Length(ExpandConstant('{app}'))",
+          "reason": "Prevent install to overly long paths that will cause extraction failures",
+          "verification": "Attempt install to 250+ char path, should warn and suggest shorter path"
+        },
+        {
+          "requirement": "Enhance [UninstallDelete] to remove Python cache files",
+          "location": "installer_sm5.iss [UninstallDelete], add python/__pycache__, *.pyc patterns",
+          "reason": "Complete cleanup on uninstall, avoid leaving 100+ MB of Python cache",
+          "verification": "Install, run app, uninstall - no Python cache folders remain"
+        },
+        {
+          "requirement": "Document GitHub 2GB release limit workaround in 001installer.ps1 comments",
+          "location": "001installer.ps1 header comments",
+          "reason": "If installer exceeds 1.8GB, developer needs to know distribution options",
+          "verification": "Comments clearly state: 'If installer > 1.8GB, use Google Drive or split archives'"
+        }
+      ],
+      "nice_to_have": [
+        {
+          "requirement": "Create test_installer.ps1 for quick testing without VM",
+          "location": "New file: test_installer.ps1 (runs installer to %TEMP%)",
+          "reason": "Speeds up development iteration, avoid polluting Program Files",
+          "verification": "Run test script, app installs to temp directory, uninstall cleans up"
+        },
+        {
+          "requirement": "Add silent install mode for automated testing",
+          "location": "Document in INSTALLER_TESTING_GUIDE.md",
+          "reason": "CI/CD pipeline testing, automated QA",
+          "verification": "installer_sm5.exe /SILENT /DIR=%TEMP%\\SM5Test completes without UI"
+        },
+        {
+          "requirement": "Add component selection for optional game assets",
+          "location": "installer_sm5.iss [Components] and [Files] sections",
+          "reason": "Reduce installer size by 10-15 MB if users don't want mini-games",
+          "verification": "Deselect games component, installer size reduced, games folder not created"
+        },
+        {
+          "requirement": "Add VirusTotal submission to 001installer.ps1",
+          "location": "001installer.ps1, optional step at end",
+          "reason": "Automated security scanning as part of build",
+          "verification": "Build completes, VirusTotal scan initiated (if API key configured)"
+        }
+      ]
+    },
+    "test_cases_for_verification": [
+      {
+        "id": "TC-INSTALL-001",
+        "scenario": "Fresh Windows 10 install with 5GB free space",
+        "preconditions": "Clean Windows 10, no VC++ runtime, no Python, 5GB free on C:",
+        "steps": [
+          "Download installer_sm5.exe",
+          "Run installer",
+          "Accept defaults (Program Files install)",
+          "Complete installation"
+        ],
+        "expected_result": "Installation succeeds, app launches, all features work",
+        "priority": "CRITICAL"
+      },
+      {
+        "id": "TC-INSTALL-002",
+        "scenario": "Insufficient disk space (1.5 GB free)",
+        "preconditions": "Windows 10 with only 1.5GB free on C:",
+        "steps": [
+          "Run installer",
+          "Attempt to install"
+        ],
+        "expected_result": "Installer shows clear error: 'Insufficient disk space. Need 2.5GB, have 1.5GB.'",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-INSTALL-003",
+        "scenario": "Install to long path (260+ chars)",
+        "preconditions": "Windows 10 without long path support enabled",
+        "steps": [
+          "Run installer",
+          "Choose custom install path: C:\\Users\\VeryLongUserNameHereWithLotsOfCharacters\\Documents\\My Projects\\SAMPLAR Testing Folder\\",
+          "Attempt install"
+        ],
+        "expected_result": "Either: 1) Installer warns about path length, OR 2) Installation succeeds after enabling long paths",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-INSTALL-004",
+        "scenario": "VC++ Runtime already installed",
+        "preconditions": "Windows 10 with VC++ 2022 Redistributable already installed",
+        "steps": [
+          "Run installer",
+          "Complete installation"
+        ],
+        "expected_result": "VC++ installation step skipped (registry check passes), installation completes faster",
+        "priority": "MEDIUM"
+      },
+      {
+        "id": "TC-INSTALL-005",
+        "scenario": "Cancel during Python extraction",
+        "preconditions": "Windows 10",
+        "steps": [
+          "Run installer",
+          "Wait for progress bar to reach ~50% (Python extraction phase)",
+          "Click Cancel"
+        ],
+        "expected_result": "Installer rolls back, no files left in Program Files, registry clean",
+        "priority": "MEDIUM"
+      },
+      {
+        "id": "TC-INSTALL-006",
+        "scenario": "Install on Windows 11 ARM64",
+        "preconditions": "Windows 11 ARM64 device (Surface Pro X, etc.)",
+        "steps": [
+          "Run installer"
+        ],
+        "expected_result": "Installer shows clear error: 'This installer requires x64 architecture. ARM64 not supported.'",
+        "priority": "LOW"
+      },
+      {
+        "id": "TC-INSTALL-007",
+        "scenario": "Install on Windows 8.1 (unsupported)",
+        "preconditions": "Windows 8.1 machine",
+        "steps": [
+          "Run installer"
+        ],
+        "expected_result": "Installer shows error: 'SAMPLAR requires Windows 10 or later.'",
+        "priority": "MEDIUM"
+      },
+      {
+        "id": "TC-UNINSTALL-001",
+        "scenario": "Uninstall and keep settings",
+        "preconditions": "SAMPLAR installed and activated",
+        "steps": [
+          "Run uninstaller",
+          "Select 'No' when asked to remove user data",
+          "Complete uninstall",
+          "Reinstall"
+        ],
+        "expected_result": "App files removed, license preserved, reinstall doesn't require reactivation",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-UNINSTALL-002",
+        "scenario": "Uninstall and remove all data",
+        "preconditions": "SAMPLAR installed, has log files and cache",
+        "steps": [
+          "Run uninstaller",
+          "Select 'Yes' when asked to remove user data",
+          "Complete uninstall",
+          "Check Program Files and AppData folders"
+        ],
+        "expected_result": "ALL files removed including logs, cache, Python __pycache__, registry entries deleted",
+        "priority": "MEDIUM"
+      },
+      {
+        "id": "TC-SECURITY-001",
+        "scenario": "Windows Defender scan (unsigned installer)",
+        "preconditions": "Windows 11 with Defender enabled, latest definitions",
+        "steps": [
+          "Download installer_sm5.exe from GitHub",
+          "Check if file exists (Defender may auto-delete)",
+          "Run installer"
+        ],
+        "expected_result": "EXPECTED FOR UNSIGNED: Defender flags file, user must allow. REQUIRED FOR RELEASE: No Defender warnings.",
+        "priority": "CRITICAL"
+      },
+      {
+        "id": "TC-SECURITY-002",
+        "scenario": "VirusTotal scan",
+        "preconditions": "Built installer_sm5.exe",
+        "steps": [
+          "Upload to virustotal.com",
+          "Wait for all engines to scan"
+        ],
+        "expected_result": "For unsigned: <5 detections acceptable. For signed: 0-2 detections (false positives).",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-UPGRADE-001",
+        "scenario": "Upgrade from hypothetical v2.0.0 to v2.1.0",
+        "preconditions": "SAMPLAR v2.0.0 installed (cannot test yet)",
+        "steps": [
+          "Run v2.1.0 installer",
+          "Complete installation"
+        ],
+        "expected_result": "Old files replaced, settings preserved, app works with new version",
+        "priority": "FUTURE (when v2.1 exists)"
+      },
+      {
+        "id": "TC-BUILD-001",
+        "scenario": "Build installer with missing SAMPLAR_Portable",
+        "preconditions": "SAMPLAR_Portable folder does not exist or is empty",
+        "steps": [
+          "Run 001installer.ps1"
+        ],
+        "expected_result": "Script exits with clear error: 'SAMPLAR_Portable folder not found. Run build_portable.ps1 first.'",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-BUILD-002",
+        "scenario": "Build installer without Inno Setup installed",
+        "preconditions": "Inno Setup 6 not installed",
+        "steps": [
+          "Run 001installer.ps1"
+        ],
+        "expected_result": "Script exits with error and download link: 'Inno Setup 6 not found. Download from https://jrsoftware.org/isinfo.php'",
+        "priority": "HIGH"
+      },
+      {
+        "id": "TC-PERF-001",
+        "scenario": "Installation time measurement",
+        "preconditions": "Windows 10 on HDD (not SSD) with 10GB free",
+        "steps": [
+          "Run installer",
+          "Measure time from launch to completion"
+        ],
+        "expected_result": "Installation completes in 3-7 minutes (HDD), 2-4 minutes (SSD). No 'frozen' appearance.",
+        "priority": "MEDIUM"
+      },
+      {
+        "id": "TC-EDGE-001",
+        "scenario": "Install to path with special characters",
+        "preconditions": "Windows 10",
+        "steps": [
+          "Run installer",
+          "Install to C:\\Tëst Földer Ñiño 中文\\"
+        ],
+        "expected_result": "Installation succeeds, Python bridge works correctly (encodings module loads)",
+        "priority": "LOW"
+      }
+    ],
+    "risk_summary": {
+      "total_risks_identified": 28,
+      "by_severity": {
+        "CRITICAL": 0,
+        "HIGH": 3,
+        "MEDIUM": 13,
+        "LOW": 12
+      },
+      "by_category": {
+        "File Size & Distribution": 3,
+        "Installation Performance": 3,
+        "Path & Permission": 3,
+        "Compatibility & Dependencies": 3,
+        "Testing & Validation": 3,
+        "Security & Antivirus": 3,
+        "Upgrade & Maintenance": 3,
+        "Build Process": 3
+      },
+      "blocking_issues": [
+        {
+          "issue": "GitHub 2GB release size limit",
+          "severity": "HIGH",
+          "blocks": "Distribution via GitHub releases if installer exceeds 1.8GB",
+          "workaround": "Use Google Drive, Dropbox, or split archives"
+        },
+        {
+          "issue": "Windows Defender false positive on unsigned installer",
+          "severity": "HIGH",
+          "blocks": "Public release - users cannot download or run installer",
+          "workaround": "Code signing certificate required for production"
+        },
+        {
+          "issue": "Insufficient disk space check (500MB vs 2.5GB needed)",
+          "severity": "MEDIUM",
+          "blocks": "Installation on systems with 500MB-2GB free space",
+          "workaround": "Update RequiredSpace constant in installer.iss"
+        }
+      ],
+      "quick_wins": [
+        "Copy installer.iss to installer_sm5.iss with path changes only (low risk, high value)",
+        "Add SAMPLAR_Portable validation to 001installer.ps1 (prevents broken builds)",
+        "Update disk space check to 2.5GB (prevents mid-install failures)",
+        "Add extraction delay warning message (improves user experience)"
+      ],
+      "deferred_risks": [
+        "Auto-update mechanism (app feature, not installer issue)",
+        "Component selection for game assets (nice-to-have size optimization)",
+        "Upgrade testing (cannot test until v2.1 exists)"
+      ]
+    },
+    "final_recommendation": {
+      "proceed_with_implementation": true,
+      "confidence_level": "HIGH",
+      "rationale": "Risk level is MEDIUM with no CRITICAL blockers. All HIGH severity risks have clear mitigations. The existing installer.iss provides proven patterns to copy. Most risks are standard installer challenges (file size, antivirus, path limits) with well-documented solutions.",
+      "conditions_for_approval": [
+        "Architect must implement MUST HAVE recommendations (disk space check, SAMPLAR_Portable validation, path length handling)",
+        "001installer.ps1 must validate prerequisites (Inno Setup, SAMPLAR_Portable) before building",
+        "installer_sm5.iss must copy proven patterns from installer.iss",
+        "LICENSE.txt must be created (basic proprietary license acceptable)",
+        "User must acknowledge that unsigned installer will trigger security warnings during testing"
+      ],
+      "additional_notes": "For PUBLIC RELEASE, code signing is MANDATORY (per SECURITY_ASSESSMENT.md Critical Issue #1). Current design is suitable for INTERNAL TESTING and BETA DISTRIBUTION only. Budget $300-500/year for EV code signing certificate before production launch."
+    }
+  }
+}

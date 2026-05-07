@@ -1,0 +1,41 @@
+{
+  "session_id": "preview-audio-enhancements-2026-01-05",
+  "task": "Implement Pattern Preview Audio Enhancements: 1) Volume mix for GM samples (Kick 0dB, Snare +3.5dB, Perc -3.5dB, HiHat -2dB), 2) Use StepSequencer samples when loaded else fall back to GM samples, 3) Add V button for drag-to-adjust volume control",
+  "enhanced_task": "",
+  "started": "2026-01-05T10:00:00Z",
+  "status": "in_progress",
+  "current_phase": "prompt-enhancement",
+  "phases": {
+    "prompt-enhancement": { "status": "in_progress" },
+    "investigation": { "status": "pending" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "B:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5",
+  "features": [
+    {
+      "name": "Preview Volume Mix",
+      "description": "Apply dB gain adjustments to GM drum samples",
+      "details": {
+        "kick": "0 dB (gain 1.0)",
+        "snare": "+3.5 dB (gain 1.496)",
+        "perc": "-3.5 dB (gain 0.668)",
+        "hihat": "-2 dB (gain 0.794)",
+        "tom": "0 dB (default)",
+        "cymbal": "0 dB (default)"
+      }
+    },
+    {
+      "name": "Sample Source Priority",
+      "description": "Use StepSequencer loaded samples first, fall back to GM samples"
+    },
+    {
+      "name": "V Button Volume Control",
+      "description": "Drag up/down to adjust master preview volume, positioned before G button"
+    }
+  ]
+}

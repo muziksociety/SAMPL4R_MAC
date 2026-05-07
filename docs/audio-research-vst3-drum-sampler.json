@@ -1,0 +1,259 @@
+﻿{
+  "session_id": "direct-invocation",
+  "agent": "audio-research",
+  "created_at": "2026-03-14T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "research_question": "How to architect a VST3/CLAP drum sampler plugin in JUCE covering: plugin format selection, AudioProcessor patterns, MIDI mapping, standalone+plugin hybrid build, and real-world reference implementations.",
+    "search_strategy": {
+      "sources_searched": ["JUCE Forums", "JUCE Official Docs", "GitHub", "KVR Audio", "arXiv cs.SD", "Gearspace", "CLAP spec"],
+      "keywords": [
+        "VST3 vs CLAP MIDI audio 2024",
+        "JUCE AudioProcessor drum sampler processBlock MIDI multi-output",
+        "open source JUCE drum sampler GitHub VST3 CLAP 2024",
+        "juce_add_plugin FORMATS VST3 Standalone CMakeLists",
+        "GM drum map MIDI round robin velocity layers JUCE",
+        "JUCE multi-output bus getBusBuffer drum sampler VST3",
+        "JUCE Synthesiser SamplerVoice SamplerSound round robin",
+        "clap-juce-extensions drum sampler audio input",
+        "arxiv.org drum synthesis physical modeling modal 2024 2025"
+      ],
+      "date_range": "2020-2026, prioritized 2024-2026"
+    },
+    "findings": [
+      {
+        "id": 1,
+        "title": "VST3 vs CLAP Format Decision for Drum Samplers",
+        "quality": "High (professional community + spec documents)",
+        "summary": "VST3 is the safe production choice for maximum DAW compatibility (Ableton, Logic, Pro Tools, Cubase all support it). CLAP offers full MIDI 2.0, per-note modulation, and a cleaner threading model, but as of 2024 only ~15 DAWs support it (Bitwig, Reaper, FL Studio 2024). For a drum sampler needing audio INPUT for live sampling, both formats support it via bus configuration. VST3 maps MIDI CC to parameters; CLAP has native MIDI CC routing. The silence flag in VST3 saves CPU during quiet periods, useful for a sampler.",
+        "recommendation_for_sm5": "Build VST3 + Standalone as primary targets via juce_add_plugin. Add CLAP via clap-juce-extensions as an additive bonus — it is MIT licensed and compatible with both open and closed source. Do NOT build CLAP-only; DAW coverage is insufficient in 2026.",
+        "key_parameters": {
+          "vst3_advantages": ["Universal DAW support", "Silence flag for CPU savings", "Proven in production", "JUCE native support"],
+          "clap_advantages": ["MIDI 2.0 per-note modulation", "Better threading model", "No licensing fees", "Sample-accurate automation"],
+          "clap_disadvantages": ["Missing Ableton/Logic/Pro Tools/Cubase support", "~400 plugins total as of 2024"]
+        },
+        "references": [
+          "https://librearts.org/2024/11/clap-api-two-years-later/",
+          "https://github.com/free-audio/clap-juce-extensions",
+          "https://www.tone2.com/plugin-formats.html"
+        ]
+      },
+      {
+        "id": 2,
+        "title": "JUCE AudioProcessor Pattern for Drum Samplers",
+        "quality": "High (JUCE official docs + forum implementations)",
+        "summary": "The standard JUCE drum sampler pattern uses juce::Synthesiser as the core engine. Each drum pad gets its own SamplerSound (loaded from file or BinaryData) and one or more SamplerVoice objects. processBlock() receives both the audio buffer and a MidiBuffer; you call synth.renderNextBlock(buffer, midiMessages, 0, buffer.getNumSamples()) which handles all MIDI->audio triggering internally. For audio INPUT (live sampling), read the input bus using getBusBuffer(buffer, true, 0) before writing output.",
+        "key_code_patterns": {
+          "processBlock_skeleton": "void processBlock(AudioBuffer<float>& buffer, MidiBuffer& midi) { buffer.clear(); // Always clear outputs first. For live-in: auto inputBus = getBusBuffer(buffer, true, 0); // capture input. synth.renderNextBlock(buffer, midi, 0, buffer.getNumSamples()); }",
+          "voice_setup": "synthesiser.addVoice(new SamplerVoice()); synthesiser.addSound(new SamplerSound('kick', *reader, midiNotes, rootNote, attackSec, releaseSec, maxSampleLength));",
+          "multi_output": "auto outputBus = getBusBuffer(buffer, false, busIndex); // Route pad N to output bus N",
+          "prepare_to_play": "synthesiser.setCurrentPlaybackSampleRate(sampleRate); synthesiser.setMinimumRenderingSubdivisionSize(64);"
+        },
+        "thread_safety_notes": [
+          "synth.renderNextBlock() is realtime-safe - no allocations",
+          "Loading samples must happen OFF the audio thread (use background thread + atomic swap)",
+          "Parameter changes via APVTS are sample-accurate via AudioProcessorValueTreeState"
+        ],
+        "references": [
+          "https://docs.juce.com/master/classAudioProcessor.html",
+          "https://forum.juce.com/t/drum-sampler-plugin-structure-best-practice/56910",
+          "https://github.com/WeAreROLI/JUCE/blob/master/examples/Plugins/SamplerPluginDemo.h"
+        ]
+      },
+      {
+        "id": 3,
+        "title": "Multi-Output Bus Configuration for Individual Drum Channels",
+        "quality": "High (JUCE official docs)",
+        "summary": "JUCE supports declaring multiple stereo output buses in BusesProperties. Each bus maps to 2 channels in the flat processBlock buffer. Use getBusBuffer(buffer, false, busIndex) to get a sub-buffer for each output bus. The MultiOutSynth JUCE example demonstrates this pattern. VST3 supports multi-output; hosts like Reaper and Cubase can route individual outputs. Important: channels beyond the input count contain garbage on entry - always clear them before writing.",
+        "key_code_patterns": {
+          "bus_declaration": "BusesProperties().withInput('Input', AudioChannelSet::stereo(), true).withOutput('Main Out', AudioChannelSet::stereo(), true).withOutput('Kick Out', AudioChannelSet::stereo(), false).withOutput('Snare Out', AudioChannelSet::stereo(), false).withOutput('HiHat Out', AudioChannelSet::stereo(), false)",
+          "per_pad_routing": "auto kickBus = getBusBuffer(buffer, false, 1); kickBus.clear(); // then write kick audio into kickBus",
+          "isBusesLayoutSupported": "Override to accept any number of outputs while requiring stereo main out"
+        },
+        "pitfalls": [
+          "Garbage data in output-only channels - always call clear() before rendering",
+          "Not all DAWs activate additional output buses by default - UI should warn user",
+          "AU format is more restrictive about multi-out than VST3"
+        ],
+        "references": [
+          "https://juce.com/tutorials/tutorial_audio_bus_layouts/",
+          "https://forum.juce.com/t/getting-multiple-buses-working-for-au-and-vst3/60078",
+          "https://forum.juce.com/t/multi-bus-synth-plugin-routing-bus-buffers-in-processblock-when-using-the-synthesiser-class/24892"
+        ]
+      },
+      {
+        "id": 4,
+        "title": "MIDI Mapping: GM Drum Map, Velocity Layers, Round Robin",
+        "quality": "High (JUCE docs + professional implementations)",
+        "summary": "GM standard maps drums to MIDI channel 10. Standard note assignments: Kick=36 (C1), Snare=38 (D1), Closed HH=42, Open HH=46, Low Tom=41, Mid Tom=45, High Tom=48, Crash=49, Ride=51. JUCE SamplerSound accepts a BigInteger of active MIDI notes. For velocity layers, create multiple SamplerSound objects for the same MIDI note with different velocity ranges (minVelocity/maxVelocity in constructor). For round-robin, maintain a per-pad counter and select from a pool of SamplerVoice groups cycling index. Note-offs: one-shots ignore note-off (set release to 0), sustained samples respect note-off via SamplerVoice envelope.",
+        "gm_drum_map": {
+          "36": "Kick (C1)",
+          "38": "Snare (D1)",
+          "40": "Electric Snare",
+          "41": "Low Floor Tom",
+          "42": "Closed HH",
+          "43": "High Floor Tom",
+          "44": "Pedal HH",
+          "45": "Low Tom",
+          "46": "Open HH",
+          "47": "Low-Mid Tom",
+          "48": "Hi-Mid Tom",
+          "49": "Crash 1",
+          "50": "High Tom",
+          "51": "Ride 1",
+          "57": "Crash 2",
+          "59": "Ride 2"
+        },
+        "velocity_layer_pattern": "Create N SamplerSound instances for same MIDI note with minVelocity/maxVelocity ranges. JUCE Synthesiser::findSound() matches velocity. Typical: 3-4 layers (pp=1-40, mp=41-80, mf=81-110, ff=111-127).",
+        "round_robin_pattern": "Maintain std::array<int, NUM_PADS> rrIndex. On each note-on for padN, pick sample[padN][rrIndex[padN] % numRRSamples[padN]], then increment rrIndex[padN]. Random-RR: use juce::Random instead of sequential to avoid machine-gun effect.",
+        "references": [
+          "https://forum.juce.com/t/drum-sampler-implementation/52887",
+          "https://docs.juce.com/master/classSamplerSound.html",
+          "https://www.creative-technologies.de/audio-sampler-plugin-with-juce/"
+        ]
+      },
+      {
+        "id": 5,
+        "title": "Standalone + Plugin Hybrid Architecture in JUCE CMake",
+        "quality": "High (JUCE official CMake API docs)",
+        "summary": "juce_add_plugin() with FORMATS 'VST3 Standalone' produces two targets from the same AudioProcessor and AudioProcessorEditor code. The Standalone target wraps the processor in StandaloneFilterWindow (provided by JUCE). No separate codebase needed. Parameters saved via APVTS work identically in both targets. State is serialized via getStateInformation()/setStateInformation(). Custom standalone behavior (splash screens, audio device selection) can be overridden with JUCE_USE_CUSTOM_PLUGIN_STANDALONE_APP=1.",
+        "cmake_pattern": {
+          "juce_add_plugin_call": "juce_add_plugin(Samplar FORMATS VST3 Standalone CLAP PLUGIN_NAME 'SAMPLAR' PLUGIN_MANUFACTURER_CODE Smst PLUGIN_CODE Sm05 IS_SYNTH TRUE NEEDS_MIDI_INPUT TRUE NEEDS_MIDI_OUTPUT FALSE IS_MIDI_EFFECT FALSE EDITOR_WANTS_KEYBOARD_FOCUS FALSE COPY_PLUGIN_AFTER_BUILD TRUE VST3_CATEGORIES 'Instrument' 'Sampler')",
+          "clap_addition": "Add clap-juce-extensions via FetchContent or submodule. Call clap_juce_extensions_plugin(TARGET Samplar). This adds CLAP to the same build.",
+          "shared_sources": "target_sources(Samplar PRIVATE src/PluginProcessor.cpp src/PluginEditor.cpp ...)"
+        },
+        "important_flags": {
+          "IS_SYNTH": "TRUE - enables instrument track hosting in DAWs",
+          "NEEDS_MIDI_INPUT": "TRUE - required for drum triggering",
+          "VST3_CATEGORIES": "Set to Instrument/Sampler for proper DAW categorization",
+          "COPY_PLUGIN_AFTER_BUILD": "TRUE - copies to system VST3 folder automatically"
+        },
+        "references": [
+          "https://github.com/juce-framework/JUCE/blob/master/docs/CMake%20API.md",
+          "https://github.com/juce-framework/JUCE/blob/master/examples/CMake/AudioPlugin/CMakeLists.txt",
+          "https://forum.juce.com/t/standalone-plugin-structure-apvts-parameter-attachments/56993"
+        ]
+      },
+      {
+        "id": 6,
+        "title": "Real-World Open-Source JUCE Drum Sampler References",
+        "quality": "Medium-High (working open source code)",
+        "projects": [
+          {
+            "name": "KrumSampler",
+            "url": "https://github.com/krismakesstuff/KrumSampler",
+            "formats": "VST3, AU",
+            "relevance": "Closest match - drag-drop drum sampler, 3-second max sample length, JUCE Synthesiser-based, simple UI philosophy matches SAMPLAR goals",
+            "architecture": "Custom SamplerVoice per pad, drag-drop file loading, MIDI note assignment per pad"
+          },
+          {
+            "name": "DrumCraker",
+            "url": "https://github.com/Wamphyre/DrumCraker",
+            "formats": "VST3",
+            "relevance": "DrumGizmo kit compatible, Linux/Windows/macOS, shows kit loading patterns"
+          },
+          {
+            "name": "SickBeatBetty",
+            "url": "https://github.com/jthwho/SickBeatBetty",
+            "formats": "VST + Standalone",
+            "relevance": "MIDI drum machine + generator, shows MIDI-note-targeted generator architecture"
+          },
+          {
+            "name": "JUCE SamplerPluginDemo",
+            "url": "https://github.com/WeAreROLI/JUCE/blob/master/examples/Plugins/SamplerPluginDemo.h",
+            "formats": "All JUCE formats",
+            "relevance": "Official JUCE example - gold standard starting point for sampler processBlock patterns"
+          },
+          {
+            "name": "clap-juce-extensions",
+            "url": "https://github.com/free-audio/clap-juce-extensions",
+            "formats": "CLAP",
+            "relevance": "Drop-in CMake addition to add CLAP format to any JUCE plugin. Used by Surge, Dexed, ChowDSP"
+          }
+        ]
+      },
+      {
+        "id": 7,
+        "title": "Academic: Physical Modeling and Modal Synthesis for Drum Sounds (arXiv 2024-2025)",
+        "quality": "High (peer-reviewed / arXiv)",
+        "papers": [
+          {
+            "title": "Differentiable Modal Synthesis for Physical Modeling of Planar String Sound and Motion Simulation",
+            "arxiv": "2407.05516",
+            "url": "https://arxiv.org/abs/2407.05516",
+            "date": "2024 (NeurIPS 2024)",
+            "relevance": "Medium - modal synthesis framework applicable to membrane modeling; differentiable = can train parameters from real drum recordings"
+          },
+          {
+            "title": "Rigid-Body Sound Synthesis with Differentiable Modal Resonators",
+            "arxiv": "2210.15306",
+            "url": "https://arxiv.org/abs/2210.15306",
+            "relevance": "High for future drum synthesis engines - differentiable resonator bank matches membrane modes"
+          },
+          {
+            "title": "wav2shape: Hearing the shape of a drum machine",
+            "arxiv": "2007.10299",
+            "url": "https://arxiv.org/abs/2007.10299",
+            "relevance": "Inverse drum synthesis - estimate membrane shape from audio. Shows 2D PDE membrane model usable in future physical modeling engine"
+          },
+          {
+            "title": "The Rhythm In Anything: Audio-Prompted Drums Generation with Masked Language Modeling",
+            "arxiv": "2509.15625",
+            "url": "https://arxiv.org/html/2509.15625",
+            "date": "September 2025",
+            "relevance": "Neural drum generation from audio prompts - future AI variation engine reference"
+          }
+        ],
+        "applicability_to_sm5": "Not for v1 implementation (too heavy for real-time VST). Modal resonator approach is viable as an optional DrumSynthEngine in the variation engine framework. Differentiable modal synthesis could train parameters offline and bake into lightweight resonator banks."
+      }
+    ],
+    "recommended_approach": "Build SAMPLAR as VST3 + Standalone (primary) with CLAP as additive via clap-juce-extensions. Use juce::Synthesiser with custom DrumSamplerVoice/DrumSamplerSound subclasses (not stock SamplerVoice - it lacks velocity layers and round-robin). Declare one stereo output bus per pad in BusesProperties for multi-out routing. Use GM drum map defaults with user-remappable MIDI notes per pad. Implement 3-4 velocity layers per pad and random round-robin selection to eliminate machine-gun effect.",
+    "implementation_roadmap": [
+      "1. CMakeLists.txt: juce_add_plugin with FORMATS VST3 Standalone, IS_SYNTH TRUE, NEEDS_MIDI_INPUT TRUE, VST3_CATEGORIES Instrument Sampler",
+      "2. Add clap-juce-extensions as git submodule; call clap_juce_extensions_plugin() in CMake",
+      "3. Declare BusesProperties: 1 stereo input (for live sampling) + N stereo outputs (main + 1 per pad)",
+      "4. Implement DrumPad struct: midiNote, vector<AudioBuffer> velocityLayers, int rrIndex, float gain, float pan",
+      "5. Implement DrumSamplerVoice extends SynthesiserVoice: override renderNextBlock(), startNote() selects layer by velocity + advances rrIndex, noteOff() is ignored for one-shots",
+      "6. Implement DrumSamplerSound extends SynthesiserSound: appliesToNote() checks midiNote, appliesToChannel() returns true for all",
+      "7. processBlock(): clear output buses, call synthesiser.renderNextBlock(), then copy per-pad audio to individual output buses",
+      "8. APVTS parameters: gain per pad, pan per pad, pitch per pad (semitones), mute, solo",
+      "9. Background thread sample loader: use juce::AudioFormatManager + AudioFormatReader, atomic swap of loaded buffers",
+      "10. AudioProcessorEditor: single shared editor for both Standalone and plugin targets"
+    ],
+    "potential_pitfalls": [
+      "Machine-gun effect: Sequential round-robin with identical samples sounds robotic. Use random RR with exclusion of last-played index.",
+      "Garbage in output buses: Always call buffer.clear() at processBlock() start before rendering - extra output channels contain undefined data on entry.",
+      "Sample loading on audio thread: NEVER load files in processBlock(). Use background thread + std::atomic<AudioBuffer*> swap pattern.",
+      "VST3 multi-out not activated by DAW: Host must enable additional output buses. Add UI warning. Not all DAWs support multi-out instruments (Ableton is limited).",
+      "CLAP not in JUCE natively: Must use clap-juce-extensions as separate CMake dependency. JUCE does not ship CLAP support built-in as of JUCE 7.",
+      "StandaloneFilterWindow audio device: Standalone uses JUCE's built-in device selector. Set sensible defaults (stereo out, MIDI in enabled) via StandalonePluginHolder.",
+      "SamplerVoice maxSampleLength: JUCE's stock SamplerSound has a maxSampleLength constructor parameter. For drums, 3 seconds is sufficient but set it explicitly.",
+      "Note-off for one-shots: Override SamplerVoice::stopNote() to be a no-op for pads configured as one-shot mode.",
+      "Thread safety for rrIndex: Use std::atomic<int> for round-robin index since note-on can arrive from audio thread."
+    ],
+    "references": {
+      "peer_reviewed": [
+        "Differentiable Modal Synthesis for Physical Modeling - arXiv 2407.05516 (NeurIPS 2024) - https://arxiv.org/abs/2407.05516",
+        "Rigid-Body Sound Synthesis with Differentiable Modal Resonators - arXiv 2210.15306 - https://arxiv.org/abs/2210.15306",
+        "wav2shape: Hearing the shape of a drum machine - arXiv 2007.10299 - https://arxiv.org/abs/2007.10299",
+        "The Rhythm In Anything: Audio-Prompted Drums Generation - arXiv 2509.15625 (2025) - https://arxiv.org/html/2509.15625"
+      ],
+      "professional": [
+        "JUCE AudioProcessor Class Reference - https://docs.juce.com/master/classAudioProcessor.html",
+        "JUCE Synthesiser Class Reference - https://docs.juce.com/master/classSynthesiser.html",
+        "JUCE CMake API Reference - https://github.com/juce-framework/JUCE/blob/master/docs/CMake%20API.md",
+        "JUCE Bus Layouts Tutorial - https://juce.com/tutorials/tutorial_audio_bus_layouts/",
+        "Libre Arts CLAP Two Years Later (2024) - https://librearts.org/2024/11/clap-api-two-years-later/"
+      ],
+      "community": [
+        "KrumSampler - Open Source JUCE Drum Sampler - https://github.com/krismakesstuff/KrumSampler",
+        "DrumCraker VST3 drum sampler - https://github.com/Wamphyre/DrumCraker",
+        "JUCE SamplerPluginDemo - https://github.com/WeAreROLI/JUCE/blob/master/examples/Plugins/SamplerPluginDemo.h",
+        "clap-juce-extensions - https://github.com/free-audio/clap-juce-extensions",
+        "JUCE Forum: Drum Sampler structure best practice - https://forum.juce.com/t/drum-sampler-plugin-structure-best-practice/56910",
+        "JUCE Forum: Multi-bus synth plugin routing - https://forum.juce.com/t/multi-bus-synth-plugin-routing-bus-buffers-in-processblock-when-using-the-synthesiser-class/24892",
+        "awesome-juce curated list - https://github.com/sudara/awesome-juce"
+      ]
+    }
+  }
+}

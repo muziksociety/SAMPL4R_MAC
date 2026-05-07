@@ -1,0 +1,421 @@
+{
+  "session_id": "loop-pattern-direct-inject-2026-01-15",
+  "agent": "frontend-architect",
+  "created_at": "2026-01-15T01:00:00Z",
+  "status": "complete",
+  "data": {
+    "ux_analysis": {
+      "user_goal": "User wants to extract drum patterns from an audio loop AND immediately apply them to the step sequencer, skipping the manual 'save to library then load from library' workflow",
+      "current_friction": "Currently 'Learn Pattern from Audio' only saves patterns to UserPatternDatabase. User must then open Pattern Library dialog, find the pattern, and apply it - a 3+ step process",
+      "proposed_solution": "Add a new menu item 'Learn & Apply to Sequencer' that performs pattern extraction, shows PatternPreviewDialog for review/editing, and on acceptance directly injects the pattern into StepSequencer with visual feedback",
+      "fastest_path": "Single right-click action -> review in dialog -> accept -> immediate visual confirmation in sequencer"
+    },
+    "ascii_mockups": [
+      {
+        "name": "Right-Click Context Menu - BEFORE",
+        "description": "Current state of tile right-click menu in Sample Browser",
+        "mockup": [
+          "=================================================================",
+          "              TILE RIGHT-CLICK MENU - CURRENT STATE              ",
+          "=================================================================",
+          "",
+          "+------------------------------------------+",
+          "| Edit Sample                              |",
+          "| Learn Pattern from Audio                 |",
+          "|------------------------------------------|",
+          "| Classify as...                      >    |",
+          "|------------------------------------------|",
+          "| Selection                           >    |",
+          "+------------------------------------------+",
+          "",
+          "CONTEXT: User right-clicks on a drum loop sample tile",
+          "CURRENT BEHAVIOR: 'Learn Pattern from Audio' opens dialog,",
+          "saves pattern to database on Accept. User must separately",
+          "load pattern from Pattern Library to use in sequencer."
+        ]
+      },
+      {
+        "name": "Right-Click Context Menu - AFTER",
+        "description": "Proposed state with new menu item",
+        "mockup": [
+          "=================================================================",
+          "              TILE RIGHT-CLICK MENU - PROPOSED STATE             ",
+          "=================================================================",
+          "",
+          "+------------------------------------------+",
+          "| Edit Sample                              |",
+          "| Learn Pattern from Audio                 |",
+          "| Learn & Apply to Sequencer           *   | <-- NEW ITEM",
+          "|------------------------------------------|",
+          "| Classify as...                      >    |",
+          "|------------------------------------------|",
+          "| Selection                           >    |",
+          "+------------------------------------------+",
+          "",
+          "LEGEND:",
+          "  * = New menu item (ID 401)",
+          "",
+          "NEW BEHAVIOR: Opens same PatternPreviewDialog, but on Accept:",
+          "  1. Converts Result to PatternSet",
+          "  2. Calls stepSequencer_->applyPatternSet()",
+          "  3. Creates new rows for missing categories",
+          "  4. Triggers brief highlight animation on affected rows"
+        ]
+      },
+      {
+        "name": "StepSequencer Row Flash Animation",
+        "description": "Visual feedback when patterns are injected",
+        "mockup": [
+          "=================================================================",
+          "          STEP SEQUENCER - ROW HIGHLIGHT ANIMATION               ",
+          "=================================================================",
+          "",
+          "FRAME 0 (Pattern Applied - Flash Start):",
+          "+-------+----------------------------------+--------+",
+          "| [L][S]|[====KICK====] [G][V] |XXXXX.....| [MIDI] |",
+          "| [L][S]|[===SNARE====] [G][V] |.XX..XX.XX| [MIDI] |  <-- CYAN GLOW",
+          "| [L][S]|[===HIHAT====] [G][V] |XXXXXXXX..| [MIDI] |  <-- CYAN GLOW",
+          "| [L][S]|[====TOM=====] [G][V] |....X.....| [MIDI] |  <-- CYAN GLOW",
+          "+-------+----------------------------------+--------+",
+          "                                                     ",
+          "          Row background: CYAN with alpha 0.6        ",
+          "",
+          "FRAME 5 (150ms - Mid Fade):",
+          "+-------+----------------------------------+--------+",
+          "| [L][S]|[====KICK====] [G][V] |XXXXX.....| [MIDI] |",
+          "| [L][S]|[===SNARE====] [G][V] |.XX..XX.XX| [MIDI] |  <-- FADING",
+          "| [L][S]|[===HIHAT====] [G][V] |XXXXXXXX..| [MIDI] |  <-- FADING",
+          "| [L][S]|[====TOM=====] [G][V] |....X.....| [MIDI] |  <-- FADING",
+          "+-------+----------------------------------+--------+",
+          "                                                     ",
+          "          Row background: CYAN with alpha 0.3        ",
+          "",
+          "FRAME 10 (300ms - Animation Complete):",
+          "+-------+----------------------------------+--------+",
+          "| [L][S]|[====KICK====] [G][V] |XXXXX.....| [MIDI] |",
+          "| [L][S]|[===SNARE====] [G][V] |.XX..XX.XX| [MIDI] |  <-- NORMAL",
+          "| [L][S]|[===HIHAT====] [G][V] |XXXXXXXX..| [MIDI] |  <-- NORMAL",
+          "| [L][S]|[====TOM=====] [G][V] |....X.....| [MIDI] |  <-- NORMAL",
+          "+-------+----------------------------------+--------+",
+          "                                                     ",
+          "          Row background: Normal (no highlight)      ",
+          "",
+          "LEGEND:",
+          "  [L] = Lock button",
+          "  [S] = Solo button",
+          "  [G] = Generate button",
+          "  [V] = Volume button",
+          "  X = Active step (note on)",
+          "  . = Inactive step"
+        ]
+      },
+      {
+        "name": "Dynamic Row Creation for Missing Categories",
+        "description": "When learned pattern has categories not in sequencer",
+        "mockup": [
+          "=================================================================",
+          "     STEP SEQUENCER - BEFORE PATTERN INJECTION                   ",
+          "=================================================================",
+          "",
+          "+-------+----------------------------------+--------+",
+          "| [L][S]|[====KICK====] [G][V] |X...X...X.| [MIDI] |",
+          "| [L][S]|[===SNARE====] [G][V] |..X...X...| [MIDI] |",
+          "| [L][S]|[===HIHAT====] [G][V] |X.X.X.X.X.| [MIDI] |",
+          "+-------+----------------------------------+--------+",
+          "",
+          "Existing rows: KICK, SNARE, HIHAT (3 rows)",
+          "Learned pattern contains: KICK, SNARE, HIHAT, PERCUSSION",
+          "",
+          "=================================================================",
+          "     STEP SEQUENCER - AFTER PATTERN INJECTION                    ",
+          "=================================================================",
+          "",
+          "+-------+----------------------------------+--------+",
+          "| [L][S]|[====KICK====] [G][V] |XXXXX.....| [MIDI] |  <-- UPDATED",
+          "| [L][S]|[===SNARE====] [G][V] |.XX..XX.XX| [MIDI] |  <-- UPDATED",
+          "| [L][S]|[===HIHAT====] [G][V] |XXXXXXXX..| [MIDI] |  <-- UPDATED",
+          "| [L][S]|[=PERCUSSION=] [G][V] |X..X..X..X| [MIDI] |  <-- NEW ROW",
+          "+-------+----------------------------------+--------+",
+          "",
+          "New row added via addTrackRow() for missing PERCUSSION category",
+          "All affected rows flash cyan briefly to confirm application"
+        ]
+      }
+    ],
+    "component_hierarchy": {
+      "description": "Component tree showing how pattern injection flows through the system",
+      "tree": [
+        "SampleBrowserPage",
+        "  |",
+        "  +-- Tile (right-click menu host)",
+        "  |     |",
+        "  |     +-- PopupMenu (items 200, 400, 401*, 300-399, 600-603)",
+        "  |            |",
+        "  |            +-- Item 401: 'Learn & Apply to Sequencer' *NEW*",
+        "  |",
+        "  +-- stepSequencer_ (std::unique_ptr<StepSequencerComponent>)",
+        "        |",
+        "        +-- applyPatternSet(PatternSet) - existing method",
+        "        +-- addTrackRow(DrumTrack) - for missing categories",
+        "        +-- highlightRows(std::vector<int>) - *NEW METHOD*",
+        "        |",
+        "        +-- rowHighlightAlpha_ (std::vector<float>) - *NEW MEMBER*",
+        "        +-- highlightedRows_ (std::set<int>) - *NEW MEMBER*",
+        "",
+        "PatternPreviewDialog (modal)",
+        "  |",
+        "  +-- Result structure (on close callback)",
+        "        |",
+        "        +-- patterns: vector<PatternEntry>",
+        "        +-- genre: string",
+        "        +-- patternName: string",
+        "        +-- finalBpm: float"
+      ]
+    },
+    "user_flow": {
+      "description": "Step-by-step user interaction flow for the new feature",
+      "steps": [
+        {
+          "step": 1,
+          "action": "User right-clicks on a drum loop sample tile in Sample Browser",
+          "system_response": "PopupMenu appears with options including new 'Learn & Apply to Sequencer'"
+        },
+        {
+          "step": 2,
+          "action": "User clicks 'Learn & Apply to Sequencer'",
+          "system_response": "System loads audio, extracts patterns via MultiBandPatternExtractor, opens PatternPreviewDialog"
+        },
+        {
+          "step": 3,
+          "action": "User reviews patterns in dialog, optionally adjusts grid/toggles categories",
+          "system_response": "Dialog shows waveform with beat grid overlay, category rows with on/off steps"
+        },
+        {
+          "step": 4,
+          "action": "User clicks 'Accept' button",
+          "system_response": "Dialog returns Result with accepted=true, closes modal"
+        },
+        {
+          "step": 5,
+          "action": "Callback receives Result",
+          "system_response": "System converts Result.patterns to PatternSet structure"
+        },
+        {
+          "step": 6,
+          "action": "System checks for missing categories",
+          "system_response": "For each category in pattern not present in sequencer, calls addTrackRow()"
+        },
+        {
+          "step": 7,
+          "action": "System applies pattern",
+          "system_response": "Calls applyPatternSet() with converted PatternSet, updates grid data"
+        },
+        {
+          "step": 8,
+          "action": "System triggers visual feedback",
+          "system_response": "Calls highlightRows() with list of affected row indices, starts fade timer"
+        },
+        {
+          "step": 9,
+          "action": "Animation plays (300ms)",
+          "system_response": "Affected rows glow cyan, fade from alpha 0.6 to 0.0 over 300ms"
+        },
+        {
+          "step": 10,
+          "action": "Animation completes",
+          "system_response": "User sees new pattern in sequencer, can immediately play/edit"
+        }
+      ]
+    },
+    "ui_files_to_modify": [
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.cpp",
+        "changes": [
+          {
+            "location": "Line 405",
+            "description": "Add new menu item 401 after 'Learn Pattern from Audio'",
+            "code_snippet": "m.addItem(400, \"Learn Pattern from Audio\");\nm.addItem(401, \"Learn & Apply to Sequencer\");  // NEW"
+          },
+          {
+            "location": "Lines 640-652 (after res == 400 handler)",
+            "description": "Add handler for menu item 401",
+            "code_snippet": "else if (res == 401)\n{\n    // Learn & Apply to Sequencer\n    auto* parentPage = findParentComponentOfClass<SampleBrowserPage>();\n    if (parentPage) {\n        parentPage->learnAndApplyToSequencer(originalFile_);\n    }\n}"
+          },
+          {
+            "location": "After learnPatternFromAudio() method (around line 6938)",
+            "description": "Add new method learnAndApplyToSequencer()",
+            "code_snippet": "void SampleBrowserPage::learnAndApplyToSequencer(const juce::File& audioFile)\n{\n    // Similar to learnPatternFromAudio but with different callback\n    // On Accept: convert Result to PatternSet, apply to sequencer\n}"
+          }
+        ]
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Pages\\SampleBrowserPage.h",
+        "changes": [
+          {
+            "location": "Private method declarations section",
+            "description": "Add declaration for new method",
+            "code_snippet": "void learnAndApplyToSequencer(const juce::File& audioFile);"
+          }
+        ]
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.cpp",
+        "changes": [
+          {
+            "location": "paint() method around line 340",
+            "description": "Add row highlight rendering in paint() after hover highlight",
+            "code_snippet": "// Row highlight animation (for pattern injection feedback)\nfor (int row = 0; row < rows; ++row) {\n    if (row < (int)rowHighlightAlpha_.size() && rowHighlightAlpha_[row] > 0.01f) {\n        g.setColour(juce::Colours::cyan.withAlpha(rowHighlightAlpha_[row] * 0.6f));\n        g.fillRect(juce::Rectangle<int>(area.getX(), topMargin + row * rowHeight - scrollY_, contentW - effRightW, rowHeight));\n    }\n}"
+          },
+          {
+            "location": "timerCallback() around line 482",
+            "description": "Add highlight fade logic to existing timer",
+            "code_snippet": "// Fade row highlights\nfor (size_t i = 0; i < rowHighlightAlpha_.size(); ++i) {\n    if (rowHighlightAlpha_[i] > 0.0f) {\n        rowHighlightAlpha_[i] -= 0.033f; // ~300ms fade at 60fps\n        if (rowHighlightAlpha_[i] < 0.0f) rowHighlightAlpha_[i] = 0.0f;\n    }\n}"
+          },
+          {
+            "location": "After applyPatternSet() method around line 3100",
+            "description": "Add new public method highlightRows()",
+            "code_snippet": "void StepSequencerComponent::highlightRows(const std::vector<int>& rowIndices)\n{\n    // Initialize highlight alphas if needed\n    if (rowHighlightAlpha_.size() != grid_.size()) {\n        rowHighlightAlpha_.resize(grid_.size(), 0.0f);\n    }\n    // Set highlight for specified rows\n    for (int row : rowIndices) {\n        if (row >= 0 && row < (int)rowHighlightAlpha_.size()) {\n            rowHighlightAlpha_[row] = 1.0f;\n        }\n    }\n    repaint();\n}"
+          }
+        ]
+      },
+      {
+        "file": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5\\src\\ui\\Components\\StepSequencerComponent.h",
+        "changes": [
+          {
+            "location": "Public methods section around line 421",
+            "description": "Add declaration for highlightRows()",
+            "code_snippet": "void highlightRows(const std::vector<int>& rowIndices);  // Visual feedback for pattern injection"
+          },
+          {
+            "location": "Private members section around line 460",
+            "description": "Add member for highlight animation state",
+            "code_snippet": "std::vector<float> rowHighlightAlpha_;  // Per-row highlight fade (0.0 = none, 1.0 = full)"
+          }
+        ]
+      }
+    ],
+    "ui_files_to_create": [],
+    "juce_components_used": [
+      {
+        "component": "juce::PopupMenu",
+        "usage": "Add new menu item 401 for 'Learn & Apply to Sequencer'"
+      },
+      {
+        "component": "juce::Timer (existing in StepSequencerComponent)",
+        "usage": "Leverage existing timer callback to fade row highlights"
+      },
+      {
+        "component": "juce::Graphics",
+        "usage": "Draw cyan highlight overlay with alpha blending in paint()"
+      },
+      {
+        "component": "PatternPreviewDialog (existing)",
+        "usage": "Reuse for pattern review, same as Learn Pattern from Audio"
+      }
+    ],
+    "accessibility_notes": [
+      {
+        "concern": "Visual feedback for pattern application",
+        "solution": "Cyan highlight provides strong contrast against dark background, visible duration of 300ms"
+      },
+      {
+        "concern": "Menu item discoverability",
+        "solution": "New item placed directly after existing 'Learn Pattern from Audio' for logical grouping"
+      }
+    ],
+    "animation_specs": [
+      {
+        "name": "Row Highlight Fade",
+        "trigger": "Pattern successfully applied to sequencer",
+        "duration_ms": 300,
+        "easing": "Linear fade",
+        "start_state": "Cyan overlay at alpha 0.6",
+        "end_state": "No overlay (alpha 0.0)",
+        "implementation": "Per-row float alpha in rowHighlightAlpha_, decremented in timerCallback()"
+      }
+    ],
+    "integration_points_with_backend": [
+      {
+        "frontend_element": "Menu item 401 handler",
+        "backend_service": "MultiBandPatternExtractor",
+        "data_flow": "Audio file -> ExtractionResult (patterns, BPM, grid size)"
+      },
+      {
+        "frontend_element": "PatternPreviewDialog callback",
+        "backend_service": "PatternPreviewDialog::Result",
+        "data_flow": "Result.patterns -> PatternSet conversion"
+      },
+      {
+        "frontend_element": "StepSequencer applyPatternSet()",
+        "backend_service": "StepSequencerComponent grid state",
+        "data_flow": "PatternSet -> grid_ data, rowCategory_, rowMidiNote_"
+      },
+      {
+        "frontend_element": "StepSequencer addTrackRow()",
+        "backend_service": "StepSequencerComponent row management",
+        "data_flow": "DrumTrack -> new grid row, metadata vectors"
+      }
+    ],
+    "result_to_patternset_conversion": {
+      "description": "Algorithm to convert PatternPreviewDialog::Result to PatternSet",
+      "steps": [
+        "1. Create PatternSet with name=result.patternName, genre=result.genre, isUserPattern=true",
+        "2. Determine gridSize from first non-empty pattern.steps.size()",
+        "3. For each PatternEntry in result.patterns:",
+        "   a. If entry.isSubcategory:",
+        "      - Create RhythmicPattern with steps and confidence",
+        "      - Add to patternSet.subcategoryPatterns[entry.subcategoryName]",
+        "   b. Else (base category):",
+        "      - Create RhythmicPattern with steps",
+        "      - Add to patternSet.patterns[entry.category]",
+        "4. Return completed PatternSet"
+      ],
+      "code_location": "New helper function in SampleBrowserPage.cpp or inline in callback"
+    },
+    "evidence_verification": {
+      "menu_item_location": {
+        "file": "src/ui/Pages/SampleBrowserPage.cpp",
+        "line": 405,
+        "code": "m.addItem(400, \"Learn Pattern from Audio\");",
+        "verified": true
+      },
+      "menu_handler_location": {
+        "file": "src/ui/Pages/SampleBrowserPage.cpp",
+        "line": 640,
+        "code": "else if (res == 400)",
+        "verified": true
+      },
+      "stepSequencer_ownership": {
+        "file": "src/ui/Pages/SampleBrowserPage.h",
+        "line": 385,
+        "code": "std::unique_ptr<StepSequencerComponent> stepSequencer_",
+        "verified": true
+      },
+      "applyPatternSet_method": {
+        "file": "src/ui/Components/StepSequencerComponent.cpp",
+        "line": 2963,
+        "code": "void StepSequencerComponent::applyPatternSet(const PatternSet& patternSet)",
+        "verified": true
+      },
+      "addTrackRow_method": {
+        "file": "src/ui/Components/StepSequencerComponent.cpp",
+        "line": 3267,
+        "code": "void StepSequencerComponent::addTrackRow(const DrumTrack& track)",
+        "verified": true
+      },
+      "existing_timer_callback": {
+        "file": "src/ui/Components/StepSequencerComponent.h",
+        "line": 482,
+        "code": "void timerCallback() override; // playhead advance",
+        "verified": true
+      },
+      "existing_fade_pattern": {
+        "file": "src/ui/Pages/InitialPage.cpp",
+        "lines": "447-450",
+        "code": "fadeAlpha_ += fadeSpeed_; if (fadeAlpha_ >= 1.0f) {...}",
+        "verified": true,
+        "relevance": "Existing pattern for alpha-based fade animation in codebase"
+      }
+    }
+  }
+}

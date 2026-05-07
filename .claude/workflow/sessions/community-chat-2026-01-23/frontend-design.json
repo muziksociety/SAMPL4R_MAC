@@ -1,0 +1,370 @@
+﻿{
+  "session_id": "community-chat-2026-01-23",
+  "title": "Community Chat - Frontend Design",
+  "created_at": "2026-01-23",
+
+  "ascii_mockups": {
+    "before_state": {
+      "description": "Current SampleBrowserPage with COMMUNITY button (opens WebBrowserComponent)",
+      "mockup": [
+        "+========================================================================================+",
+        "|  [Back]  Batch 1 of 3     [<] [>]         Show Selected: 0       [COMMUNITY] [LIBRARY] |",
+        "+========================================================================================+",
+        "|                                                                                        |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|  | Sample 1      |  | Sample 2      |  | Sample 3      |  | Sample 4      |            |",
+        "|  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |            |",
+        "|  | [x] [V]       |  | [ ] [V]       |  | [x] [V]       |  | [ ] [V]       |            |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|                                                                                        |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|  | Sample 5      |  | Sample 6      |  | Sample 7      |  | Sample 8      |            |",
+        "|  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |            |",
+        "|  | [ ] [V]       |  | [ ] [V]       |  | [x] [V]       |  | [ ] [V]       |            |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|                                                                                        |",
+        "+----------------------------------------------------------------------------------------+",
+        "|  [ Select All ]  [ Clear All ]  [ Export Selected ]  [ Export to Library ]            |",
+        "+========================================================================================+"
+      ],
+      "notes": "COMMUNITY button at line 74 in SampleBrowserPage.h, cyan text, navigates to CommunityPage (WebBrowser)"
+    },
+
+    "after_state_samplebrowser": {
+      "description": "SampleBrowserPage with renamed CHAT button (replaces COMMUNITY)",
+      "mockup": [
+        "+========================================================================================+",
+        "|  [Back]  Batch 1 of 3     [<] [>]         Show Selected: 0          [CHAT] [LIBRARY]  |",
+        "+========================================================================================+",
+        "|                                                                                        |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|  | Sample 1      |  | Sample 2      |  | Sample 3      |  | Sample 4      |            |",
+        "|  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |  | ~~~~~~~~~~~~~ |            |",
+        "|  | [x] [V]       |  | [ ] [V]       |  | [x] [V]       |  | [ ] [V]       |            |",
+        "|  +---------------+  +---------------+  +---------------+  +---------------+            |",
+        "|                                                                                        |",
+        "+----------------------------------------------------------------------------------------+",
+        "",
+        "CHANGE: Button renamed from 'COMMUNITY' to 'CHAT'",
+        "CHANGE: onClick now opens ChatPage instead of CommunityPage"
+      ]
+    },
+
+    "after_state_chatpage": {
+      "description": "New ChatPage - Native JUCE real-time chat interface",
+      "mockup": [
+        "+========================================================================================+",
+        "|  [Back]                    Community Chat                     [Users: 5]  [Settings]  |",
+        "+========================================================================================+",
+        "|                                                                                        |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|  |  CHAT MESSAGES                                                        [Scroll]|    |",
+        "|  |--------------------------------------------------------------------------------|    |",
+        "|  |  [*] User123 (12:34 PM)                                                        |    |",
+        "|  |      Hey everyone! Anyone working on some sick drum patterns today?           |    |",
+        "|  |                                                                                |    |",
+        "|  |  [*] ProducerX (12:35 PM)                                                      |    |",
+        "|  |      Yeah! Just made some fire kick layers with the SpectralClone engine      |    |",
+        "|  |                                                                                |    |",
+        "|  |  [*] DrumMaster99 (12:36 PM)                                                   |    |",
+        "|  |      @ProducerX nice! What settings did you use?                              |    |",
+        "|  |                                                                                |    |",
+        "|  |  [*] YOU (12:37 PM)                                                            |    |",
+        "|  |      Welcome to the chat!                                                      |    |",
+        "|  |                                                                                |    |",
+        "|  |  -- System: SynthWizard joined the chat --                                     |    |",
+        "|  |                                                                                |    |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|                                                                                        |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|  | Type your message...                                              [Send]      |    |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|                                                                                        |",
+        "+========================================================================================+",
+        "",
+        "LEGEND:",
+        "  [*] = Online indicator (green dot)",
+        "  [Users: N] = Shows count of online users",
+        "  [Settings] = Chat preferences (notifications, etc.)",
+        "  Messages scroll automatically, newest at bottom",
+        "  YOUR messages highlighted with different background color"
+      ]
+    },
+
+    "after_state_chatpage_detailed": {
+      "description": "ChatPage component breakdown with dimensions",
+      "mockup": [
+        "+========================================================================================+",
+        "|  HEADER (40px height)                                                                  |",
+        "|  +--------+  +--------------------+                      +-----------+ +------------+ |",
+        "|  | [Back] |  | 'Community Chat'   |                      | Users: 5  | | [Settings] | |",
+        "|  +--------+  +--------------------+                      +-----------+ +------------+ |",
+        "+========================================================================================+",
+        "|                                                                                        |",
+        "|  MESSAGE LIST (juce::Viewport with custom MessageListComponent)                        |",
+        "|  Fills remaining height minus input area (120px from bottom)                           |",
+        "|                                                                                        |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|  |  MessageBubble                                                                 |    |",
+        "|  |  +------------------+  +-------------------------------------------------+     |    |",
+        "|  |  | Avatar (32x32)   |  | Username          Timestamp                     |     |    |",
+        "|  |  | Green dot=online |  | Message text wraps to multiple lines if needed  |     |    |",
+        "|  |  +------------------+  +-------------------------------------------------+     |    |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|                                                                                        |",
+        "+========================================================================================+",
+        "|  INPUT AREA (80px height, 20px padding)                                               |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "|  | juce::TextEditor (multiline=false, returnSends=true)          [SEND] (80x32) |    |",
+        "|  +--------------------------------------------------------------------------------+    |",
+        "+========================================================================================+"
+      ]
+    },
+
+    "connection_states": {
+      "description": "Visual states for connection status",
+      "mockup": [
+        "STATE 1: CONNECTING",
+        "+------------------------+",
+        "| Connecting to chat...  |",
+        "| [====    ] (spinner)   |",
+        "+------------------------+",
+        "",
+        "STATE 2: CONNECTED",
+        "+------------------------+",
+        "| (green dot) Connected  |",
+        "| Users online: 5        |",
+        "+------------------------+",
+        "",
+        "STATE 3: DISCONNECTED",
+        "+------------------------+",
+        "| (red dot) Disconnected |",
+        "| [Reconnect]            |",
+        "+------------------------+",
+        "",
+        "STATE 4: AUTH REQUIRED",
+        "+------------------------+",
+        "| Please sign in to chat |",
+        "| [Sign In]              |",
+        "+------------------------+"
+      ]
+    }
+  },
+
+  "component_hierarchy": {
+    "ChatPage": {
+      "parent": "juce::Component",
+      "children": [
+        {
+          "name": "backButton_",
+          "type": "juce::TextButton",
+          "purpose": "Navigate back to SampleBrowserPage"
+        },
+        {
+          "name": "titleLabel_",
+          "type": "juce::Label",
+          "purpose": "Display 'Community Chat' title"
+        },
+        {
+          "name": "usersCountLabel_",
+          "type": "juce::Label",
+          "purpose": "Show online user count"
+        },
+        {
+          "name": "settingsButton_",
+          "type": "juce::TextButton",
+          "purpose": "Open chat settings dialog"
+        },
+        {
+          "name": "messageListViewport_",
+          "type": "juce::Viewport",
+          "purpose": "Scrollable container for messages",
+          "children": [
+            {
+              "name": "messageListContent_",
+              "type": "MessageListComponent (custom)",
+              "purpose": "Renders list of MessageBubble components"
+            }
+          ]
+        },
+        {
+          "name": "inputField_",
+          "type": "juce::TextEditor",
+          "purpose": "Text input for composing messages"
+        },
+        {
+          "name": "sendButton_",
+          "type": "juce::TextButton",
+          "purpose": "Send the composed message"
+        },
+        {
+          "name": "connectionStatusIndicator_",
+          "type": "ConnectionStatusComponent (custom)",
+          "purpose": "Show connection state (dot + text)"
+        }
+      ]
+    },
+    "MessageBubble": {
+      "parent": "juce::Component",
+      "purpose": "Single message display",
+      "data": {
+        "username": "string",
+        "message": "string",
+        "timestamp": "juce::Time",
+        "isOwnMessage": "bool",
+        "isOnline": "bool"
+      }
+    },
+    "ConnectionStatusComponent": {
+      "parent": "juce::Component",
+      "purpose": "Connection status indicator",
+      "states": ["connecting", "connected", "disconnected", "auth_required"]
+    }
+  },
+
+  "user_interaction_flow": [
+    {
+      "step": 1,
+      "action": "User clicks CHAT button in SampleBrowserPage header",
+      "result": "MainWindow.switchTo(7) - shows ChatPage"
+    },
+    {
+      "step": 2,
+      "action": "ChatPage appears, attempts WebSocket connection",
+      "result": "Shows 'Connecting...' status, connects to server"
+    },
+    {
+      "step": 3,
+      "action": "Connection established",
+      "result": "Status changes to 'Connected', loads last 50 messages from history"
+    },
+    {
+      "step": 4,
+      "action": "User types message in input field",
+      "result": "Text appears in input, Send button enables"
+    },
+    {
+      "step": 5,
+      "action": "User presses Enter or clicks Send",
+      "result": "Message sent via WebSocket, appears in list immediately (optimistic update)"
+    },
+    {
+      "step": 6,
+      "action": "Other user sends message",
+      "result": "Message appears in list, auto-scrolls if at bottom"
+    },
+    {
+      "step": 7,
+      "action": "User scrolls up in message list",
+      "result": "Auto-scroll disabled, 'New messages' indicator shows if new messages arrive"
+    },
+    {
+      "step": 8,
+      "action": "User clicks Back button",
+      "result": "Returns to SampleBrowserPage, WebSocket stays connected in background"
+    }
+  ],
+
+  "files_to_modify": [
+    {
+      "file": "src/ui/Pages/SampleBrowserPage.h",
+      "changes": [
+        "Rename communityButton_ to chatButton_ (optional, or keep for backwards compat)",
+        "Rename onGoCommunity to onGoChat (or keep existing)"
+      ]
+    },
+    {
+      "file": "src/ui/Pages/SampleBrowserPage.cpp",
+      "changes": [
+        "Line 74: Change button text from 'COMMUNITY' to 'CHAT'",
+        "Line 782-785: Update button setup comments"
+      ]
+    },
+    {
+      "file": "src/ui/MainWindow.cpp",
+      "changes": [
+        "Add #include \"Pages/ChatPage.h\"",
+        "Replace community_ member with chat_ member",
+        "Update page stack: pages_.addChildComponent(chat_) at index 7",
+        "Update switchTo logic if needed"
+      ]
+    },
+    {
+      "file": "CMakeLists.txt",
+      "changes": [
+        "Add src/ui/Pages/ChatPage.h",
+        "Add src/ui/Pages/ChatPage.cpp",
+        "Add src/services/ChatService.h",
+        "Add src/services/ChatService.cpp"
+      ]
+    }
+  ],
+
+  "files_to_create": [
+    {
+      "file": "src/ui/Pages/ChatPage.h",
+      "purpose": "Header for native chat page component"
+    },
+    {
+      "file": "src/ui/Pages/ChatPage.cpp",
+      "purpose": "Implementation of chat UI"
+    },
+    {
+      "file": "src/services/ChatService.h",
+      "purpose": "Header for WebSocket client service"
+    },
+    {
+      "file": "src/services/ChatService.cpp",
+      "purpose": "WebSocket connection and message handling"
+    }
+  ],
+
+  "ui_styling": {
+    "colors": {
+      "background": "0xFF0D1117 (dark theme)",
+      "header_bg": "0xFF1A1A1A",
+      "message_bubble_self": "0xFF1E3A5F (blue tint for own messages)",
+      "message_bubble_other": "0xFF2A2A2A (dark gray)",
+      "text_primary": "0xFFFFFFFF (white)",
+      "text_secondary": "0xFFAAAAAA (gray for timestamps)",
+      "accent": "0xFF00FFFF (cyan - SAMPLAR theme color)",
+      "online_indicator": "0xFF00FF00 (green)",
+      "offline_indicator": "0xFF888888 (gray)",
+      "error": "0xFFFF5555 (red)"
+    },
+    "fonts": {
+      "username": "14pt bold",
+      "message": "14pt regular",
+      "timestamp": "11pt regular",
+      "system_message": "12pt italic"
+    }
+  },
+
+  "integration_points_with_backend": [
+    {
+      "point": "Authentication",
+      "frontend": "ChatPage requests token from LicenseSystemService",
+      "backend": "WebSocket connection includes Authorization header"
+    },
+    {
+      "point": "Message sending",
+      "frontend": "ChatService.sendMessage(text)",
+      "backend": "WebSocket receives JSON: {type: 'message', text: '...'}"
+    },
+    {
+      "point": "Message receiving",
+      "frontend": "ChatService.onMessageReceived callback",
+      "backend": "WebSocket broadcasts: {type: 'message', user: '...', text: '...', timestamp: '...'}"
+    },
+    {
+      "point": "User presence",
+      "frontend": "usersCountLabel_ updated on connect/disconnect events",
+      "backend": "WebSocket broadcasts: {type: 'presence', users_online: N}"
+    },
+    {
+      "point": "Message history",
+      "frontend": "REST GET /api/chat/history on page load",
+      "backend": "Returns last 50 messages as JSON array"
+    }
+  ]
+}

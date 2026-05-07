@@ -1,0 +1,390 @@
+# ===========================================
+# LARGE FILE PROTECTION (GitHub 100MB limit)
+# ===========================================
+# Analysis files
+repo_analysis.csv
+*.csv
+
+# Model files (often 50MB+)
+*.th
+*.ckpt
+*.safetensors
+
+# Large JSON data files
+patterns_with_rolls.json
+
+# Portable distribution folders (contain models/dependencies)
+SAMPLAR_Portable/
+SM5_Portable_*/
+portable_cache/
+
+# Large GIFs/media
+BACKGROUNDS/*.gif
+
+# ===========================================
+# Build directories (CRITICAL: These contain large binaries)
+# ===========================================
+build/
+build_temp_blas/
+cmake-build-*/
+out/
+.git_backup/
+nul
+
+# Build artifacts (executables, libraries, etc.)
+*.exe
+*.dll
+*.so
+*.dylib
+*.a
+*.lib
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exp
+
+# Specific large files that caused GitHub push errors
+build/SM5App_artefacts/Release/Sample\ Monsta\ 5.exe
+build/SM5App_artefacts/Release/Sample\ Monsta.exe
+build/SM5App_artefacts/Release/libopenblas.dll
+build/third_party/demucs.cpp/Release/demucs_mt.cpp.main.exe
+build/third_party/demucs.cpp/Release/demucs_mt_openblas.exe
+build/third_party/demucs.cpp/Release/demucs_mt_mkl.exe
+
+# Large binary files (models, dependencies)
+
+# Massive MIDI archive (360,000+ files, filename length issues)
+800000_Drum_Percussion_MIDI_Archive*/
+*.bin
+*.ggml
+*.pt
+*.pth
+*.onnx
+*.tflite
+
+# Installer output
+installer_output/
+SampleMonsta5_Portable/
+*.msi
+
+# Visual Studio / MSBuild
+.vs/
+*.vcxproj.user
+*.suo
+*.sdf
+*.opensdf
+*.VC.db
+*.VC.opendb
+*.VC.VC.opendb
+x64/
+x86/
+Debug/
+Release/
+RelWithDebInfo/
+MinSizeRel/
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+cmake_install.cmake
+CTestTestfile.cmake
+_deps/
+*.cmake
+!CMakeLists.txt
+!cmake/
+!*.cmake.in
+
+# JUCE
+JuceLibraryCode/
+Builds/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Logs
+*.log
+log/
+logs/
+
+# Temporary files
+*.tmp
+*.temp
+*.bak
+*.cache
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+env/
+venv/
+ENV/
+.venv
+
+# Node modules (if any)
+node_modules/
+
+# Package managers
+vcpkg_installed/
+packages/
+
+# Large dependencies that should be downloaded separately
+third_party/vcpkg/downloads/
+third_party/vcpkg/buildtrees/
+third_party/vcpkg/packages/
+third_party/vcpkg/installed/
+
+# OpenBLAS DLL (48.71 MB - too large for GitHub)
+libopenblas.dll
+
+# Demucs model files (80+ MB - too large for GitHub)
+models/*.bin
+ggml-model-*.bin
+
+# VC++ Redistributable (24+ MB)
+vc_redist.*.exe
+
+# Compiled executables
+demucs_mt.cpp.main.exe
+demucs_mt_openblas.exe
+demucs_mt_mkl.exe
+demucs_mt_blis.exe
+Sample\ Monsta.exe
+Sample\ Monsta\ 5.exe
+
+# Installer dependencies
+installer_dependencies/vc_redist.*.exe
+
+# User-specific files
+*.user
+*.suo
+*.userosscache
+*.sln.docstates
+
+# Test results
+[Tt]est[Rr]esult*/
+[Bb]uild[Ll]og.*
+
+# NuGet
+*.nupkg
+*.snupkg
+.nuget/
+project.lock.json
+project.fragment.lock.json
+artifacts/
+
+# Visual Studio profiler
+*.psess
+*.vsp
+*.vspx
+*.sap
+
+# ReSharper
+_ReSharper*/
+*.[Rr]e[Ss]harper
+*.DotSettings.user
+
+# JetBrains Rider
+.idea/
+*.sln.iml
+
+# CodeRush
+.cr/
+
+# Python Tools for Visual Studio (PTVS)
+*.pyproj
+*.pyproj.user
+
+# Cake
+tools/**
+!tools/packages.config
+# SM5 Release Linter (tracked; generated reports/ stay ignored)
+!tools/release_linter/
+!tools/release_linter/*.py
+!tools/release_linter/*.txt
+tools/release_linter/reports/
+# SM5 License Cleaner utility (tracked)
+!tools/license_cleaner/
+!tools/license_cleaner/*.cpp
+!tools/license_cleaner/*.h
+# SM5 Tutorial generator (tracked scripts; generated out/ stays ignored)
+!tools/tutorial_gen/
+!tools/tutorial_gen/*.py
+tools/tutorial_gen/out/
+
+# Tabs Studio
+*.tss
+
+# Telerik's JustMock
+*.jmconfig
+
+# BizTalk
+*.btm.cs
+*.odx.cs
+*.xsd.cs
+
+# OpenCover
+coverage*.xml
+coverage*.info
+
+# Azure
+*.pubxml
+*.publishproj
+
+# NuGet Packages
+*.nupkg
+*.snupkg
+**/[Pp]ackages/*
+!**/[Pp]ackages/build/
+
+# Windows image file caches
+Thumbs.db
+ehthumbs.db
+
+# Folder config file
+Desktop.ini
+
+# Recycle Bin
+$RECYCLE.BIN/
+
+# Mac
+.DS_Store
+.AppleDouble
+.LSOverride
+
+# Windows Installer files
+*.cab
+*.msm
+*.msm
+*.msp
+
+# Windows shortcuts
+*.lnk
+
+# JetBrains IDEs
+.idea/
+*.iml
+*.ipr
+*.iws
+
+# Backup files
+*~
+*.orig
+*.rej
+
+# Compressed files (unless specifically needed)
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# Audio test files (can be large)
+test_audio/
+samples/
+*.wav
+*.mp3
+*.flac
+*.ogg
+*.aiff
+
+# Documentation build output
+docs/_build/
+docs/.doctrees/
+
+# Sphinx
+docs/_build/
+
+# Coverage reports
+htmlcov/
+.coverage
+.coverage.*
+coverage.xml
+*.cover
+
+# Translations
+*.mo
+*.pot
+
+# Django
+*.log
+local_settings.py
+db.sqlite3
+db.sqlite3-journal
+
+# Flask
+instance/
+.webassets-cache
+
+# Scrapy
+.scrapy
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# IPython
+profile_default/
+ipython_config.py
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# PEP 582
+__pypackages__/
+
+# Celery
+celerybeat-schedule
+celerybeat.pid
+
+# SageMath
+*.sage.py
+
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+env.bak/
+venv.bak/
+
+# mkdocs
+/site
+
+# mypy
+.mypy_cache/
+.dmypy.json
+dmypy.json
+
+# Pyre
+.pyre/
+
+# pytype
+.pytype/
+
+# Cython (negations preserved for grepai compatibility)
+# *.c
+# *.cpp
+# !src/**/*.cpp
+# !third_party/**/*.cpp
+
+# Game assets (if very large)
+# Uncomment if needed:
+# assets/**/*.png
+# assets/**/*.jpg
+# assets/**/*.jpeg
+
+.grepai/
+
+# Tutorial generator artefacts
+tools/tutorial_gen/out/

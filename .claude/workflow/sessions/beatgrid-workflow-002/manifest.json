@@ -1,0 +1,19 @@
+{
+  "session_id": "beatgrid-workflow-002",
+  "task": "Fix beat grid issues and implement two-step workflow in WavePreviewPage",
+  "enhanced_task": "CRITICAL BEAT GRID FIX + TWO-STEP WORKFLOW:\n\n**Issues to Fix:**\n1. GREEN grid lines not visible - BeatGridOverlay has green colors defined but lines don't appear despite BPM detection working (94.0 shows in UI)\n2. RED downbeat marker not appearing when MANUAL button is pressed - drawDownbeatMarker() exists but marker doesn't show\n3. Need proper toggle switch UI for AUTO/MANUAL - research modern switch implementations\n4. Need HORIZONTAL zoom for waveform (not vertical) to allow detailed beat editing\n5. Downbeat detection not working - BPM detects but downbeat position calculation may be off\n6. Detect Loops button not implemented (logs 'not implemented yet')\n\n**New Two-Step Workflow:**\nSTEP 1: 'Length of Sample'\n- User selects area using existing selection method\n- Once selection is made, show '(done)' indicator next to step title\n- Selection becomes locked for Step 2\n\nSTEP 2: 'Downbeat & Loops'\n- All beat grid controls appear (BPM, tap tempo, detect loops, auto/manual downbeat)\n- User can manipulate beat grid WITHOUT affecting the selection from Step 1\n- Horizontal zoom available for precise beat alignment\n- From here user proceeds to processing\n\n**Key Files:**\n- WavePreviewPage.h/.cpp - main component\n- BeatGridOverlay.h/.cpp - draws grid lines (GREEN should be 0,255,100)\n- BeatAnalysisTypes.h - BeatGridInfo struct\n- BeatAnalysisService.h/.cpp - BPM detection\n\n**Root Cause Analysis Needed:**\n- Why BeatGridOverlay.paint() not drawing despite grid being visible and BPM > 0\n- Why drawDownbeatMarker() not rendering in paint()\n- Coordinate conversion between WavePreviewPage and BeatGridOverlay areas",
+  "started": "2025-12-08T11:00:00Z",
+  "status": "in_progress",
+  "current_phase": "investigation",
+  "phases": {
+    "prompt-enhancement": { "status": "completed" },
+    "investigation": { "status": "in_progress" },
+    "design": { "status": "pending" },
+    "user-approval": { "status": "pending" },
+    "implementation": { "status": "pending" },
+    "build": { "status": "pending" },
+    "verification": { "status": "pending" },
+    "documentation": { "status": "pending" }
+  },
+  "project_path": "b:\\SANTI\\SAMPLE_MONSTA\\sample_monsta4\\Sample_monsta5"
+}

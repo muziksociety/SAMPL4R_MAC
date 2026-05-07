@@ -1,0 +1,189 @@
+{
+  "session_id": "transport-button-layout-evidence",
+  "agent": "evidence-gatherer",
+  "created_at": "2026-03-13T00:00:00Z",
+  "status": "complete",
+  "data": {
+    "investigation_complete": true,
+    "questions_answered": 7,
+    "key_findings": {
+      "height_determination": {
+        "question": "How is component height determined?",
+        "answer": "Parent sets bounds via resized(). desiredHeight_ is tracked (line 486, 512) but component uses getHeight(). Layout reserves 30px for transport buttons above rows.",
+        "evidence": [
+          {
+            "file": "src/ui/Components/StepSequencerComponent.h",
+            "line": 486,
+            "content": "int desiredHeight_ = 120; // default preferred height"
+          },
+          {
+            "file": "src/ui/Components/StepSequencerComponent.h",
+            "line": 509,
+            "content": "std::function<void(int /*newHeight*/)> onHeightResizeRequested;"
+          },
+          {
+            "file": "src/ui/Components/StepSequencerComponent.cpp",
+            "line": 1502,
+            "content": "const int availableHeight = getHeight();"
+          }
+        ]
+      },
+      "resized_layout": {
+        "question": "How does resized() work end-to-end?",
+        "answer": "resized() (line 552-720) positions all UI elements. It calculates effective widths, positions transport buttons ABOVE rows at Y = rowContentTopY() - transportBtnH - 4",
+        "y_ranges": [
+          {
+            "section": "Top handle (resize grip)",
+            "y": "b.getY() + h/2 + 2 (line 2037) - topHandleBounds() is ~16px tall"
+          },
+          {
+            "section": "Transport buttons (Play/Stop)",
+            "y": "rowContentTopY() - 26 (line 593) - positioned above where rows start"
+          },
+          {
+            "section": "Row content starts",
+            "y": "rowContentTopY() (line 609) - this is the START of all rows"
+          }
+        ],
+        "critical_code": {
+          "file": "src/ui/Components/StepSequencerComponent.cpp",
+          "lines": "582-597",
+          "description": "Transport buttons resized block"
+        }
+      },
+      "rowContentTopY_details": {
+        "question": "How does rowContentTopY() work exactly?",
+        "answer": "Reserves 30px strip for transport buttons, then centers rows below it within available height. MINIMUM RETURN is transportStripH (30px)",
+        "code": {
+          "file": "src/ui/Components/StepSequencerComponent.cpp",
+          "lines": "1495-1507",
+          "key_lines": [
+            "1496: const int transportStripH = 30;  // Reserve space for play/stop buttons above rows",
+            "1505: int offset = (availableHeight - contentHeight - transportStripH) / 2 + transportStripH;",
+            "1506: return std::max(transportStripH, offset);  // MINIMUM 30px reserved"
+          ]
+        }
+      },
+      "paint_row_rendering": {
+        "question": "How does paint() draw rows? What Y offset?",
+        "answer": "paint() (line 291-550) uses topMargin = rowContentTopY() (line 305). Applies scrollY_ offset. NO clipping regions used - relies on paint() clip boundaries",
+        "evidence": [
+          {
+            "file": "src/ui/Components/StepSequencerComponent.cpp",
+            "line": 305,
+            "content": "const int topMargin = rowContentTopY();"
+          },
+          {
+            "file": "src/ui/Components/StepSequencerComponent.cpp",
+            "line": 330,
+            "content": "g.fillRect(juce::Rectangle<int>(area.getX(), topMargin + hoverRow_ * rowHeight - scrollY_, contentW - effRightW, rowHeight));"
+          },
+          {
+            "file": "src/ui/Components/StepSequencerComponent.cpp",
+            "line": 452,
+            "content": "const int lineYOffset = line * numChannels * rowHeight; ... g.fillRect(juce::Rectangle<int>(x, area.getY() + topMargin + lineYOffset, 1, lineHeight));"
+          }
+        ]
+      },
+      "cellBounds_calculation": {
+        "question": "How does cellBounds() calculate positions?",
+        "answer": "cellBounds() (line 1452-1478) uses rowContentTopY() for topMargin, applies scrollY_ offset for Y, uses bar-wrapping logic for X positioning",
+        "code": {
+          "file": "src/ui/Components/StepSequencerComponent.cpp",
+          "lines": "1452-1478",
+          "key_calculation": [
+            "1454: const int topMargin = rowContentTopY();",
+            "1464-1465: const int lineIndex = step / stepsPerLine; const int stepWithinLine = step % stepsPerLine;",
+            "1475-1476: const int visualRow = lineIndex * numChannels + row; const int y = area.getY() + topMargin + visualRow * rowHeight - scrollY_ + (rowHeight - cellSize) / 2;"
+          ]
+        }
+      },
+      "retracted_vs_expanded": {
+        "question": "Retracted vs expanded state?",
+        "answer": "Not a true retracted state. Component uses labelsCollapsed_ and rightPanelCollapsed_ flags. Left/right panels can be hidden. Height is always parent-determined.",
+        "evidence": [
+          {
+            "file": "src/ui/Components/StepSequencerComponent.h",
+            "line": 370,
+            "content": "bool labelsCollapsed_ = false; bool rightPanelCollapsed_ = false;"
+          },
+          {
+            "file": "src/ui/Components/StepSequencerComponent.cpp",
+            "line": 554,
+            "content": "const int effLabelW = labelsCollapsed_ ? 0 : labelWidth_;"
+          }
+        ]
+      },
+      "transport_button_positioning": {
+        "question": "Where should transport buttons be positioned?",
+        "answer": "ALREADY POSITIONED CORRECTLY (lines 582-597)! Buttons are centered above rows, starting at Y = rowContentTopY() - 26. NO CHANGES NEEDED.",
+        "current_code": {
+          "file": "src/ui/Components/StepSequencerComponent.cpp",
+          "lines": "582-597",
+          "comment": "Transport buttons block",
+          "details": [
+            "Line 583: const int transportBtnH = 22;",
+            "Line 593: const int transportY = rowContentTopY() - transportBtnH - 4;",
+            "Line 595-596: playBtn_ and stopBtn_ positioned at transportY"
+          ]
+        }
+      },
+      "rowContentTopY_modification": {
+        "question": "Does rowContentTopY() need to change?",
+        "answer": "NO. rowContentTopY() already reserves 30px for transport buttons (line 1496). Component does NOT need to request more height - parent controls that.",
+        "architecture": {
+          "height_control": "Parent component controls getHeight() - sets via setBounds()",
+          "transport_reserve": "rowContentTopY() guarantees minimum 30px above first row",
+          "centering": "Rows are centered below transport strip within available height",
+          "scrolling": "Vertical scroll applied ONLY to rows, not transport area"
+        }
+      }
+    },
+    "layout_summary": {
+      "vertical_layout": [
+        {
+          "section": "Top handle (resize grip)",
+          "pixels": "~16px at component top",
+          "y_range": "0-16px"
+        },
+        {
+          "section": "Transport button strip (RESERVED)",
+          "pixels": "30px reserved (transportStripH)",
+          "y_range": "16px to 46px",
+          "buttons": "Play/Stop centered horizontally, positioned at Y = rowContentTopY() - 26"
+        },
+        {
+          "section": "Row content starts",
+          "pixels": "rowContentTopY() onward",
+          "y_range": "30px+ (minimum)",
+          "note": "Rows may be vertically centered if component height > content height"
+        }
+      ],
+      "key_constant": {
+        "name": "transportStripH",
+        "value": 30,
+        "location": "src/ui/Components/StepSequencerComponent.cpp:1496",
+        "purpose": "Reserve space above rows for play/stop buttons"
+      }
+    },
+    "recommendations": {
+      "transport_buttons": {
+        "status": "ALREADY IMPLEMENTED CORRECTLY",
+        "file": "src/ui/Components/StepSequencerComponent.cpp",
+        "lines": "582-597",
+        "position": "Centered above channel rows",
+        "y_calculation": "rowContentTopY() - transportBtnH - 4",
+        "no_changes_needed": true
+      },
+      "if_adding_new_buttons_above_transport": {
+        "recommendation": "Modify rowContentTopY() to reserve more than 30px (e.g., 60px) and adjust line 1496 constant",
+        "affected_functions": [
+          "rowContentTopY()",
+          "cellBounds()",
+          "paint() - all Y coordinates"
+        ]
+      },
+      "architecture_pattern": "All Y coordinates derive from rowContentTopY() - this is the single source of truth for vertical layout"
+    }
+  }
+}

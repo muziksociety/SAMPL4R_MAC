@@ -1,0 +1,107 @@
+{
+  "session_id": "ascii-mockup-skill-2026-01-23",
+  "agent": "orchestrator-as-designer",
+  "created_at": "2026-01-23T00:00:00Z",
+  "status": "complete",
+  "skill_design": {
+    "name": "ascii-mockup",
+    "target_path": ".claude/skills/ascii-mockup/SKILL.md",
+    "purpose": "Enable precise ASCII art UI mockups for JUCE Component prototyping",
+    "primary_consumer": "frontend-architect agent",
+    "secondary_consumers": ["orchestrator (when reviewing designs)", "user (in approval phase)"],
+
+    "content_sections": [
+      {
+        "section": "YAML Frontmatter",
+        "content_summary": "name, description (trigger conditions)",
+        "estimated_lines": 10
+      },
+      {
+        "section": "Purpose & When to Use",
+        "content_summary": "Brief overview of skill purpose",
+        "estimated_lines": 15
+      },
+      {
+        "section": "Box-Drawing Character Reference",
+        "content_summary": "Quick reference for ASCII/Unicode characters",
+        "estimated_lines": 40
+      },
+      {
+        "section": "JUCE Component Mapping",
+        "content_summary": "How JUCE components map to ASCII representations",
+        "estimated_lines": 60
+      },
+      {
+        "section": "Mockup Templates",
+        "content_summary": "Ready-to-use templates for common patterns",
+        "estimated_lines": 120
+      },
+      {
+        "section": "Design Principles",
+        "content_summary": "Visual hierarchy, spacing, proportions, flow",
+        "estimated_lines": 50
+      },
+      {
+        "section": "BEFORE/AFTER Pattern",
+        "content_summary": "How to show changes clearly",
+        "estimated_lines": 40
+      },
+      {
+        "section": "Component Hierarchy Diagrams",
+        "content_summary": "Tree diagram patterns for JUCE hierarchies",
+        "estimated_lines": 30
+      },
+      {
+        "section": "User Flow Diagrams",
+        "content_summary": "Step-by-step interaction documentation",
+        "estimated_lines": 35
+      }
+    ],
+
+    "total_estimated_lines": 400,
+    "under_500_limit": true,
+
+    "key_design_decisions": [
+      {
+        "decision": "Use basic ASCII (+|-) as default, Unicode as optional",
+        "rationale": "Wide terminal compatibility, still precise"
+      },
+      {
+        "decision": "Include JUCE-specific component templates",
+        "rationale": "This is specifically for SAMPLAR JUCE development"
+      },
+      {
+        "decision": "Embed design thinking principles (not just characters)",
+        "rationale": "User specifically requested design thinking integration"
+      },
+      {
+        "decision": "Focus on BEFORE/AFTER pattern",
+        "rationale": "This is the primary use case in frontend-architect workflow"
+      }
+    ],
+
+    "juce_components_to_cover": [
+      "Page layouts (full screen)",
+      "Panels and containers",
+      "Buttons (TextButton, DrawableButton)",
+      "Sliders (horizontal, vertical, rotary)",
+      "ComboBox (dropdown)",
+      "Labels",
+      "WaveformDisplay",
+      "Overlays",
+      "Dialog boxes",
+      "Step sequencer grids",
+      "Tab components"
+    ],
+
+    "design_principles_to_include": [
+      "Visual hierarchy (what catches the eye first)",
+      "Spatial composition (balance and whitespace)",
+      "Proportions (realistic sizing)",
+      "Information flow (left-to-right, top-to-bottom)",
+      "Grouping (related items together)",
+      "Contrast (highlighting changes)",
+      "Consistency (repeating patterns)"
+    ]
+  }
+}

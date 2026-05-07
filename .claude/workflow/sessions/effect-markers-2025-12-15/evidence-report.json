@@ -1,0 +1,57 @@
+{
+  "session_id": "effect-markers-2025-12-15",
+  "investigation_date": "2025-12-15",
+  "task": "Add visible triangle markers for effect handles in wave editor",
+
+  "findings": {
+    "current_implementation": {
+      "file": "src/ui/WaveEditor/sm4port/WaveformViewer.cpp",
+      "zones": [
+        {"name": "FadeIn", "line_color": "fadeInLineColour", "draws_when": "hover OR active drag"},
+        {"name": "FadeOut", "line_color": "fadeOutLineColour", "draws_when": "hover OR active drag"},
+        {"name": "TrimStart", "line_color": "RGB(255,193,7) gold", "draws_when": "hover OR active drag"},
+        {"name": "TrimEnd", "line_color": "RGB(255,193,7) gold", "draws_when": "hover OR active drag"}
+      ],
+      "rendering_functions": {
+        "drawActiveFadeAreas": {"line": 439, "draws": "vertical lines for fade handles"},
+        "drawActiveTrimLines": {"line": 456, "draws": "vertical lines for trim handles"},
+        "drawZoneOverlays": {"line": 407, "draws": "hover zones when no handle is active"}
+      },
+      "visibility_condition": "Lines only appear when: (currentZone == Zone::X || activeZone == Zone::X)"
+    },
+
+    "related_marker_code": {
+      "file": "src/ui/Components/DraggableMarker.cpp",
+      "triangle_rendering": {
+        "function": "paintDownbeat",
+        "line": 91,
+        "code_snippet": "triangle.addTriangle(triangleLeft, triangleTop, triangleRight, triangleTop, centerX, triangleBottom);"
+      }
+    },
+
+    "coordinate_system": {
+      "positionToPixel_function": "converts 0.0-1.0 position to pixel X coordinate",
+      "area_margins": "10px margin around wave area",
+      "handle_detection": "detectZone() function checks mouse position against zone rects"
+    }
+  },
+
+  "proposed_solution": {
+    "description": "Add persistent triangle markers at top of waveform area pointing down to where handles are",
+    "implementation_location": "WaveformViewer::paint() - new function drawHandleMarkers()",
+    "when_to_draw": "Always, regardless of hover state",
+    "triangle_style": {
+      "size": "12px wide, 10px tall",
+      "position": "top edge of waveform area, centered on handle X position",
+      "colors": {
+        "fade_in": "fadeInLineColour with 0.7 alpha",
+        "fade_out": "fadeOutLineColour with 0.7 alpha",
+        "trim_start": "gold (255,193,7) with 0.7 alpha",
+        "trim_end": "gold (255,193,7) with 0.7 alpha"
+      },
+      "outline": "white 50% alpha stroke for visibility"
+    }
+  },
+
+  "feasibility": "HIGH - straightforward addition using existing JUCE Path/Triangle APIs"
+}
