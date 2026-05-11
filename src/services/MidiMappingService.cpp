@@ -1,6 +1,15 @@
 ﻿#include "MidiMappingService.h"
 #include "../audio/MicroFade.h"
 
+// Realtime pitch shifter — replaces SoundTouch in the audio path.
+// MIT-licensed, header-only, designed for realtime music. Internal framing
+// is handled by the library (no FIFO/prime/drain plumbing needed).
+#include "signalsmith-stretch.h"
+
+#include <thread>
+#include <chrono>
+#include <cmath>
+
 namespace samplar {
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -143,7 +152,7 @@ void MidiMappingService::handleIncomingMidiMessage(juce::MidiInput* source,
 
 void MidiMappingService::prepareToPlay(int samplesPerBlockExpected, double sampleRate)
 {
-    juce::Logger::writeToLog("[MidiMappingService] prepareToPlay: sr="
+    juce::Logger::writeToLog("[MidiMappingService] === prepareToPlay START === sr="
         + juce::String(sampleRate) + " blockSize=" + juce::String(samplesPerBlockExpected));
 
     currentSampleRate_ = sampleRate;
@@ -151,7 +160,77 @@ void MidiMappingService::prepareToPlay(int samplesPerBlockExpected, double sampl
 
     // Silence all voices on reconfigure
     for (auto& v : voices_)
+    {
         v.active = false;
+        v.stemIdx = -1;
+    }
+
+    // ── Allocate realtime signalsmith-stretch instances (NEVER allocate on audio thread) ──
+    // We configure every stretcher at the DEVICE sample rate exactly ONCE
+    // here, and NEVER reconfigure it on the audio thread. The previous
+    // design configured per-stretcher at the input rate (modelSr / voice
+    // bufferSr) and called process() with unequal frame counts — that
+    // makes signalsmith interpret inputSamples/outputSamples as a time-
+    // stretch ratio, coupling pitch shift with an unwanted time stretch
+    // (low pitch → slow, high pitch → fast). The fix: pre-resample input
+    // from modelSr/bufferSr → deviceSr via linear interp, then call
+    // process(in, N, out, N) with EQUAL frame counts so the stretcher
+    // only does pitch shifting and never time stretching.
+    juce::Logger::writeToLog("[MidiMappingService] prepareToPlay: allocating signalsmith-stretch instances");
+    // IMPORTANT: signalsmith::stretch::SignalsmithStretch::reset() and other
+    // methods access internal STFT buffers allocated by presetDefault(). An
+    // un-presetDefault'd instance has null/empty internals — calling reset()
+    // on one CRASHES (observed in stopAllVoices → DynamicSTFT::moveOutput
+    // access violation). We presetDefault EVERY instance here at the device
+    // rate. No audio-thread reconfigure is ever performed.
+    for (int s = 0; s < MAX_STEMS; ++s)
+    {
+        if (!stemStretch_[(size_t) s])
+            stemStretch_[(size_t) s] = std::make_unique<signalsmith::stretch::SignalsmithStretch<float>>();
+        // presetCheaper (vs presetDefault): noticeably lower STFT framing
+        // latency at slightly reduced quality. Stems now ALL route through
+        // signalsmith (no pitch=0 bypass) so latency floor matters more
+        // than micro-quality gains — keeping every stem on the same low
+        // latency floor is what keeps them locked in sync. Music stems
+        // tolerate the cheaper preset well; the alternative (presetDefault)
+        // adds ~30-80 ms latency with no audible benefit for stem playback.
+        stemStretch_[(size_t) s]->presetCheaper(2, (float) sampleRate, /*splitComputation*/ true);
+        stemLastSemi_[(size_t) s] = 0.0f;
+        stemLastConfiguredSr_[(size_t) s] = (juce::uint32) sampleRate;
+    }
+
+    for (auto& v : voices_)
+    {
+        if (!v.stretch)
+            v.stretch = std::make_unique<signalsmith::stretch::SignalsmithStretch<float>>();
+        v.stretch->presetDefault(2, (float) sampleRate, /*splitComputation*/ true);
+        v.lastSemi          = 0.0f;
+        v.lastConfiguredSr  = (juce::uint32) sampleRate;
+        v.bufferSampleRate  = sampleRate;
+        v.eosFedSilence     = false;
+    }
+
+    // Scratch buffers (planar). signalsmith-stretch's process() takes
+    // pointer-of-pointers — same layout as juce::AudioBuffer. We size
+    // these big enough to handle any single block + slack for the input
+    // count (which can be larger than the output count when shifting up).
+    const int maxFrames = juce::jmax(samplesPerBlockExpected, 4096);
+    stemOutScratch_.setSize  (2, maxFrames, false, false, true);
+    voiceOutScratch_.setSize (2, maxFrames, false, false, true);
+    // Input scratch (stem path): holds deviceSr-rate pre-resampled input,
+    // numSamples frames. Allocate 4x for safety / future-proofing.
+    stretchInScratch_.setSize(2, maxFrames * 4, false, false, true);
+    // Input scratch (voice path): same purpose as stretchInScratch_ but kept
+    // separate so a voice and a stem can both run in the same block.
+    voiceInScratch_.setSize (2, maxFrames, false, false, true);
+    stemOutScratch_.clear();
+    voiceOutScratch_.clear();
+    stretchInScratch_.clear();
+    voiceInScratch_.clear();
+
+    juce::Logger::writeToLog("[MidiMappingService] prepareToPlay: signalsmith-stretch instances allocated, "
+        "stems=" + juce::String(MAX_STEMS) + " voices=" + juce::String(MAX_VOICES));
+    juce::Logger::writeToLog("[MidiMappingService] === prepareToPlay END ===");
 }
 
 void MidiMappingService::releaseResources()
@@ -162,6 +241,24 @@ void MidiMappingService::releaseResources()
     {
         v.active = false;
         v.buffer.reset();
+        v.stemIdx = -1;
+        v.eosFedSilence = false;
+        if (v.stretch) v.stretch->reset();
+    }
+
+    for (int s = 0; s < MAX_STEMS; ++s)
+    {
+        if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
+    }
+}
+
+void MidiMappingService::applyPitchIfChanged(signalsmith::stretch::SignalsmithStretch<float>& s,
+                                             float& lastSemi, float targetSemi)
+{
+    if (std::abs(lastSemi - targetSemi) > 1.0e-4f)
+    {
+        s.setTransposeSemitones(targetSemi);
+        lastSemi = targetSemi;
     }
 }
 
@@ -189,6 +286,145 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
         const float* srcL = srcBuf.getReadPointer(0);
         const float* srcR = srcChannels > 1 ? srcBuf.getReadPointer(1) : srcL;
 
+        // ── Realtime signalsmith-stretch path: voice has stemIdx >= 0 ──
+        // Pitch from atomic stem-pitch. The library handles framing
+        // internally — we just feed inN input frames and request outN
+        // output frames per block. inN/outN = inputSr/deviceSr keeps tempo
+        // at 1.0 in output time-domain while pitch is shifted by
+        // setTransposeSemitones.
+        //
+        // signalsmith-stretch consumes/produces planar (non-interleaved)
+        // audio, so we pass pointer-of-pointers directly from juce::AudioBuffer
+        // — no interleave step.
+        //
+        // Position advances by INPUT frames consumed (not output produced).
+        // Read current stem pitch up-front so we can bypass the stretcher
+        // when it's zero. This must match the diagnostic bypass in the
+        // stem-transport path below — same threshold (1e-3 semitone).
+        const float voiceTargetSemi =
+            (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS)
+                ? stemPitch_[(size_t) voice.stemIdx]
+                      .targetSemi.load(std::memory_order_relaxed)
+                : 0.0f;
+        const bool voiceUseRealtimeStretch =
+            (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS
+             && voice.stretch != nullptr
+             && std::abs(voiceTargetSemi) >= 1.0e-3f);
+
+        // If a stretch instance exists but we're bypassing for pitch=0,
+        // reset it so we don't re-emit stale tail when pitch changes next.
+        if (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS
+            && voice.stretch != nullptr && !voiceUseRealtimeStretch)
+        {
+            voice.stretch->reset();
+            voice.lastConfiguredSr = 0;
+            voice.lastSemi = 0.0f;
+            voice.eosFedSilence = false;
+        }
+
+        if (voiceUseRealtimeStretch)
+        {
+            // The stretcher was configured at deviceSr in prepareToPlay and
+            // is NEVER reconfigured on the audio thread. We pre-resample
+            // input from voice.bufferSampleRate → deviceSr via linear
+            // interpolation, then call process() with EQUAL in/out frame
+            // counts so signalsmith only does pitch shift (no time stretch).
+            // NOTE: voice.lastConfiguredSr is now DEAD STATE — preserved
+            // only for binary-compat with any external readers; never
+            // consulted here. Can be removed in a future cleanup.
+
+            // Update pitch from atomic. RT-safe — just sets internal field.
+            const float targetSemi = stemPitch_[(size_t) voice.stemIdx]
+                                        .targetSemi.load(std::memory_order_relaxed);
+            applyPitchIfChanged(*voice.stretch, voice.lastSemi, targetSemi);
+
+            const int endLimit  = (voice.endSample > 0) ? voice.endSample : srcSamples;
+            const int blockOut  = numSamples;
+            // Linear-interp resample voice.buffer at voice.position
+            // (input-sample-space, modelSr) into voiceInScratch_ at
+            // deviceSr, producing exactly numSamples output frames.
+            const double ratio = (voice.resampleRatio > 0.0)
+                                 ? voice.resampleRatio
+                                 : 1.0;  // == bufferSr / deviceSr
+
+            const int inCap = voiceInScratch_.getNumSamples();
+            const int inFrames = juce::jmin(blockOut, inCap);
+            float* inL = voiceInScratch_.getWritePointer(0);
+            float* inR = voiceInScratch_.getWritePointer(1);
+
+            bool reachedEnd = false;
+            for (int i = 0; i < inFrames; ++i)
+            {
+                // Wrap on loop boundary BEFORE reading (looping samples
+                // wrap to startSample when we reach endLimit).
+                double readPos = voice.position;
+                if (voice.looping)
+                {
+                    while (readPos >= (double) endLimit)
+                    {
+                        const double span = (double) (endLimit - voice.startSample);
+                        if (span <= 0.0) break;
+                        readPos -= span;
+                    }
+                    voice.position = readPos;
+                }
+
+                const int idx0 = (int) readPos;
+                if (idx0 < voice.startSample || idx0 >= endLimit)
+                {
+                    // EOS — zero-fill the rest of the input window so the
+                    // stretcher's internal tail flushes cleanly on the
+                    // next block.
+                    std::memset(inL + i, 0, sizeof(float) * (size_t) (inFrames - i));
+                    std::memset(inR + i, 0, sizeof(float) * (size_t) (inFrames - i));
+                    reachedEnd = true;
+                    break;
+                }
+                const int idx1 = juce::jmin(idx0 + 1, endLimit - 1);
+                const float frac = (float) (readPos - (double) idx0);
+
+                inL[i] = srcL[idx0] + frac * (srcL[idx1] - srcL[idx0]);
+                inR[i] = srcR[idx0] + frac * (srcR[idx1] - srcR[idx0]);
+
+                voice.position = readPos + ratio;
+            }
+
+            // Process: EQUAL in/out frame counts → pure pitch shift, no
+            // time stretch. THIS IS THE FIX.
+            float* outBuf[2] = {
+                voiceOutScratch_.getWritePointer(0),
+                voiceOutScratch_.getWritePointer(1)
+            };
+            float* inBuf[2] = { inL, inR };
+            voice.stretch->process(inBuf, inFrames, outBuf, blockOut);
+
+            // Mix into dest at velocity. signalsmith-stretch does NOT add
+            // overlap-add gain, so no compensation needed (full unity).
+            const float gain = voice.velocity;
+            for (int i = 0; i < blockOut; ++i)
+            {
+                destL[i] += outBuf[0][i] * gain;
+                if (destR != nullptr)
+                    destR[i] += outBuf[1][i] * gain;
+            }
+
+            if (reachedEnd && !voice.looping)
+            {
+                if (voice.eosFedSilence)
+                {
+                    // Tail flushed in the previous block — done.
+                    voice.active = false;
+                }
+                else
+                {
+                    voice.eosFedSilence = true;  // one more block of zeros next time
+                }
+            }
+
+            continue; // next voice
+        }
+
+        // ── Legacy direct-playback path (no realtime pitch) ──
         for (int i = 0; i < numSamples; ++i)
         {
             int pos = static_cast<int>(voice.position);
@@ -198,7 +434,6 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
                 {
                     voice.position = 0.0;
                     pos = 0;
-                    // Diagnostic: log first wrap (audio thread — one-shot only)
                     static std::atomic<int> wrapCount{0};
                     if (wrapCount.fetch_add(1) < 3)
                         juce::Logger::writeToLog("[MidiMapping] LOOP WRAP at sample " + juce::String(srcSamples));
@@ -210,16 +445,12 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
                 }
             }
 
-            // Linear interpolation for resampling
             const int  pos1  = juce::jmin(pos + 1, srcSamples - 1);
             const float frac = static_cast<float>(voice.position - pos);
 
             const float sampleL = srcL[pos] + frac * (srcL[pos1] - srcL[pos]);
             const float sampleR = srcR[pos] + frac * (srcR[pos1] - srcR[pos]);
 
-            // Anti-click micro-fade (2 ms in/out) on segment preview playback.
-            // Looping voices only fade on the very first traversal — subsequent
-            // loops skip the start-fade to avoid stuttering at the loop point.
             const float fadeGain = voice.looping
                 ? 1.0f
                 : samplar::computeVoiceFadeGain(voice.position, srcSamples, currentSampleRate_);
@@ -243,7 +474,7 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
         const int stemCount = smodeModel_->getStemCount();
         int maxStemSamples = 0;
 
-        for (int si = 0; si < stemCount; ++si)
+        for (int si = 0; si < stemCount && si < MAX_STEMS; ++si)
         {
             const auto* stem = smodeModel_->getStem(si);
             if (!stem || !smodeModel_->isStemAudible(si) || stem->audioBuffer.getNumSamples() == 0)
@@ -257,14 +488,82 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
             const float* sR = buf.getNumChannels() > 1 ? buf.getReadPointer(1) : sL;
             const float vol = stem->volume;
 
-            for (int i = 0; i < numSamples; ++i)
-            {
-                int srcPos = static_cast<int>(pos + i * ratio);
-                if (srcPos >= totalSmp) break;
+            // ── Realtime signalsmith-stretch (per-stem) — ALL pitches ──
+            // Previously a pitch=0 fast-path bypassed signalsmith and did a
+            // raw linear-interp resample. That caused a LATENCY MISMATCH
+            // across stems: unpitched stems played immediately, pitched
+            // stems lagged by ~30-80 ms (signalsmith's STFT framing
+            // latency), so any stem at pitch≠0 audibly drifted out of
+            // sync with the others. Fix: route EVERY stem through
+            // signalsmith. At semis=0 the stretcher is transparent
+            // (modulo framing latency), so all stems share the same
+            // latency floor and stay locked together.
+            //
+            // The voice realtime path keeps its pitch=0 bypass on purpose
+            // (one-shot drum hits can't afford a 30-80 ms attack delay).
+            // The stretcher was configured at DEVICE rate in prepareToPlay
+            // and is NEVER reconfigured on the audio thread. We pre-resample
+            // input from modelSr → deviceSr via linear interpolation into
+            // stretchInScratch_, then call process() with EQUAL in/out
+            // frame counts so signalsmith only does pitch shifting (no
+            // time stretching). This fixes the prior bug where unequal
+            // frame counts caused signalsmith to interpret inputSamples/
+            // outputSamples as a time-stretch ratio, coupling pitch shift
+            // with an unwanted tempo change (low pitch → slow, high → fast).
+            //
+            // NOTE: stemLastConfiguredSr_ is now DEAD STATE — never read.
+            // Preserved here only to avoid an ABI/header change in this
+            // patch; can be removed in a future cleanup.
+            auto* sPtr = stemStretch_[(size_t) si].get();
+            if (sPtr == nullptr) continue;
+            auto& s = *sPtr;
 
-                destL[i] += sL[srcPos] * vol;
-                if (destR) destR[i] += sR[srcPos] * vol;
+            const float targetSemi = stemPitch_[(size_t) si]
+                                        .targetSemi.load(std::memory_order_relaxed);
+            applyPitchIfChanged(s, stemLastSemi_[(size_t) si], targetSemi);
+
+            const int blockOut = numSamples;
+
+            // Pre-resample modelSr → deviceSr via linear interpolation
+            // into stretchInScratch_. Stems are processed sequentially in
+            // this loop, so reusing this scratch across stems is safe.
+            const int inCap = stretchInScratch_.getNumSamples();
+            const int inFrames = juce::jmin(blockOut, inCap);
+            float* tmpL = stretchInScratch_.getWritePointer(0);
+            float* tmpR = stretchInScratch_.getWritePointer(1);
+            for (int i = 0; i < inFrames; ++i)
+            {
+                const double srcPos = pos + (double) i * ratio;
+                const int idx0 = (int) srcPos;
+                if (idx0 < 0 || idx0 >= totalSmp)
+                {
+                    tmpL[i] = 0.0f;
+                    tmpR[i] = 0.0f;
+                    continue;
+                }
+                const int idx1 = juce::jmin(idx0 + 1, totalSmp - 1);
+                const float frac = (float) (srcPos - (double) idx0);
+                tmpL[i] = sL[idx0] + frac * (sL[idx1] - sL[idx0]);
+                tmpR[i] = sR[idx0] + frac * (sR[idx1] - sR[idx0]);
             }
+
+            float* outBuf[2] = {
+                stemOutScratch_.getWritePointer(0),
+                stemOutScratch_.getWritePointer(1)
+            };
+            const float* inBuf[2] = { tmpL, tmpR };
+            // EQUAL in/out counts — pure pitch shift, no time stretch.
+            s.process(inBuf, inFrames, outBuf, blockOut);
+
+            // Mix into dest at stem volume. Output is already at deviceSr.
+            for (int i = 0; i < blockOut; ++i)
+            {
+                destL[i] += outBuf[0][i] * vol;
+                if (destR != nullptr)
+                    destR[i] += outBuf[1][i] * vol;
+            }
+            // Note: transport `pos` advances once after the stem loop using
+            // `pos + numSamples * ratio` (in input-sample-space at modelSr).
         }
 
         double newPos = pos + numSamples * ratio;
@@ -275,10 +574,16 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
                 // Wrap to beginning for seamless loop
                 newPos = std::fmod(newPos, static_cast<double>(maxStemSamples));
                 transportPosSamples_.store(newPos, std::memory_order_relaxed);
+                // Reset stem stretchers so end-of-track tail doesn't bleed
+                // into the loop start.
+                for (int s = 0; s < MAX_STEMS; ++s)
+                    if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
             }
             else
             {
                 transportActive_.store(false, std::memory_order_relaxed);
+                for (int s = 0; s < MAX_STEMS; ++s)
+                    if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
                 juce::MessageManager::callAsync([this]()
                 {
                     if (destroyed_.load(std::memory_order_seq_cst)) return;
@@ -364,25 +669,47 @@ void MidiMappingService::handleNoteOn(int /*channel*/, int noteNumber, float vel
                     || stem->audioBuffer.getNumSamples() == 0 || !smodeModel_->isStemAudible(stemIdx))
                     continue;
 
-                const auto& srcBuf = stem->audioBuffer;
-                int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-                int64_t endSmp   = juce::jlimit(startSmp, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+                // Realtime pitch path: copy segment into voice buffer (so the
+                // SoundTouch instance has a stable shared_ptr to read from)
+                // AND tag voice.stemIdx so the voice loop applies pitch.
+                int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)stem->audioBuffer.getNumSamples(),
+                                                 (int64_t) seg->startSample);
+                int64_t endSmp   = juce::jlimit(startSmp, (int64_t)stem->audioBuffer.getNumSamples(),
+                                                 (int64_t) seg->endSample);
                 int segLen = static_cast<int>(endSmp - startSmp);
                 if (segLen <= 0) continue;
 
-                // Copy segment audio into a new buffer for voice playback
                 auto segBuf = std::make_shared<juce::AudioBuffer<float>>(
-                    srcBuf.getNumChannels(), segLen);
-                for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
-                    segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
+                    stem->audioBuffer.getNumChannels(), segLen);
+                for (int ch = 0; ch < stem->audioBuffer.getNumChannels(); ++ch)
+                    segBuf->copyFrom(ch, 0, stem->audioBuffer, ch, static_cast<int>(startSmp), segLen);
 
                 Voice& v        = allocateVoice();
                 v.buffer        = segBuf;
                 v.position      = 0.0;
+                v.startSample   = 0;
+                v.endSample     = segLen;
                 v.resampleRatio = modelSr / currentSampleRate_;
                 v.velocity      = velocity;
                 v.noteNumber    = noteNumber;
                 v.looping       = seg->effects.loop;
+                v.stemIdx       = stemIdx;          // engage realtime pitch
+                v.lastSemi      = 0.0f;
+                v.eosFedSilence = false;
+                // Store the input rate so the audio thread can configure the
+                // signalsmith-stretch instance at the correct rate.
+                // lastConfiguredSr=0 forces (re)config on first audio block.
+                v.bufferSampleRate = modelSr;
+                v.lastConfiguredSr = 0;
+                if (v.stretch)
+                {
+                    v.stretch->reset();
+                    // Stretcher stays at deviceSr (configured in
+                    // prepareToPlay). The audio thread pre-resamples
+                    // modelSr → deviceSr before process(). Just clear
+                    // lastSemi so pitch is reapplied on the first block.
+                    v.lastSemi = -999.0f;
+                }
                 v.active        = true;
 
                 // Notify UI for each stem's animation
@@ -924,28 +1251,50 @@ MidiMappingService::Voice& MidiMappingService::allocateVoice()
 // ────────────────────────────────────────────────────────────────────────────
 
 void MidiMappingService::playBufferDirect(std::shared_ptr<const juce::AudioBuffer<float>> buffer,
-                                           double bufferSampleRate, float velocity, bool looping)
+                                           double bufferSampleRate, float velocity, bool looping,
+                                           int stemIdx)
 {
     if (!buffer || buffer->getNumSamples() == 0) return;
 
     Voice& v        = allocateVoice();
     v.buffer        = buffer;
     v.position      = 0.0;
+    v.startSample   = 0;
+    v.endSample     = buffer->getNumSamples();
     v.resampleRatio = bufferSampleRate / currentSampleRate_;
     v.velocity      = velocity;
     v.noteNumber    = -1;  // No MIDI note association
     v.looping       = looping;
+    v.stemIdx       = (stemIdx >= 0 && stemIdx < MAX_STEMS) ? stemIdx : -1;
+    v.lastSemi      = 0.0f;
+    v.eosFedSilence = false;
+    // Store the input buffer's native rate so the audio thread configures
+    // signalsmith-stretch at the correct rate on first audio block.
+    v.bufferSampleRate = bufferSampleRate;
+    v.lastConfiguredSr = 0;
+    if (v.stretch && v.stemIdx >= 0)
+    {
+        v.stretch->reset();
+        v.lastSemi = -999.0f;  // force pitch (re)apply on first audio block
+    }
     v.active        = true;
 
-    juce::Logger::writeToLog("[MidiMapping] playBufferDirect: samples=" + juce::String(buffer->getNumSamples())
-        + " looping=" + juce::String(looping ? "YES" : "NO"));
+    juce::Logger::writeToLog("[MidiMapping] playBufferDirect: samples="
+        + juce::String(buffer->getNumSamples())
+        + " looping=" + juce::String(looping ? "YES" : "NO")
+        + " stem=" + juce::String(v.stemIdx));
 }
 
 void MidiMappingService::stopAllVoices()
 {
     for (auto& v : voices_)
+    {
         v.active = false;
-    juce::Logger::writeToLog("[MidiMappingService] stopAllVoices: killed all " + juce::String(MAX_VOICES) + " voices");
+        if (v.stretch) v.stretch->reset();
+        v.eosFedSilence = false;
+    }
+    juce::Logger::writeToLog("[MidiMappingService] stopAllVoices: killed all "
+        + juce::String(MAX_VOICES) + " voices");
 }
 
 // ── Computer Keyboard MIDI ──────────────────────────────────────────────────
@@ -1112,8 +1461,17 @@ void MidiMappingService::setSModeModel(SModeSegmentModel* model)
         transportActive_.store(false, std::memory_order_relaxed);
         transportPosSamples_.store(0.0, std::memory_order_relaxed);
 
+        // Reset realtime stem stretchers (drop any in-flight tail)
+        for (int s = 0; s < MAX_STEMS; ++s)
+        {
+            if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
+            stemPitch_[(size_t) s].targetSemi.store(0.0f, std::memory_order_relaxed);
+            stemLastSemi_[(size_t) s] = 0.0f;
+            stemLastConfiguredSr_[(size_t) s] = 0;
+        }
+
         juce::Logger::writeToLog("[MidiMappingService] setSModeModel(nullptr) — hard reset: "
-            "voices killed, buffers released, transport stopped");
+            "voices killed, buffers released, transport stopped, stretchers reset");
     }
     else
     {
@@ -1227,12 +1585,19 @@ void MidiMappingService::startSModeTransport(double startTimeSeconds)
 
     transportPosSamples_.store(startTimeSeconds * modelSr, std::memory_order_relaxed);
     transportActive_.store(true, std::memory_order_relaxed);
+    // Reset stem stretchers so the new start position doesn't bleed any
+    // previous tail. signalsmith-stretch handles its own framing — no prime
+    // step is needed.
+    for (int s = 0; s < MAX_STEMS; ++s)
+        if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
     juce::Logger::writeToLog("[MidiMapping] Transport START at " + juce::String(startTimeSeconds, 2) + "s");
 }
 
 void MidiMappingService::stopSModeTransport()
 {
     transportActive_.store(false, std::memory_order_relaxed);
+    for (int s = 0; s < MAX_STEMS; ++s)
+        if (stemStretch_[(size_t) s]) stemStretch_[(size_t) s]->reset();
     juce::Logger::writeToLog("[MidiMapping] Transport STOP");
 }
 
@@ -1243,5 +1608,236 @@ double MidiMappingService::getSModeTransportPositionSeconds() const
     if (modelSr <= 0.0) return 0.0;
     return transportPosSamples_.load(std::memory_order_relaxed) / modelSr;
 }
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-stem pitch shifting (REALTIME — applied in audio thread per block)
+// ────────────────────────────────────────────────────────────────────────────
+
+float MidiMappingService::getStemPitchSemitones(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    return stemPitch_[(size_t) stemIdx].targetSemi.load(std::memory_order_relaxed);
+}
+
+void MidiMappingService::setStemPitchSemitones(int stemIdx, float semitones)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS)
+    {
+        juce::Logger::writeToLog("[MidiMappingService] setStemPitchSemitones invalid stemIdx="
+            + juce::String(stemIdx));
+        return;
+    }
+
+    const float clamped = juce::jlimit(-12.0f, 12.0f, semitones);
+    auto& slot = stemPitch_[(size_t) stemIdx];
+
+    const float current = slot.targetSemi.load(std::memory_order_relaxed);
+    if (std::abs(current - clamped) < 1.0e-4f)
+        return;
+
+    // Single atomic store — picked up on the next audio block (~one buffer
+    // of latency). No background thread, no debounce, no render kickoff.
+    slot.targetSemi.store(clamped, std::memory_order_relaxed);
+
+    juce::Logger::writeToLog("[MidiMappingService] setStemPitchSemitones stem="
+        + juce::String(stemIdx) + " semi=" + juce::String(clamped, 2)
+        + " (realtime)");
+
+    // Publish event so other UI peers can mirror.
+    auto* payload = new juce::DynamicObject();
+    payload->setProperty("stemIndex", stemIdx);
+    payload->setProperty("semi", clamped);
+    bus_.publish("smode.stem.pitch.changed", juce::var(payload));
+}
+
+#if 0
+// (Removed) Offline pre-render code — replaced by realtime SoundTouch in
+// the audio path (stem instances in transport, voice instances on note-on).
+void MidiMappingService::renderPitchedStem(int stemIdx, float semi, int generation)
+{
+#ifdef WITH_SOUNDTOUCH
+    juce::Logger::writeToLog("[MidiMappingService] 🔄 renderPitchedStem START stem="
+        + juce::String(stemIdx) + " semi=" + juce::String(semi, 2)
+        + " gen=" + juce::String(generation));
+
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    auto& slot = stemPitch_[(size_t) stemIdx];
+
+    if (slot.rendering.exchange(true, std::memory_order_acq_rel))
+    {
+        juce::Logger::writeToLog("[MidiMappingService]   render already in flight stem="
+            + juce::String(stemIdx) + " — superseding");
+    }
+
+    if (destroyed_.load(std::memory_order_acquire) || smodeModel_ == nullptr)
+    {
+        slot.rendering.store(false, std::memory_order_release);
+        juce::Logger::writeToLog("[MidiMappingService] ❌ renderPitchedStem aborted (destroyed or no model)");
+        return;
+    }
+
+    const auto* stem = smodeModel_->getStem(stemIdx);
+    if (stem == nullptr || stem->audioBuffer.getNumSamples() == 0)
+    {
+        slot.rendering.store(false, std::memory_order_release);
+        juce::Logger::writeToLog("[MidiMappingService] ❌ renderPitchedStem stem missing/empty stem="
+            + juce::String(stemIdx));
+        return;
+    }
+
+    // Snapshot source (model is on UI thread; for now we trust it doesn't
+    // mutate during render. If this becomes a problem, switch to a copy.)
+    const int    srcChannels = stem->audioBuffer.getNumChannels();
+    const int    srcSamples  = stem->audioBuffer.getNumSamples();
+    const double srcSr       = smodeModel_->getSampleRate() > 0.0
+                                 ? smodeModel_->getSampleRate() : 44100.0;
+
+    if (srcChannels <= 0 || srcSamples <= 0)
+    {
+        slot.rendering.store(false, std::memory_order_release);
+        return;
+    }
+
+    const auto t0 = std::chrono::steady_clock::now();
+
+    soundtouch::SoundTouch st;
+    st.setSampleRate((juce::uint32) srcSr);
+    st.setChannels((juce::uint32) srcChannels);
+    st.setTempo(1.0f);
+    st.setPitchSemiTones(semi);
+    st.setSetting(SETTING_USE_QUICKSEEK, 1);
+    st.setSetting(SETTING_SEQUENCE_MS, 40);
+    st.setSetting(SETTING_SEEKWINDOW_MS, 20);
+    st.setSetting(SETTING_OVERLAP_MS, 8);
+
+    // Working interleaved buffers
+    constexpr int kChunk = 2048;
+    std::vector<float> inInterleaved((size_t) kChunk * (size_t) srcChannels);
+    std::vector<float> outInterleaved((size_t) kChunk * (size_t) srcChannels);
+
+    // Destination: tempo=1.0 produces ~same length; over-allocate +2 sec
+    // headroom and trim at the end.
+    const int destCap = srcSamples + (int) (srcSr * 2.0);
+    auto dst = std::make_shared<juce::AudioBuffer<float>>(srcChannels, destCap);
+    dst->clear();
+    int outWritten = 0;
+
+    // Cache read pointers
+    std::vector<const float*> readers((size_t) srcChannels);
+    for (int ch = 0; ch < srcChannels; ++ch)
+        readers[(size_t) ch] = stem->audioBuffer.getReadPointer(ch);
+
+    int inPos = 0;
+    int chunkCounter = 0;
+    while (inPos < srcSamples)
+    {
+        // Supersession check every 8 chunks (~16k samples).
+        if ((chunkCounter++ & 0x07) == 0)
+        {
+            if (slot.generation.load(std::memory_order_acquire) != generation
+                || destroyed_.load(std::memory_order_acquire))
+            {
+                slot.rendering.store(false, std::memory_order_release);
+                juce::Logger::writeToLog("[MidiMappingService] ❌ renderPitchedStem stem="
+                    + juce::String(stemIdx) + " — newer request superseded, aborting");
+                return;
+            }
+        }
+
+        const int n = juce::jmin(kChunk, srcSamples - inPos);
+        // Interleave
+        for (int i = 0; i < n; ++i)
+            for (int ch = 0; ch < srcChannels; ++ch)
+                inInterleaved[(size_t) i * (size_t) srcChannels + (size_t) ch]
+                    = readers[(size_t) ch][inPos + i];
+
+        st.putSamples(inInterleaved.data(), (juce::uint32) n);
+
+        // Drain any output produced
+        for (;;)
+        {
+            const juce::uint32 got = st.receiveSamples(outInterleaved.data(), (juce::uint32) kChunk);
+            if (got == 0) break;
+            const int gi = (int) got;
+            if (outWritten + gi > destCap) break; // safety
+            for (int i = 0; i < gi; ++i)
+                for (int ch = 0; ch < srcChannels; ++ch)
+                    dst->getWritePointer(ch)[outWritten + i]
+                        = outInterleaved[(size_t) i * (size_t) srcChannels + (size_t) ch];
+            outWritten += gi;
+        }
+
+        inPos += n;
+    }
+
+    // Flush remaining samples
+    st.flush();
+    for (;;)
+    {
+        const juce::uint32 got = st.receiveSamples(outInterleaved.data(), (juce::uint32) kChunk);
+        if (got == 0) break;
+        const int gi = (int) got;
+        if (outWritten + gi > destCap) break;
+        for (int i = 0; i < gi; ++i)
+            for (int ch = 0; ch < srcChannels; ++ch)
+                dst->getWritePointer(ch)[outWritten + i]
+                    = outInterleaved[(size_t) i * (size_t) srcChannels + (size_t) ch];
+        outWritten += gi;
+    }
+
+    // Trim to actual produced length
+    if (outWritten < destCap)
+    {
+        auto trimmed = std::make_shared<juce::AudioBuffer<float>>(srcChannels, juce::jmax(1, outWritten));
+        for (int ch = 0; ch < srcChannels; ++ch)
+            trimmed->copyFrom(ch, 0, *dst, ch, 0, juce::jmax(1, outWritten));
+        dst = trimmed;
+    }
+
+    const double ratio = srcSamples > 0
+        ? (double) outWritten / (double) srcSamples : 1.0;
+
+    const auto t1 = std::chrono::steady_clock::now();
+    const auto ms = std::chrono::duration_cast<std::chrono::milliseconds>(t1 - t0).count();
+
+    // Final supersession check before swapping in.
+    if (slot.generation.load(std::memory_order_acquire) != generation
+        || destroyed_.load(std::memory_order_acquire))
+    {
+        slot.rendering.store(false, std::memory_order_release);
+        juce::Logger::writeToLog("[MidiMappingService] ❌ renderPitchedStem stem="
+            + juce::String(stemIdx) + " — superseded post-render, discarding result");
+        return;
+    }
+
+    // Swap
+    {
+        juce::SpinLock::ScopedLockType lk(slot.bufferLock);
+        slot.pitchedBuffer = dst;
+        slot.renderedSemi.store(semi, std::memory_order_release);
+        slot.pitchedLengthRatio.store(ratio, std::memory_order_release);
+    }
+    slot.rendering.store(false, std::memory_order_release);
+
+    juce::Logger::writeToLog("[MidiMappingService] ✅ renderPitchedStem DONE stem="
+        + juce::String(stemIdx) + " semi=" + juce::String(semi, 2)
+        + " in=" + juce::String(srcSamples) + " out=" + juce::String(outWritten)
+        + " ratio=" + juce::String(ratio, 6) + " time=" + juce::String((int) ms) + "ms");
+
+    // Notify UI
+    juce::MessageManager::callAsync([this, stemIdx, semi]()
+    {
+        if (destroyed_.load(std::memory_order_acquire)) return;
+        auto* payload = new juce::DynamicObject();
+        payload->setProperty("stemIndex", stemIdx);
+        payload->setProperty("semi", semi);
+        bus_.publish("smode.stem.pitch.rendered", juce::var(payload));
+    });
+#else
+    juce::ignoreUnused(stemIdx, semi, generation);
+    juce::Logger::writeToLog("[MidiMappingService] WITH_SOUNDTOUCH not defined — renderPitchedStem skipped");
+#endif
+}
+#endif // 0  end of dead offline render code
 
 } // namespace samplar

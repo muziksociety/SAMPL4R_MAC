@@ -99,9 +99,27 @@ else()
   set(LTE_FOUND FALSE)
 endif()
 
-# Optional: SoundTouch for constant-pitch preview
+# Optional: SoundTouch for constant-pitch preview (offline path only — see
+# src/audio/Preview/SoundTouchSource.h). The realtime audio-path pitch
+# shifter is now signalsmith-stretch (vendored, see below).
 option(WITH_SOUNDTOUCH "Enable SoundTouch for constant-pitch time-stretch preview" ON)
 option(WITH_ZEROMQ "Enable ZeroMQ IPC clients (Python bridge)" OFF)
+
+# signalsmith-stretch — MIT, header-only realtime pitch shifter used by
+# MidiMappingService for stem + voice pitch in the audio path. Vendored
+# at third_party/signalsmith-stretch (depends on third_party/signalsmith-linear).
+option(WITH_SIGNALSMITH_STRETCH "Enable signalsmith-stretch realtime pitch shifter" ON)
+set(SIGNALSMITH_STRETCH_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/signalsmith-stretch")
+set(SIGNALSMITH_LINEAR_DIR  "${CMAKE_CURRENT_LIST_DIR}/third_party/signalsmith-linear")
+if(WITH_SIGNALSMITH_STRETCH)
+  if(NOT EXISTS "${SIGNALSMITH_STRETCH_DIR}/signalsmith-stretch.h")
+    message(FATAL_ERROR "WITH_SIGNALSMITH_STRETCH=ON but ${SIGNALSMITH_STRETCH_DIR}/signalsmith-stretch.h not found. Run the vendor step.")
+  endif()
+  if(NOT EXISTS "${SIGNALSMITH_LINEAR_DIR}/include/signalsmith-linear/stft.h")
+    message(FATAL_ERROR "WITH_SIGNALSMITH_STRETCH=ON but ${SIGNALSMITH_LINEAR_DIR}/include/signalsmith-linear/stft.h not found. Run the vendor step.")
+  endif()
+  message(STATUS "signalsmith-stretch: ENABLED (vendored)")
+endif()
 
 # Developer-only fallback: when ON, bakes the project's SAMPLAR_Portable path
 # into the built VST3 so the installed plugin can still locate Python /
@@ -210,6 +228,7 @@ set(SAMPLAR_SOURCES
   src/ui/Debug/DebugConsole.cpp
   src/ui/Debug/DebugFlags.cpp
   src/ui/Style/Sm5LookAndFeel.cpp
+  src/ui/Style/SamplarLookAndFeel.cpp
   src/ui/Style/DropZoneLookAndFeel.cpp
   src/ui/Style/TransparentHoverButtonLookAndFeel.cpp
   src/app/ServiceRegistry.cpp
@@ -272,8 +291,8 @@ juce_add_gui_app(SamplarApp
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "com.muziksociety.samplar"
     VERSION "0.1.0"
-    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/plugins/REF.png"
-    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/plugins/REF.png"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
 
 target_compile_definitions(SamplarApp PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
@@ -319,6 +338,14 @@ target_include_directories(SamplarApp PRIVATE ${CMAKE_BINARY_DIR}/generated)
 
 if(WITH_SOUNDTOUCH AND SOUNDTOUCH_INCLUDE_DIR)
   target_include_directories(SamplarApp PRIVATE ${SOUNDTOUCH_INCLUDE_DIR})
+endif()
+
+if(WITH_SIGNALSMITH_STRETCH)
+  target_include_directories(SamplarApp PRIVATE
+    ${SIGNALSMITH_STRETCH_DIR}
+    ${SIGNALSMITH_LINEAR_DIR}/include
+  )
+  target_compile_definitions(SamplarApp PRIVATE WITH_SIGNALSMITH_STRETCH=1)
 endif()
 
 target_link_libraries(SamplarApp
@@ -444,6 +471,10 @@ juce_add_binary_data(SamplarResources SOURCES
   # Loading animation sprite sheet (11x11 grid of 400x172 frames, 121 frames total)
   ${CMAKE_CURRENT_LIST_DIR}/loading_spritesheet.png
 
+  # In-app SAMPLAR logo (top bar). 800x525 PNG (~200 KB), generated from
+  # logo.png at the repo root via assets/generate_icon.py.
+  ${CMAKE_CURRENT_LIST_DIR}/assets/samplar_logo.png
+
   # NOTE: Snake/Flappy/Shooter game assets removed (Games feature stripped from SAMPLAR)
   # NOTE: All BACKGROUNDS/ files are NOT embedded here:
   #   TILESET.png        22 MB  ? ~132 MB C++ source
@@ -476,8 +507,8 @@ juce_add_plugin(SamplarPlugin
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
     FORMATS VST3                       # VST3 only for now; standalone stays as SamplarApp
     VST3_CATEGORIES "Instrument" "Sampler" "Drum"
-    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/plugins/REF.png"
-    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/plugins/REF.png"
+    ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
+    ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
 
 # Plugin sources: shared SAMPLAR_SOURCES minus App.cpp, plus plugin entry points
@@ -506,6 +537,14 @@ target_include_directories(SamplarPlugin PRIVATE
 
 if(WITH_SOUNDTOUCH AND SOUNDTOUCH_INCLUDE_DIR)
     target_include_directories(SamplarPlugin PRIVATE ${SOUNDTOUCH_INCLUDE_DIR})
+endif()
+
+if(WITH_SIGNALSMITH_STRETCH)
+    target_include_directories(SamplarPlugin PRIVATE
+        ${SIGNALSMITH_STRETCH_DIR}
+        ${SIGNALSMITH_LINEAR_DIR}/include
+    )
+    target_compile_definitions(SamplarPlugin PRIVATE WITH_SIGNALSMITH_STRETCH=1)
 endif()
 
 target_link_libraries(SamplarPlugin

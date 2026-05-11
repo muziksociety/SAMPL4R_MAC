@@ -191,13 +191,16 @@ void ProcessingPage::extractBorderTiles(const juce::Image& fullTileset)
 
 void ProcessingPage::preloadResources()
 {
-    // Preload GIF background to avoid lag when navigating to this page
+    // Preload GIF background to avoid lag when navigating to this page.
+    // ASYNC: file I/O + LZW decode runs on a background thread so the message
+    // thread (and the editor open animation) is never blocked. Frames swap in
+    // when ready via MessageManager::callAsync.
     if (!gifLoaded_ && gifBackground_)
     {
-        juce::Logger::writeToLog("[ProcessingPage] Preloading GIF background...");
-        gifBackground_->loadRandomBackground();
-        gifLoaded_ = true;
-        juce::Logger::writeToLog("[ProcessingPage] GIF background preloaded");
+        juce::Logger::writeToLog("[ProcessingPage] Preloading GIF background (async)...");
+        gifBackground_->loadRandomBackgroundAsync();
+        gifLoaded_ = true;  // mark as kicked-off so we don't re-trigger
+        juce::Logger::writeToLog("[ProcessingPage] GIF preload kicked off (background thread)");
     }
 }
 
@@ -485,13 +488,12 @@ void ProcessingPage::visibilityChanged()
 
     if (isVisible())
     {
-        // Lazy load the GIF background on first visibility
+        // Lazy load the GIF background on first visibility (async — never blocks UI).
         if (!gifLoaded_ && gifBackground_)
         {
-            juce::Logger::writeToLog("[ProcessingPage] First visibility - loading GIF background...");
-            gifBackground_->loadRandomBackground();
+            juce::Logger::writeToLog("[ProcessingPage] First visibility - kicking off async GIF load...");
+            gifBackground_->loadRandomBackgroundAsync();
             gifLoaded_ = true;
-            juce::Logger::writeToLog("[ProcessingPage] GIF background loaded");
         }
 
         // Start animations when page becomes visible

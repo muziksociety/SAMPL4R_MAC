@@ -550,9 +550,15 @@ void SequencerSlotComponent::mouseDoubleClick(const juce::MouseEvent&)
     auto* seg = model_->getSegment(slot_.stemIndex, slot_.segmentIndex);
     if (!stem || !seg) return;
 
+    // Realtime pitch path: read raw stem buffer; pitch is applied via
+    // SoundTouch in the voice rendering loop when we pass stemIdx below.
     const auto& srcBuf = stem->audioBuffer;
-    int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-    int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+    juce::Logger::writeToLog("[SequencerSlot] playSegment stem=" + juce::String(slot_.stemIndex)
+        + " (realtime pitch via voice)");
+
+    int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+    int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
     int64_t segLen = segEnd - segStart;
     if (segLen <= 0) return;
 
@@ -614,7 +620,7 @@ void SequencerSlotComponent::mouseDoubleClick(const juce::MouseEvent&)
         if (midiSvc)
         {
             midiSvc->stopAllVoices();
-            midiSvc->playBufferDirect(buf, sampleRate_, 1.0f);
+            midiSvc->playBufferDirect(buf, sampleRate_, 1.0f, false, slot_.stemIndex);
         }
     }
 

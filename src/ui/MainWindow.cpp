@@ -19,6 +19,7 @@
 #include "../app/MultiLogger.h"
 #include "../utils/LogPaths.h"
 #include "Style/Sm5LookAndFeel.h"
+#include "Style/SamplarLookAndFeel.h"
 #include "Debug/DebugFlags.h"
 #include "Components/SettingsDialog.h"
 #include "Components/NotificationButton.h"
@@ -478,6 +479,37 @@ public:
                 if (!*alive) return;
                 juce::Logger::writeToLog("[MainWindow] SModePage requested separation for: " + f.getFullPathName());
 
+                // Guard: if separation is already running, show a toast and bail out.
+                if (smodeService_ && smodeService_->getSeparation().isSeparating())
+                {
+                    juce::Logger::writeToLog("[MainWindow] Ignoring Load Audio — separation already in progress");
+                    juce::AlertWindow::showAsync(
+                        juce::MessageBoxOptions()
+                            .withIconType(juce::MessageBoxIconType::InfoIcon)
+                            .withTitle("Separation in progress")
+                            .withMessage("A stem separation is already running.\nPlease wait for it to finish before loading a new file.")
+                            .withButton("OK"),
+                        nullptr);
+                    return;
+                }
+                // Also check via ServiceLocator in case smodeService_ hasn't been cached yet
+                if (!smodeService_) {
+                    auto* reg = samplar::ServiceLocator::getRegistry();
+                    if (reg) smodeService_ = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
+                }
+                if (smodeService_ && smodeService_->getSeparation().isSeparating())
+                {
+                    juce::Logger::writeToLog("[MainWindow] Ignoring Load Audio — separation already in progress (late check)");
+                    juce::AlertWindow::showAsync(
+                        juce::MessageBoxOptions()
+                            .withIconType(juce::MessageBoxIconType::InfoIcon)
+                            .withTitle("Separation in progress")
+                            .withMessage("A stem separation is already running.\nPlease wait for it to finish before loading a new file.")
+                            .withButton("OK"),
+                        nullptr);
+                    return;
+                }
+
                 samplar::StemCountDialog::show(this, [this, alive, f](int stemCount) {
                     if (!*alive) return;
                     juce::Logger::writeToLog("[MainWindow] S-Mode stem count selected: " + juce::String(stemCount));
@@ -495,7 +527,8 @@ public:
                     if (auto* bus = samplar::ServiceLocator::getBus()) {
                         smodeWorkflowReadySub_ = bus->subscribe("smode.workflow.ready", [this, alive](const juce::var&) {
                             if (!*alive) return;
-                            juce::Logger::writeToLog("[MainWindow] S-Mode workflow ready - hiding ProcessingPage overlay");
+                            juce::Logger::writeToLog("[MainWindow] S-Mode workflow ready - loading bars off, stems loading");
+                            smodePage_.setStemLoadingState(false);
                             smodePage_.onStemsReady(*smodeService_);
                             processing_.setVisible(false);
                             smodePage_.resized();
@@ -511,6 +544,7 @@ public:
                         smodeWorkflowErrorSub_ = bus->subscribe("smode.workflow.error", [this, alive](const juce::var& err) {
                             if (!*alive) return;
                             juce::Logger::writeToLog("[MainWindow] S-Mode error: " + err.toString());
+                            smodePage_.setStemLoadingState(false);
                             processing_.setVisible(false);
                             juce::AlertWindow::showMessageBoxAsync(
                                 juce::AlertWindow::WarningIcon,
@@ -522,16 +556,24 @@ public:
 
                         bus->subscribe("smode.separation.progress", [this, alive](const juce::var& pct) {
                             if (!*alive) return;
-                            processing_.setProgress(static_cast<double>((int)pct));
+                            const int pctInt = static_cast<int>(pct);
+                            processing_.setProgress(static_cast<double>(pctInt));
+                            // Forward real progress to per-lane loading bars (0..100 → 0.0..1.0)
+                            const float p01 = juce::jlimit(0.0f, 1.0f, static_cast<float>(pctInt) / 100.0f);
+                            juce::Logger::writeToLog("[MainWindow] smode.separation.progress → " + juce::String(pctInt) + "% → setStemLoadingProgress");
+                            smodePage_.setStemLoadingProgress(p01);
                         });
                     }
 
-                    // Show ProcessingPage as overlay during separation
+                    // FIX3: Show per-lane loading bars instead of the full-screen ProcessingPage overlay.
+                    // ProcessingPage is suppressed (not shown) so SModePage stays fully visible.
                     processing_.resetForNewJob();
                     processing_.setInputFile(f);
                     processing_.setProcessMode(2);
-                    processing_.setVisible(true);
-                    processing_.toFront(false);
+                    // processing_.setVisible(true);  // suppressed — per-lane loading bars handle UX
+                    smodePage_.setStemLoadingProgress(0.0f);  // reset bars to 0% before starting
+                    smodePage_.beginSeparationVisuals(stemCount);  // pre-create N placeholder lanes
+                    smodePage_.setStemLoadingState(true);
 
                     auto sc = (stemCount == 6)
                         ? samplar::SModeSeparationService::StemCount::Six
@@ -1311,7 +1353,7 @@ private:
     bool debugVisible_ { false };
     int f1Count_ { 0 };
     const int resetMs_ { 4000 };
-    samplar::Sm5LookAndFeel lnf_;
+    samplar::SamplarLookAndFeel lnf_;
     // Window control buttons (macOS-style traffic lights + settings)
     ExitButton exitBtn_;
     PinButton pinBtn_;
@@ -1766,8 +1808,8 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] RootComponent set as content");
 
         juce::Logger::writeToLog("???? [MainWindow] About to set window size");
-        setSize(1100, 750);
-        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1100x750");
+        setSize(1500, 1024);
+        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1500x1024");
 
         juce::Logger::writeToLog("???? [MainWindow] About to attach EventBus");
         if (auto* root = dynamic_cast<RootComponent*>(getContentComponent()))
@@ -1775,7 +1817,7 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] EventBus attached");
 
         juce::Logger::writeToLog("???? [MainWindow] About to center window");
-        centreWithSize(1100, 750);
+        centreWithSize(1500, 1024);
         juce::Logger::writeToLog("???? [MainWindow] Window centered");
 
         juce::Logger::writeToLog("???? [MainWindow] About to make window visible");

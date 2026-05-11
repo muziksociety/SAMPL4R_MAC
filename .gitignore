@@ -388,3 +388,6 @@ dmypy.json
 
 # Tutorial generator artefacts
 tools/tutorial_gen/out/
+
+# AI separation models (downloaded separately, 680MB)
+models/

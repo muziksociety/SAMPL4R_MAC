@@ -1,0 +1,58 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<svg xmlns="http://www.w3.org/2000/svg"
+     viewBox="0 0 256 256"
+     width="256" height="256"
+     preserveAspectRatio="xMidYMid meet">
+  <title>SAMPL4R - S monogram</title>
+
+  <defs>
+    <!-- Horizontal gradient: cyan -> light cyan -> purple, mirroring SamplarLogo::paint() -->
+    <linearGradient id="samplar-grad" x1="0%" y1="50%" x2="100%" y2="50%">
+      <stop offset="0%"   stop-color="#00E5FF"/>
+      <stop offset="50%"  stop-color="#78C8FF"/>
+      <stop offset="100%" stop-color="#B478FF"/>
+    </linearGradient>
+
+    <!-- Soft cyan outer glow, matching the four-pass stroke glow used in JUCE -->
+    <filter id="samplar-glow" x="-50%" y="-50%" width="200%" height="200%">
+      <feGaussianBlur in="SourceGraphic" stdDeviation="6" result="blur"/>
+      <feFlood flood-color="#00E5FF" flood-opacity="0.55" result="flood"/>
+      <feComposite in="flood" in2="blur" operator="in" result="glow"/>
+      <feMerge>
+        <feMergeNode in="glow"/>
+        <feMergeNode in="SourceGraphic"/>
+      </feMerge>
+    </filter>
+
+    <!-- Subtle inner highlight (top edge metallic shine) -->
+    <linearGradient id="samplar-shine" x1="50%" y1="0%" x2="50%" y2="100%">
+      <stop offset="0%"   stop-color="#FFFFFF" stop-opacity="0.35"/>
+      <stop offset="40%"  stop-color="#FFFFFF" stop-opacity="0"/>
+      <stop offset="100%" stop-color="#FFFFFF" stop-opacity="0"/>
+    </linearGradient>
+  </defs>
+
+  <!-- Optional dark backdrop circle. Comment out if you want a transparent background. -->
+  <circle cx="128" cy="128" r="120" fill="#0A0F18" opacity="0.0"/>
+
+  <!-- Glowing gradient-filled S -->
+  <g filter="url(#samplar-glow)">
+    <text x="128" y="194"
+          font-family="'Inter', 'Helvetica Neue', 'Arial Black', sans-serif"
+          font-weight="900"
+          font-size="220"
+          letter-spacing="-6"
+          text-anchor="middle"
+          fill="url(#samplar-grad)">S</text>
+  </g>
+
+  <!-- Inner highlight pass over the same glyph for a glassy edge -->
+  <text x="128" y="194"
+        font-family="'Inter', 'Helvetica Neue', 'Arial Black', sans-serif"
+        font-weight="900"
+        font-size="220"
+        letter-spacing="-6"
+        text-anchor="middle"
+        fill="url(#samplar-shine)"
+        pointer-events="none">S</text>
+</svg>

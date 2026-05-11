@@ -49,9 +49,9 @@ SamplarAudioProcessorEditor::SamplarAudioProcessorEditor(SamplarAudioProcessor& 
         addAndMakeVisible(*rootComponent_);
     }
 
-    setSize(1100, 750);
+    setSize(1500, 1024);
     setResizable(true, true);
-    setResizeLimits(800, 500, 2560, 1600);
+    setResizeLimits(1200, 700, 2560, 1600);
 
     juce::Logger::writeToLog("[SamplarAudioProcessorEditor] === CONSTRUCTOR END ===");
 }
@@ -78,7 +78,7 @@ void SamplarAudioProcessorEditor::paint(juce::Graphics& g)
 {
     if (!rootComponent_)
     {
-        // License failed — show error
+        // License failed ï¿½ show error
         g.fillAll(juce::Colour(0xff1a1a2e));
         g.setColour(juce::Colours::white);
         g.setFont(18.0f);

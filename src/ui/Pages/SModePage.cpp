@@ -1,10 +1,12 @@
 ﻿#include "SModePage.h"
 #include "../../utils/Tracing.h"
+#include "../../utils/RecentSongs.h"
 #include "../../app/ServiceLocator.h"
 #include "../../app/ServiceRegistry.h"
 #include "../../services/MidiMappingService.h"
 // SAMPLAR: removed - MentorService deleted
 #include "../../services/smode/SpectralFluxDetector.h"
+#include "../../services/analysis/HybridTempoDetector.h"
 #include "../../audio/MicroFade.h"
 
 namespace samplar {
@@ -137,8 +139,65 @@ SModePage::SModePage(EventBus& bus)
                         + juce::String((int) snaps.size()) + " lanes (2-pass layout)");
                 }
             });
+
+        // ── Per-stem pitch persistence ──────────────────────────────────────
+        // Saved as a flat array of semitone values, one per stem index.
+        stemPitchBinding_ = std::make_unique<samplar::ScopedStateBinding>(
+            *app,
+            samplar::StateBinding {
+                juce::Identifier("smodeStemPitch"), 1,
+                // save: pull from MidiMappingService (it's the source of truth)
+                [this](juce::ValueTree& t)
+                {
+                    t.removeAllProperties(nullptr);
+                    samplar::MidiMappingService* midiSvc = nullptr;
+                    if (auto* reg = samplar::ServiceLocator::getRegistry())
+                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+                    for (int i = 0; i < samplar::MidiMappingService::MAX_STEMS; ++i)
+                    {
+                        const float v = midiSvc ? midiSvc->getStemPitchSemitones(i) : 0.0f;
+                        t.setProperty(juce::Identifier("p" + juce::String(i)), v, nullptr);
+                    }
+                    juce::Logger::writeToLog("[smodeStemPitch-binding] saved");
+                },
+                // restore: push into MidiMappingService AND each visible lane's knob
+                [this](const juce::ValueTree& t)
+                {
+                    samplar::MidiMappingService* midiSvc = nullptr;
+                    if (auto* reg = samplar::ServiceLocator::getRegistry())
+                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+                    for (int i = 0; i < samplar::MidiMappingService::MAX_STEMS; ++i)
+                    {
+                        const float v = (float) (double) t.getProperty(
+                            juce::Identifier("p" + juce::String(i)), 0.0);
+                        if (midiSvc) midiSvc->setStemPitchSemitones(i, v);
+                        if (i < (int) stemWaveforms_.size() && stemWaveforms_[(size_t) i])
+                            stemWaveforms_[(size_t) i]->setPitchSemitones(v);
+                    }
+                    juce::Logger::writeToLog("[smodeStemPitch-binding] restored");
+                }
+            });
     }
 
+
+    // ── Top-bar additions (Phase 1 visual build-out) ────────────────────
+    // Logo label
+    addAndMakeVisible(logoLabel_);
+    // SamplarLogo paints itself (gradient fill + cyan glow); no text/font setters.
+
+    // Play/Stop toggle button — BigPlayButton paints triangle (stopped) or square (playing)
+    addAndMakeVisible(playBtn_);
+    playBtn_.onClick = [this]()
+    {
+        if (!smodeService_) return;
+        if (transportPlaying_) stopTransport();
+        else startTransport(playheadTimeSec_);
+    };
+
+    // (Stem status indicators removed — MainWindow already has these ball buttons at top.)
+
+    // (presetCombo_ removed — divisionCombo_ is the real measure/grid selector.)
+    // ── End top-bar additions ────────────────────────────────────────────
 
     // Header
     addAndMakeVisible(titleLabel_);
@@ -865,7 +924,7 @@ SModePage::SModePage(EventBus& bus)
     // LOAD SONG button — primary entry point for S-Mode separation
     // (also accepts drag-drop via FileDragAndDropTarget)
     addAndMakeVisible(loadSongBtn_);
-    loadSongBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff3a3a5c));
+    loadSongBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(116, 82, 255));  // purple/blue
     loadSongBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     loadSongBtn_.setTooltip("Drop a song here or click to choose a file for S-Mode separation");
     loadSongBtn_.onClick = [this]() { openLoadAudioChooser(); };
@@ -873,6 +932,16 @@ SModePage::SModePage(EventBus& bus)
     // Empty-state overlay — sits on top of all other children
     addAndMakeVisible(loadAudioOverlay_);
     loadAudioOverlay_.onLoad = [this]() { openLoadAudioChooser(); };
+    loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+    loadAudioOverlay_.onLoadRecent = [this](const juce::File& f) {
+        if (!f.existsAsFile()) return;  // overlay handles missing entries itself
+        juce::Logger::writeToLog("[SModePage] " + juce::String(juce::CharPointer_UTF8("\xf0\x9f\x93\x81"))
+                                 + " recent click: " + f.getFullPathName());
+        samplar::RecentSongs::push(f);  // bumps it back to the top
+        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+        if (onRequestSeparation)
+            onRequestSeparation(f);
+    };
     loadAudioOverlay_.setVisible(true);   // start visible (no audio loaded yet)
 
     // Register as KeyListener so spacebar/shortcuts work regardless of which child has focus
@@ -910,9 +979,74 @@ void SModePage::openLoadAudioChooser()
             if (results.isEmpty()) return;
             juce::File chosen = results[0];
             juce::Logger::writeToLog("[SModePage] File chosen: " + chosen.getFullPathName());
+            samplar::RecentSongs::push(chosen);
+            loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
             if (onRequestSeparation)
                 onRequestSeparation(chosen);
         });
+}
+
+void SModePage::beginSeparationVisuals(int stemCount)
+{
+    juce::Logger::writeToLog("[SModePage] === beginSeparationVisuals stemCount=" + juce::String(stemCount) + " ===");
+
+    stemWaveforms_.clear();
+
+    // Reset the placeholder model so it carries no stale data
+    placeholderModel_.clear();
+    placeholderModel_.setStemCount(stemCount);
+
+    // Helper: returns (bgA, bgB) gradient pair for a stem index.
+    // Order matches SModeSeparationService 4-stem output:
+    // 0=Vocals(blue), 1=Bass(red), 2=Drums(teal), 3+=Melody/other(green)
+    auto stemTheme = [](int idx) -> std::pair<juce::Colour, juce::Colour>
+    {
+        switch (idx)
+        {
+            case 0:  return { juce::Colour::fromRGB(8,  21, 34), juce::Colour::fromRGB(15, 35, 54) };  // vocals: blue
+            case 1:  return { juce::Colour::fromRGB(30,  9, 12), juce::Colour::fromRGB(54, 18, 22) };  // bass: red
+            case 2:  return { juce::Colour::fromRGB(5,  22, 28), juce::Colour::fromRGB(9,  42, 50) };  // drums: teal
+            default: return { juce::Colour::fromRGB(5,  24, 16), juce::Colour::fromRGB(11, 46, 28) };  // melody/other: green
+        }
+    };
+
+    auto kindFor = [](int idx) {
+        // Match SModeSeparationService 4-stem order: Vocals/Bass/Drums/Melody.
+        switch (idx) {
+            case 0: return StemWaveformComponent::StemKind::Vocals;
+            case 1: return StemWaveformComponent::StemKind::Bass;
+            case 2: return StemWaveformComponent::StemKind::Drums;
+            default: return StemWaveformComponent::StemKind::Melody;
+        }
+    };
+
+    for (int i = 0; i < stemCount; ++i)
+    {
+        auto colour = getStemColour(i);
+        auto wf = std::make_unique<StemWaveformComponent>(placeholderModel_, i, colour);
+        auto [bgA, bgB] = stemTheme(i);
+        wf->setBackgroundGradient(bgA, bgB);
+        wf->setStemKind(kindFor(i));
+        wf->onStemHovered = [this](int stemIdx)
+        {
+            for (int j = 0; j < static_cast<int>(stemWaveforms_.size()); ++j)
+            {
+                const float a = (stemIdx < 0 || j == stemIdx) ? 1.0f : 0.3f;
+                if (stemWaveforms_[static_cast<size_t>(j)])
+                    stemWaveforms_[static_cast<size_t>(j)]->setAlpha(a);
+            }
+        };
+        wf->setLoadingState(true);
+        addAndMakeVisible(*wf);
+        stemWaveforms_.push_back(std::move(wf));
+    }
+
+    // Hide the empty-state overlay while separation is running
+    loadAudioOverlay_.setVisible(false);
+
+    juce::Logger::writeToLog("[SModePage] beginSeparationVisuals: created " + juce::String(stemWaveforms_.size()) + " placeholder lanes");
+    resized();
+    repaint();
 }
 
 void SModePage::onStemsReady(SModeService& service)
@@ -995,11 +1129,47 @@ void SModePage::onStemsReady(SModeService& service)
 
     stemWaveforms_.clear();
 
+    // Helper: returns (bgA, bgB) gradient pair for a stem index.
+    // Order matches SModeSeparationService 4-stem output:
+    // 0=Vocals(blue), 1=Bass(red), 2=Drums(teal), 3+=Melody/other(green)
+    auto stemTheme = [](int idx) -> std::pair<juce::Colour, juce::Colour>
+    {
+        switch (idx)
+        {
+            case 0:  return { juce::Colour::fromRGB(8,  21, 34), juce::Colour::fromRGB(15, 35, 54) };  // vocals: blue
+            case 1:  return { juce::Colour::fromRGB(30,  9, 12), juce::Colour::fromRGB(54, 18, 22) };  // bass: red
+            case 2:  return { juce::Colour::fromRGB(5,  22, 28), juce::Colour::fromRGB(9,  42, 50) };  // drums: teal
+            default: return { juce::Colour::fromRGB(5,  24, 16), juce::Colour::fromRGB(11, 46, 28) };  // melody/other: green
+        }
+    };
+
+    auto kindFor2 = [](int idx) {
+        // Match SModeSeparationService 4-stem order: Vocals/Bass/Drums/Melody.
+        switch (idx) {
+            case 0: return StemWaveformComponent::StemKind::Vocals;
+            case 1: return StemWaveformComponent::StemKind::Bass;
+            case 2: return StemWaveformComponent::StemKind::Drums;
+            default: return StemWaveformComponent::StemKind::Melody;
+        }
+    };
+
     for (int i = 0; i < stemCount; ++i)
     {
         auto colour = getStemColour(i);
         auto wf = std::make_unique<StemWaveformComponent>(model, i, colour);
+        auto [bgA, bgB] = stemTheme(i);
+        wf->setBackgroundGradient(bgA, bgB);
+        wf->setStemKind(kindFor2(i));
         wf->setGridDivision(currentGridDivision_);  // Apply currently-selected grid division
+        wf->onStemHovered = [this](int stemIdx)
+        {
+            for (int j = 0; j < static_cast<int>(stemWaveforms_.size()); ++j)
+            {
+                const float a = (stemIdx < 0 || j == stemIdx) ? 1.0f : 0.3f;
+                if (stemWaveforms_[static_cast<size_t>(j)])
+                    stemWaveforms_[static_cast<size_t>(j)]->setAlpha(a);
+            }
+        };
 
         // L button: delegate mutual-exclusion with LINK ALL to the page.
         wf->onLinkToggled = [this](int stemIdx)
@@ -1172,9 +1342,12 @@ void SModePage::onStemsReady(SModeService& service)
                 auto* s = model.getSegment(si, sgi);
                 if (!stem || !s || s->getLengthSamples() <= 0 || stem->mute) continue;
 
+                // Realtime pitch path: read from raw stem buffer, pass stemIdx
+                // through to playBufferDirect so the voice uses SoundTouch.
                 const auto& srcBuf = stem->audioBuffer;
-                int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), s->startSample);
-                int64_t endSmp = juce::jlimit(startSmp, (int64_t)srcBuf.getNumSamples(), s->endSample);
+
+                int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) s->startSample);
+                int64_t endSmp   = juce::jlimit(startSmp,    (int64_t)srcBuf.getNumSamples(), (int64_t) s->endSample);
                 int segLen = static_cast<int>(endSmp - startSmp);
                 if (segLen <= 0) continue;
 
@@ -1183,7 +1356,10 @@ void SModePage::onStemsReady(SModeService& service)
                     segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
 
                 bool isLooping = loopBtn_.getToggleState();
-                midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, isLooping);
+                const float pitchSemi = midiSvc->getStemPitchSemitones(si);
+                juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(si)
+                    + " pitch=" + juce::String(pitchSemi, 2));
+                midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, isLooping, si);
 
                 double durSec = static_cast<double>(segLen) / modelSr;
                 stemWaveforms_[static_cast<size_t>(si)]->startSegmentAnimation(sgi, durSec, isLooping);
@@ -1407,6 +1583,19 @@ void SModePage::onStemsReady(SModeService& service)
             }
             midiLearnOverlay_.show(stemIdx, segIdx, stemName);
         };
+        wf->onPitchChanged = [this](int stemIdx, float semi)
+        {
+            juce::Logger::writeToLog("[SModePage] 🎵 stem pitch changed stem="
+                + juce::String(stemIdx) + " semi=" + juce::String(semi, 2));
+            if (auto* reg = samplar::ServiceLocator::getRegistry())
+            {
+                if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
+                    midiSvc->setStemPitchSemitones(stemIdx, semi);
+            }
+            // Mark project dirty so the AppState binding flushes on save.
+            if (auto* app = samplar::ServiceLocator::getAppState())
+                app->markDirty();
+        };
         wf->onFocusRequested = [this](int stemIdx) {
             // Toggle focus: if already focused on this stem, unfocus (show all non-removed)
             if (focusedStem_ == stemIdx)
@@ -1554,10 +1743,11 @@ void SModePage::paint(juce::Graphics& g)
 
         if (viewDur > 0.0 && playheadTimeSec_ >= viewStart && playheadTimeSec_ <= viewEnd)
         {
-            // Map time to X position in the strip (accounting for S/M/L control width = 32px)
+            // Map time to X position in the strip (offset past control panel = 178px)
             double frac = (playheadTimeSec_ - viewStart) / viewDur;
-            int stripWaveX = playheadStripArea_.getX() + 32;  // Offset past control buttons
-            int stripWaveW = playheadStripArea_.getWidth() - 32;
+            const int kStemControlW = 178;  // matches StemWaveformComponent's panel width
+            int stripWaveX = playheadStripArea_.getX() + kStemControlW;
+            int stripWaveW = playheadStripArea_.getWidth() - kStemControlW;
             int phX = stripWaveX + static_cast<int>(frac * stripWaveW);
 
             // Triangle marker (pointing down)
@@ -1586,46 +1776,69 @@ void SModePage::resized()
 {
     auto area = getLocalBounds().reduced(8);
 
-    // ── Header row (compact) ─────────────────────────────────────────
-    auto header = area.removeFromTop(30);
+    // ── Header row (1500×72 top bar) ──────────────────────────────────
     trackNameLabel_.setVisible(false);
     bpmLabel_.setVisible(false);
+    titleLabel_.setVisible(false);   // replaced by logoLabel_
+    transportBtn_.setVisible(false); // replaced by playBtn_
 
-    // Right side: LOAD SONG | TAP | LOCK | Dbl | Half | R | BPM input | BPM label
-    loadSongBtn_.setBounds(header.removeFromRight(90));
-    header.removeFromRight(4);
-    tapTempoBtn_.setBounds(header.removeFromRight(36));
-    header.removeFromRight(3);
-    gridLockBtn_.setBounds(header.removeFromRight(46));
-    header.removeFromRight(3);
-    doubleTempoBtn_.setBounds(header.removeFromRight(34));
-    header.removeFromRight(2);
-    halfTempoBtn_.setBounds(header.removeFromRight(38));
-    header.removeFromRight(2);
-    bpmRoundBtn_.setBounds(header.removeFromRight(22));
-    header.removeFromRight(2);
-    bpmInput_.setBounds(header.removeFromRight(52));
-    header.removeFromRight(2);
-    bpmTitleLabel_.setBounds(header.removeFromRight(42));
-    header.removeFromRight(10);
+    auto topBar = area.removeFromTop(72).reduced(14, 10);
 
-    // Grid subdivision selector (single combo box, left of BPM)
-    divisionCombo_.setBounds(header.removeFromRight(70));
-    divisionCombo_.toFront(false);  // Ensure popup renders above header siblings
-    header.removeFromRight(10);
+    // Zone 1: Logo (130px)
+    logoLabel_.setBounds(topBar.removeFromLeft(130));
 
-    // Left side: S-MODE | ▶ | Undo | Redo
-    titleLabel_.setBounds(header.removeFromLeft(72));
-    header.removeFromLeft(4);
-    transportBtn_.setBounds(header.removeFromLeft(30));
-    header.removeFromLeft(4);
-    loopBtn_.setBounds(header.removeFromLeft(50));
-    header.removeFromLeft(6);
-    undoBtn_.setBounds(header.removeFromLeft(46));
-    header.removeFromLeft(2);
-    redoBtn_.setBounds(header.removeFromLeft(46));
-    header.removeFromLeft(8);
-    dawSyncBtn_.setBounds(header.removeFromLeft(55));
+    // Zone 2: Transport (260px) — PLAY (56×52) + record circle + snapshot circle
+    {
+        auto transportArea = topBar.removeFromLeft(152);
+        playBtn_.setBounds(transportArea.removeFromLeft(56).withSizeKeepingCentre(56, 52));
+        transportArea.removeFromLeft(8);
+        loopBtn_.setBounds(transportArea.removeFromLeft(80).withSizeKeepingCentre(80, 36));
+    }
+
+    // Zone 3: Utility (230px) — Undo, Redo, DAW toggle
+    {
+        auto utilityArea = topBar.removeFromLeft(230);
+        undoBtn_.setBounds(utilityArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
+        utilityArea.removeFromLeft(6);
+        redoBtn_.setBounds(utilityArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
+        utilityArea.removeFromLeft(8);
+        dawSyncBtn_.setBounds(utilityArea.removeFromLeft(70));
+    }
+
+    // Zone 4: Stem status indicators (180px)
+    {
+        // (Stem status indicators removed — MainWindow has these in its top strip.)
+    }
+
+    // Zone 5: Grid division combo (was presetCombo_ — restored to divisionCombo_)
+    divisionCombo_.setBounds(topBar.removeFromLeft(100).withSizeKeepingCentre(96, 36));
+    divisionCombo_.toFront(false);  // ensure popup renders above siblings
+
+    // Zone 6: BPM (150px) — label + input + R button
+    {
+        auto bpmArea = topBar.removeFromLeft(150);
+        bpmTitleLabel_.setBounds(bpmArea.removeFromLeft(40));
+        bpmInput_.setBounds(bpmArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
+        bpmArea.removeFromLeft(4);
+        bpmRoundBtn_.setBounds(bpmArea.removeFromLeft(28).withSizeKeepingCentre(28, 28));
+    }
+
+    // Zone 7: Mode buttons (260px) — Half, Dbl, LOCK, TAP
+    {
+        auto modeArea = topBar.removeFromLeft(260);
+        halfTempoBtn_.setBounds(modeArea.removeFromLeft(54).withSizeKeepingCentre(54, 32));
+        modeArea.removeFromLeft(4);
+        doubleTempoBtn_.setBounds(modeArea.removeFromLeft(48).withSizeKeepingCentre(48, 32));
+        modeArea.removeFromLeft(4);
+        gridLockBtn_.setBounds(modeArea.removeFromLeft(60).withSizeKeepingCentre(60, 32));
+        modeArea.removeFromLeft(4);
+        tapTempoBtn_.setBounds(modeArea.removeFromLeft(54).withSizeKeepingCentre(54, 32));
+    }
+
+    // Zone 8: LOAD SONG (~190px remainder)
+    loadSongBtn_.setBounds(topBar.reduced(0, 6));
+
+    // divisionCombo_ is now visible in Zone 5 above — no off-screen override needed.
 
     // Flash label: bottom-left corner toast for undo/redo confirmations.
     {
@@ -2044,9 +2257,10 @@ void SModePage::playLoopedSegment(int stemIdx, int segIdx)
     midiSvc->stopAllVoices();
 
     const auto& srcBuf = stem->audioBuffer;
+
     double sr = model.getSampleRate();
-    int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-    int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), seg->endSample);
+    int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+    int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
     int len = static_cast<int>(endSmp - startSmp);
     if (len <= 0) { stopLoop(); return; }
 
@@ -2055,8 +2269,11 @@ void SModePage::playLoopedSegment(int stemIdx, int segIdx)
         segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), len);
 
     // Use voice-level looping (seamless wrap in audio engine) instead of
-    // timer-based re-triggering. This eliminates gaps between loop iterations.
-    midiSvc->playBufferDirect(segBuf, sr, 1.0f, true);
+    // timer-based re-triggering. Realtime pitch is applied via stemIdx.
+    const float pitchSemi = midiSvc->getStemPitchSemitones(stemIdx);
+    juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(stemIdx)
+        + " pitch=" + juce::String(pitchSemi, 2));
+    midiSvc->playBufferDirect(segBuf, sr, 1.0f, true, stemIdx);
 
     double durMs = (static_cast<double>(len) / sr) * 1000.0;
 
@@ -2086,8 +2303,12 @@ void SModePage::startTransport(double startTimeSeconds)
     {
         if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
         {
+            // Stop any segment-click / MIDI-triggered voices that are already playing
+            // so the global transport is the only audio source (Issue 1 fix).
+            midiSvc->stopAllVoices();
             midiSvc->startSModeTransport(startTimeSeconds);
             transportPlaying_ = true;
+            playBtn_.setPlaying(true);
             transportBtn_.setButtonText(juce::String::charToString(0x25A0));  // ■ stop
             transportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
             startTimerHz(30);  // 30fps playhead update
@@ -2105,6 +2326,7 @@ void SModePage::stopTransport()
     }
 
     transportPlaying_ = false;
+    playBtn_.setPlaying(false);
     transportBtn_.setButtonText(juce::String::charToString(0x25B6));  // ▶ play
     transportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d6d3a));
     stopTimer();
@@ -2146,8 +2368,9 @@ void SModePage::setPlayheadFromMouse(int x)
     if (stemWaveforms_.empty() || playheadStripArea_.isEmpty()) return;
 
     // Convert strip X to time using first waveform's view range
-    int stripWaveX = playheadStripArea_.getX() + 32;  // Past S/M/L control area
-    int stripWaveW = playheadStripArea_.getWidth() - 32;
+    const int kStemControlW = 178;  // matches StemWaveformComponent's panel width
+    int stripWaveX = playheadStripArea_.getX() + kStemControlW;
+    int stripWaveW = playheadStripArea_.getWidth() - kStemControlW;
     if (stripWaveW <= 0) return;
 
     double frac = static_cast<double>(x - stripWaveX) / stripWaveW;
@@ -2468,15 +2691,27 @@ void SModePage::runBpmDetectionOnDrumStem()
 
     std::thread([this, readPtrs, numChannels, numSamples, sampleRate]()
     {
-        // BeatAnalysisService removed — use fixed BPM placeholder
-        juce::ignoreUnused(readPtrs, numChannels, numSamples, sampleRate);
+        // Build a temporary AudioBuffer from the raw read-pointers (no copy of the
+        // sample data — just a referencing wrapper is not available on AudioBuffer,
+        // so we do a real copy here; drum stems are typically 2ch / < 10 min).
+        juce::AudioBuffer<float> buf(numChannels, numSamples);
+        for (int ch = 0; ch < numChannels; ++ch)
+            buf.copyFrom(ch, 0, readPtrs[ch], numSamples);
 
-        juce::MessageManager::callAsync([this]()
+        samplar::HybridTempoDetector detector;
+        samplar::HybridTempoDetector::Config cfg;
+        cfg.minBPM = 50.0f;
+        cfg.maxBPM = 220.0f;
+        auto result = detector.detect(buf, sampleRate, cfg);
+
+        double bpm = (result.bpm > 0.0f) ? static_cast<double>(result.bpm) : 120.0;
+        juce::Logger::writeToLog("✅ [SModePage] HybridTempoDetector: "
+            + juce::String(bpm, 2) + " BPM (confidence="
+            + juce::String(result.confidence, 2) + " source=" + result.getSourceName() + ")");
+
+        juce::MessageManager::callAsync([this, bpm]()
         {
             if (!smodeService_) return;
-
-            double bpm = 120.0;  // Fixed placeholder (BeatAnalysisService removed)
-            juce::Logger::writeToLog("✅ [SModePage] BPM placeholder: " + juce::String(bpm, 2));
             applyBpm(bpm);
         });
     }).detach();
@@ -2575,6 +2810,9 @@ void SModePage::addSequencerLane()
         auto buf = std::make_unique<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSmp));
         buf->clear();
 
+        // (Realtime pitch path: pre-rendered Play-All-mix uses raw stem buffers.
+        // The mix path itself is pre-rendered on the message thread so pitch
+        // is NOT applied to the offline mix. TODO: pre-mix-path realtime pitch.)
         auto& slots = lane2->getSlots();
         for (int i = 0; i < static_cast<int>(slots.size()); ++i)
         {
@@ -2585,8 +2823,9 @@ void SModePage::addSequencerLane()
             if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
 
             const auto& srcBuf = stem->audioBuffer;
-            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-            int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+            int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
             int64_t segLen = segEnd - segStart;
 
             int64_t writePos = static_cast<int64_t>(slot.gridCell * samplesPerBeat);
@@ -2645,8 +2884,9 @@ void SModePage::addSequencerLane()
         if (modelSr <= 0.0) modelSr = 44100.0;
 
         const auto& srcBuf = stem->audioBuffer;
-        int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-        int64_t endSmp = juce::jlimit(startSmp, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+        int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+        int64_t endSmp   = juce::jlimit(startSmp,    (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
         int segLen = static_cast<int>(endSmp - startSmp);
         if (segLen <= 0) return;
 
@@ -2654,7 +2894,10 @@ void SModePage::addSequencerLane()
         for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
             segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
 
-        midiSvc->playBufferDirect(segBuf, modelSr, 1.0f);
+        const float pitchSemi = midiSvc->getStemPitchSemitones(stemIdx);
+        juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(stemIdx)
+            + " pitch=" + juce::String(pitchSemi, 2));
+        midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, false, stemIdx);
     };
 
     addAndMakeVisible(lane.get());
@@ -2719,6 +2962,7 @@ void SModePage::playSequencerLane(int laneIndex)
         int gridCell;
         std::shared_ptr<juce::AudioBuffer<float>> buffer;  // nullptr for gaps
         int durationMs;
+        int stemIndex { -1 };  // For realtime SoundTouch pitch in voice path
     };
     std::vector<SlotPlay> schedule;
 
@@ -2735,9 +2979,16 @@ void SModePage::playSequencerLane(int laneIndex)
         auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
         if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
 
+        // (Sequencer-schedule mix is pre-rendered on the message thread —
+        // realtime pitch via voice path doesn't apply here. The single-segment
+        // playback below uses the realtime path via stemIdx.)
         const auto& srcBuf = stem->audioBuffer;
-        int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-        int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+        int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+        int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
+
+        juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(slot.stemIndex)
+            + " (offline mix path, no realtime pitch)");
 
         // Output duration in samples = cellSpan beats
         int64_t cellDurSamples = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
@@ -2831,7 +3082,7 @@ void SModePage::playSequencerLane(int laneIndex)
 
         // Duration: cellSpan * msPerCell (integer cell timing)
         int durMs = static_cast<int>(slot.cellSpan * msPerCell);
-        schedule.push_back({ i, slot.gridCell, buf, durMs });
+        schedule.push_back({ i, slot.gridCell, buf, durMs, slot.stemIndex });
     }
 
     if (schedule.empty()) return;
@@ -2920,7 +3171,8 @@ void SModePage::playSequencerLane(int laneIndex)
         if (sp.slotIndex >= 0 && sp.buffer)
         {
             ms->stopAllVoices();
-            ms->playBufferDirect(sp.buffer, modelSr, 1.0f);
+            // Pass stemIndex so realtime SoundTouch pitch applies during this slot.
+            ms->playBufferDirect(sp.buffer, modelSr, 1.0f, false, sp.stemIndex);
             sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayingSlot(sp.slotIndex);
         }
         else
@@ -3049,10 +3301,18 @@ void SModePage::playAllLanesSimultaneous()
             auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
             if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
 
+            // Play-All mix is pre-rendered offline → cannot use realtime
+            // SoundTouch (mix sums multiple stems into one buffer). TODO:
+            // either pre-mix-with-pitch on message thread, or replace this
+            // path with a multi-voice playBufferDirect using stemIdx per slot.
             const auto& srcBuf = stem->audioBuffer;
-            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-            int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+            int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
             int64_t segLen = segEnd - segStart;
+
+            juce::Logger::writeToLog("[SModePage] mixAllLanes stem=" + juce::String(slot.stemIndex)
+                + " (offline mix — pitch not applied)");
 
             // Grid position in samples
             int64_t writePos = static_cast<int64_t>(slot.gridCell * samplesPerBeat);
@@ -3200,11 +3460,17 @@ void SModePage::playLanesChained()
             auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
             if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
 
+            // Chained mix is pre-rendered (multi-stem concat) → realtime
+            // pitch via voice path doesn't apply. TODO if pitch needed here.
             const auto& srcBuf = stem->audioBuffer;
-            int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-            int64_t endSmp = juce::jlimit(startSmp, (int64_t)srcBuf.getNumSamples(), seg->endSample);
+
+            int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
+            int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
             int segLen = static_cast<int>(endSmp - startSmp);
             if (segLen <= 0 || writePos + segLen > chainBuf->getNumSamples()) continue;
+
+            juce::Logger::writeToLog("[SModePage] chainMix stem=" + juce::String(slot.stemIndex)
+                + " (offline concat — pitch not applied)");
 
             float vel = slot.velocity;
             int chToCopy = juce::jmin(numCh, srcBuf.getNumChannels());
@@ -3512,8 +3778,13 @@ void SModePage::filesDropped(const juce::StringArray& files, int /*x*/, int /*y*
     if (files.isEmpty()) return;
     juce::File f(files[0]);
     juce::Logger::writeToLog("[SModePage] File dropped: " + f.getFullPathName());
-    if (f.existsAsFile() && onRequestSeparation)
-        onRequestSeparation(f);
+    if (f.existsAsFile())
+    {
+        samplar::RecentSongs::push(f);
+        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+        if (onRequestSeparation)
+            onRequestSeparation(f);
+    }
 }
 
 } // namespace samplar

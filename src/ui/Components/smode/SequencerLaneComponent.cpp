@@ -621,12 +621,13 @@ void SequencerLaneComponent::paint(juce::Graphics& g)
     // Lane label
     g.setColour(juce::Colours::white.withAlpha(0.4f));
     g.setFont(juce::FontOptions(9.0f));
+    // SEQ label at top-left (dots live in the bottom control row)
     g.drawText("SEQ " + juce::String(laneIndex_ + 1),
                getLocalBounds().reduced(4, 2), juce::Justification::topLeft);
 
-    // Stem dots
+    // Stem dots — bottom-anchored to match the relocated control row
     int dotStartX = 8;
-    int dotY = 4 + (kControlRowHeight - kDotSize) / 2;
+    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
     {
         auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
@@ -742,7 +743,7 @@ void SequencerLaneComponent::paintDot(juce::Graphics& g, int dotIndex,
 void SequencerLaneComponent::mouseDown(const juce::MouseEvent& e)
 {
     int dotStartX = 8;
-    int dotY = 4 + (kControlRowHeight - kDotSize) / 2;
+    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
     {
         auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
@@ -760,7 +761,7 @@ void SequencerLaneComponent::mouseMove(const juce::MouseEvent& e)
 {
     // Check if hovering over a stem dot
     int dotStartX = 8;
-    int dotY = 4 + (kControlRowHeight - kDotSize) / 2;
+    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
     {
         auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
@@ -782,7 +783,17 @@ void SequencerLaneComponent::mouseExit(const juce::MouseEvent&)
 void SequencerLaneComponent::resized()
 {
     auto area = getLocalBounds().reduced(4);
-    auto controlRow = area.removeFromTop(kControlRowHeight);
+    // Top-right utility row: CLEAR | WAV drag | X (sit above the grid).
+    auto topRow = area.removeFromTop(kControlRowHeight);
+    removeBtn_.setBounds(topRow.removeFromRight(22));
+    topRow.removeFromRight(2);
+    dragWavArea_.setBounds(topRow.removeFromRight(70));
+    topRow.removeFromRight(2);
+    clearBtn_.setBounds(topRow.removeFromRight(45));
+    area.removeFromTop(4);
+
+    // Bottom control row: stem dots + play/stop/M + action + pattern + bars + subdiv.
+    auto controlRow = area.removeFromBottom(kControlRowHeight);
 
     // Dots area
     int dotsWidth = static_cast<int>(stemDots_.size()) * (kDotSize + kDotGap) + 8;
@@ -812,14 +823,7 @@ void SequencerLaneComponent::resized()
     subdivCombo_.setBounds(controlRow.removeFromLeft(82));
     controlRow.removeFromLeft(3);
 
-    // Right side: CLEAR | WAV drag | X
-    removeBtn_.setBounds(controlRow.removeFromRight(22));
-    controlRow.removeFromRight(2);
-    dragWavArea_.setBounds(controlRow.removeFromRight(70));
-    controlRow.removeFromRight(2);
-    clearBtn_.setBounds(controlRow.removeFromRight(45));
-
-    area.removeFromTop(4);
+    area.removeFromBottom(4);
     slotArea_ = area;
 
     // ── Fixed grid layout: totalCells = numBars * 4, each cell = equal pixel width ──

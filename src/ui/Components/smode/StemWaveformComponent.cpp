@@ -54,14 +54,28 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
 
     // Focus (eye) button — expand this stem, hide others
     {
+        // Eye icon: outer almond as a hollow ring + filled pupil + tiny highlight.
+        // Uses even-odd winding so the inner almond carves out the outline.
         juce::Path eyePath;
-        // Almond eye outline
-        eyePath.startNewSubPath(1.0f, 10.0f);
-        eyePath.quadraticTo(10.0f, 2.0f, 19.0f, 10.0f);
-        eyePath.quadraticTo(10.0f, 18.0f, 1.0f, 10.0f);
+        eyePath.setUsingNonZeroWinding(false);
+
+        // Outer almond (eye outline)
+        eyePath.startNewSubPath(2.0f, 10.0f);
+        eyePath.quadraticTo(10.0f, 2.5f, 18.0f, 10.0f);
+        eyePath.quadraticTo(10.0f, 17.5f, 2.0f, 10.0f);
         eyePath.closeSubPath();
-        // Pupil
-        eyePath.addEllipse(7.0f, 7.0f, 6.0f, 6.0f);
+
+        // Inner almond (carves the outline into a ring under even-odd)
+        eyePath.startNewSubPath(3.6f, 10.0f);
+        eyePath.quadraticTo(10.0f, 4.2f, 16.4f, 10.0f);
+        eyePath.quadraticTo(10.0f, 15.8f, 3.6f, 10.0f);
+        eyePath.closeSubPath();
+
+        // Pupil (filled solid circle in the centre)
+        eyePath.addEllipse(7.6f, 7.6f, 4.8f, 4.8f);
+
+        // Highlight (small filled dot — also carved out by even-odd, leaving white inside pupil)
+        eyePath.addEllipse(8.4f, 8.4f, 1.6f, 1.6f);
 
         auto icon = std::make_unique<juce::DrawablePath>();
         icon->setPath(eyePath);
@@ -83,6 +97,70 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
             onFocusRequested(stemIndex_);
     };
 
+    // ── Per-stem pitch knob (time-preserving SoundTouch) ─────────────────────
+    addAndMakeVisible(pitchKnob_);
+    pitchKnob_.setSliderStyle(juce::Slider::RotaryHorizontalVerticalDrag);
+    pitchKnob_.setRange(-12.0, 12.0, 1.0);
+    pitchKnob_.setValue(0.0, juce::dontSendNotification);
+    pitchKnob_.setTextBoxStyle(juce::Slider::TextBoxBelow, true, 36, 14);
+    pitchKnob_.setColour(juce::Slider::textBoxTextColourId, juce::Colours::white);
+    pitchKnob_.setColour(juce::Slider::textBoxBackgroundColourId, juce::Colours::transparentBlack);
+    pitchKnob_.setColour(juce::Slider::textBoxOutlineColourId, juce::Colours::transparentBlack);
+    pitchKnob_.setNumDecimalPlacesToDisplay(0);
+    pitchKnob_.textFromValueFunction = [](double v)
+    {
+        const int s = (int) std::lround(v);
+        return (s > 0 ? juce::String("+") + juce::String(s) : juce::String(s)) + " st";
+    };
+    pitchKnob_.valueFromTextFunction = [](const juce::String& t)
+    {
+        return t.retainCharacters("-0123456789").getDoubleValue();
+    };
+    pitchKnob_.setDoubleClickReturnValue(true, 0.0);
+    pitchKnob_.setTooltip(
+        "Pitch: shift this stem up or down by -12 to +12 semitones.\n"
+        "Time is preserved (does not affect playback speed).\n"
+        "Double-click to reset to 0.");
+    pitchKnob_.setColour(juce::Slider::rotarySliderFillColourId, juce::Colour(0xff7aa6ff));
+    pitchKnob_.setColour(juce::Slider::rotarySliderOutlineColourId, juce::Colour(0xff2d2d3a));
+    pitchKnob_.onValueChange = [this]()
+    {
+        if (onPitchChanged)
+            onPitchChanged(stemIndex_, (float) pitchKnob_.getValue());
+    };
+
+    // ── Control panel redesign widgets ───────────────────────────────────────
+    addAndMakeVisible(chevronBtn_);
+    chevronBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
+    chevronBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+
+    addAndMakeVisible(stemIconBtn_);
+    stemIconBtn_.setColour(juce::DrawableButton::backgroundColourId, juce::Colours::transparentBlack);
+
+    addAndMakeVisible(stemNameLabel_);
+    stemNameLabel_.setText("Stem", juce::dontSendNotification);
+    stemNameLabel_.setFont(juce::FontOptions(15.0f, juce::Font::bold));
+    stemNameLabel_.setColour(juce::Label::textColourId, juce::Colours::white);
+    stemNameLabel_.setJustificationType(juce::Justification::centredLeft);
+
+    // Style S/M/L buttons with proper colours
+    soloBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d2d3a));
+    soloBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colours::yellow.withAlpha(0.8f));
+    soloBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+    soloBtn_.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+
+    muteBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d2d3a));
+    muteBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colours::red.withAlpha(0.8f));
+    muteBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+    muteBtn_.setColour(juce::TextButton::textColourOnId, juce::Colours::white);
+
+    linkBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d2d3a));
+    linkBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colours::limegreen.withAlpha(0.8f));
+    linkBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
+    linkBtn_.setColour(juce::TextButton::textColourOnId, juce::Colours::black);
+
+    // (No lane hover-tracking — only the sequencer dots trigger cross-lane dim.)
+
     setOpaque(false);
     setWantsKeyboardFocus(true);
 
@@ -90,6 +168,85 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
     auto* stem = model_.getStem(stemIndex_);
     if (stem && stem->audioBuffer.getNumSamples() > 0)
         viewEndTime_ = static_cast<double>(stem->audioBuffer.getNumSamples()) / model_.getSampleRate();
+}
+
+// ── Stem Kind / Icon ─────────────────────────────────────────────────────────
+
+void StemWaveformComponent::setStemKind(StemKind kind)
+{
+    stemKind_ = kind;
+
+    juce::String name;
+    juce::Path iconPath;
+
+    switch (kind)
+    {
+        case StemKind::Vocals:
+        {
+            name = "Vocals";
+            // Microphone: vertical capsule body + small circular base + stand
+            iconPath.addRoundedRectangle(8.0f, 2.0f, 8.0f, 12.0f, 4.0f);  // capsule
+            iconPath.addEllipse(9.0f, 15.0f, 6.0f, 4.0f);                  // base
+            iconPath.startNewSubPath(12.0f, 14.0f);
+            iconPath.lineTo(12.0f, 19.0f);                                   // stand pole
+            break;
+        }
+        case StemKind::Bass:
+        {
+            name = "Bass";
+            // Eighth note: filled notehead + stem + flag
+            iconPath.addEllipse(2.0f, 14.0f, 8.0f, 6.0f);   // notehead
+            iconPath.startNewSubPath(10.0f, 17.0f);
+            iconPath.lineTo(10.0f, 2.0f);                      // stem up
+            iconPath.quadraticTo(18.0f, 4.0f, 14.0f, 8.0f);  // flag curve
+            break;
+        }
+        case StemKind::Drums:
+        {
+            name = "Drums";
+            // Drum shell (ellipse) + two crossed sticks
+            iconPath.addEllipse(4.0f, 8.0f, 16.0f, 10.0f);   // drum shell
+            iconPath.startNewSubPath(2.0f, 2.0f);
+            iconPath.lineTo(10.0f, 8.0f);                      // stick left
+            iconPath.startNewSubPath(22.0f, 2.0f);
+            iconPath.lineTo(14.0f, 8.0f);                      // stick right
+            break;
+        }
+        case StemKind::Melody:
+        {
+            name = "Melody";
+            // Two eighth notes beamed: two noteheads + stems + beam
+            iconPath.addEllipse(2.0f, 14.0f, 7.0f, 5.0f);    // notehead 1
+            iconPath.startNewSubPath(9.0f, 16.0f);
+            iconPath.lineTo(9.0f, 4.0f);                       // stem 1
+            iconPath.addEllipse(13.0f, 16.0f, 7.0f, 5.0f);   // notehead 2
+            iconPath.startNewSubPath(20.0f, 18.0f);
+            iconPath.lineTo(20.0f, 6.0f);                      // stem 2
+            iconPath.startNewSubPath(9.0f, 4.0f);
+            iconPath.lineTo(20.0f, 6.0f);                      // beam
+            break;
+        }
+        default:
+        {
+            name = "Stem";
+            iconPath.addEllipse(8.0f, 8.0f, 8.0f, 8.0f);     // simple dot
+            break;
+        }
+    }
+
+    stemNameLabel_.setText(name, juce::dontSendNotification);
+
+    auto drawable = std::make_unique<juce::DrawablePath>();
+    drawable->setPath(iconPath);
+    drawable->setFill(juce::Colours::lightgrey);
+    drawable->setStrokeFill(juce::Colours::lightgrey);
+    drawable->setStrokeThickness(1.5f);
+    stemIconDrawable_ = std::move(drawable);
+    stemIconBtn_.setImages(stemIconDrawable_.get());
+
+    juce::Logger::writeToLog("[StemWaveform] setStemKind: stem=" + juce::String(stemIndex_)
+                             + " name=" + name);
+    repaint();
 }
 
 // ── Spectral Color Computation ───────────────────────────────────────────────
@@ -356,16 +513,63 @@ void StemWaveformComponent::resized()
     controlArea_ = area.removeFromLeft(kControlWidth);
     waveArea_ = area;
 
-    // Stack S/M/L/V buttons vertically in controlArea_
-    auto ctrlBounds = controlArea_.reduced(2);
-    int btnH = juce::jmin(ctrlBounds.getHeight() / 4, 16);
-    soloBtn_.setBounds(ctrlBounds.removeFromTop(btnH));
-    ctrlBounds.removeFromTop(1);
-    muteBtn_.setBounds(ctrlBounds.removeFromTop(btnH));
-    ctrlBounds.removeFromTop(1);
-    linkBtn_.setBounds(ctrlBounds.removeFromTop(btnH));
-    ctrlBounds.removeFromTop(1);
-    focusBtn_.setBounds(ctrlBounds.removeFromTop(btnH));
+    // ── New control panel layout (178px wide) ────────────────────────────────
+    // The leftmost 4px is the accent strip (painted in paint(), not a widget).
+    // An additional 6px inset matches the card margin drawn in paint().
+    auto panel = controlArea_;
+    panel.removeFromLeft(4);   // reserve accent strip
+    panel.removeFromLeft(6);   // card left inset (kPanelInset)
+    panel.removeFromRight(6);  // card right inset
+    panel = panel.reduced(0, 6);  // card top/bottom inset
+    panel = panel.reduced(6, 4);  // internal padding within the card
+
+    // Row 4 (bottom, ~58 px): pitch knob centered (BIGGER, ~50 px diameter)
+    // Removed FIRST from the bottom of the panel so rows 1-3 keep their
+    // existing top-anchored layout above it. If the lane is vertically
+    // tight, the knob row is allowed to push past the visual centre — the
+    // eye row 3 stays at its current Y because it's removed from the top
+    // of `panel` next.
+    constexpr int kKnobRowH = 44;
+    constexpr int kKnobDiameter = 38;
+    juce::Rectangle<int> knobRow;
+    if (panel.getHeight() > kKnobRowH + 30)
+        knobRow = panel.removeFromBottom(kKnobRowH);
+    else
+        knobRow = panel.removeFromBottom(juce::jmax(kKnobDiameter, panel.getHeight() / 3));
+
+    // Row 1 (28px): chevron ▾ + stem icon + stem name
+    auto row1 = panel.removeFromTop(28);
+    chevronBtn_.setBounds(row1.removeFromLeft(20));
+    row1.removeFromLeft(4);
+    stemIconBtn_.setBounds(row1.removeFromLeft(24));
+    row1.removeFromLeft(6);
+    stemNameLabel_.setBounds(row1);
+    panel.removeFromTop(6);
+
+    // Row 2 (28px): S / M / L horizontally — knob is now in row 4, so S/M/L
+    // gets the full row width back (split equally three ways).
+    auto row2 = panel.removeFromTop(28).reduced(0, 3);
+    const int btnsAvail = juce::jmax(60, row2.getWidth());
+    const int btnW = juce::jmax(18, (btnsAvail - 12) / 3);
+    soloBtn_.setBounds(row2.removeFromLeft(btnW));
+    row2.removeFromLeft(6);
+    muteBtn_.setBounds(row2.removeFromLeft(btnW));
+    row2.removeFromLeft(6);
+    linkBtn_.setBounds(row2.removeFromLeft(btnW));
+    panel.removeFromTop(6);
+
+    // Row 3 (32px): eye / focus button
+    auto row3 = panel.removeFromTop(22);
+    focusBtn_.setBounds(row3.removeFromLeft(24).withHeight(20));
+
+    // Row 4: large pitch knob, centered horizontally within the control panel.
+    {
+        const int diameter = juce::jmin(kKnobDiameter,
+                                        juce::jmin(knobRow.getWidth(), knobRow.getHeight()));
+        const int x = knobRow.getX() + (knobRow.getWidth()  - diameter) / 2;
+        const int y = knobRow.getY() + (knobRow.getHeight() - diameter) / 2;
+        pitchKnob_.setBounds(x, y, diameter, diameter);
+    }
 }
 
 // ── Visibility ───────────────────────────────────────────────────────────────
@@ -380,15 +584,165 @@ void StemWaveformComponent::visibilityChanged()
 
 void StemWaveformComponent::paint(juce::Graphics& g)
 {
-    // Background
-    g.setColour(stemColour_.withAlpha(0.12f));
-    g.fillRoundedRectangle(getLocalBounds().toFloat(), 3.0f);
+    // Lane corner radius — clip the whole paint pass to a rounded rect so the
+    // waveform, accent strip, and control panel card all respect the curves.
+    const float kLaneRadius = 12.0f;
+    {
+        juce::Path lanePath;
+        lanePath.addRoundedRectangle(getLocalBounds().toFloat(), kLaneRadius);
+        g.reduceClipRegion(lanePath);
+    }
+
+    // Themed diagonal gradient background
+    {
+        juce::ColourGradient bg(bgA_, 0.0f, 0.0f,
+                                bgB_, (float)getWidth(), (float)getHeight(),
+                                false);
+        g.setGradientFill(bg);
+        g.fillRoundedRectangle(getLocalBounds().toFloat(), kLaneRadius);
+    }
+
+    // Accent tint overlay (keeps stem colour visible at low alpha)
+    g.setColour(stemColour_.withAlpha(0.07f));
+    g.fillRoundedRectangle(getLocalBounds().toFloat(), kLaneRadius);
+
+    // Left-edge accent: full-height bar with a vertical alpha gradient so the
+    // colour fades to nothing at the top and bottom — visually merging into the
+    // lane's rounded corners. Horizontal halo also fades into the corner curve.
+    {
+        const float h = static_cast<float>(getHeight());
+
+        // Soft horizontal halo (fades to transparent rightward)
+        {
+            juce::Rectangle<float> halo(0.0f, 0.0f, 10.0f, h);
+            juce::ColourGradient haloX(stemColour_.withAlpha(0.55f), 0.0f, 0.0f,
+                                       stemColour_.withAlpha(0.0f), 10.0f, 0.0f,
+                                       false);
+            g.setGradientFill(haloX);
+            g.fillRect(halo);
+
+            // Top/bottom fade on the halo via alpha-only vertical overlay
+            juce::ColourGradient haloY(juce::Colours::black.withAlpha(0.0f), 0.0f, h * 0.18f,
+                                       juce::Colours::black.withAlpha(0.0f), 0.0f, h * 0.82f,
+                                       false);
+            haloY.addColour(0.0, juce::Colours::black);  // opaque black at very top of stop range
+            // Actually simpler approach below: mask via fill-on-top of corners
+        }
+
+        // Core slim bar (3px wide, full height) with vertical alpha fade
+        juce::Rectangle<float> bar(1.0f, 0.0f, 3.0f, h);
+        juce::ColourGradient barGrad(stemColour_.withAlpha(0.0f), 0.0f, 0.0f,
+                                     stemColour_.withAlpha(0.0f), 0.0f, h,
+                                     false);
+        barGrad.addColour(0.15, stemColour_.withAlpha(0.95f));
+        barGrad.addColour(0.50, stemColour_);
+        barGrad.addColour(0.85, stemColour_.withAlpha(0.95f));
+        g.setGradientFill(barGrad);
+        g.fillRoundedRectangle(bar, 1.5f);
+
+        // Inner highlight running down the centre for a glassy edge
+        juce::ColourGradient hiGrad(juce::Colours::white.withAlpha(0.0f),  0.0f, 0.0f,
+                                    juce::Colours::white.withAlpha(0.0f),  0.0f, h,
+                                    false);
+        hiGrad.addColour(0.30, juce::Colours::white.withAlpha(0.30f));
+        hiGrad.addColour(0.70, juce::Colours::white.withAlpha(0.30f));
+        g.setGradientFill(hiGrad);
+        g.fillRect(juce::Rectangle<float>(2.0f, 0.0f, 1.0f, h));
+    }
+
+    // ── Control panel card ────────────────────────────────────────────────
+    // Drawn as a visually distinct rounded box inset from the lane edges,
+    // sitting to the right of the 4px accent strip.
+    {
+        static constexpr int kPanelInset = 6;
+        juce::Rectangle<float> card(
+            4.0f + (float)kPanelInset,                      // left: after accent strip + inset
+            (float)kPanelInset,                              // top inset
+            (float)(kControlWidth - 4 - kPanelInset * 2),   // width: panel minus strip & margins
+            (float)(getHeight() - kPanelInset * 2));         // height: lane minus top+bottom margin
+        g.setColour(juce::Colours::black.withAlpha(0.45f));
+        g.fillRoundedRectangle(card, 8.0f);
+        g.setColour(stemColour_.withAlpha(0.25f));
+        g.drawRoundedRectangle(card, 8.0f, 1.0f);
+    }
 
     // Border
     g.setColour(stemColour_.withAlpha(0.5f));
-    g.drawRoundedRectangle(getLocalBounds().toFloat(), 3.0f, 1.5f);
+    g.drawRoundedRectangle(getLocalBounds().toFloat(), 12.0f, 1.5f);
+
+    // Old self-highlight overlay disabled — cross-lane dim handles the focus visual.
+    // (isHighlighted_ still tracked for the onStemHovered fire/clear logic.)
 
     if (waveArea_.isEmpty()) return;
+
+    // ── Loading state: full-lane progress fill (entire waveform area) ──
+    if (loadingState_)
+    {
+        const auto waveF = waveArea_.toFloat();
+
+        // Dim base
+        g.setColour(juce::Colours::black.withAlpha(0.85f));
+        g.fillRect(waveF);
+
+        // Filled portion of the lane (full height, width scales with progress)
+        const float fillW = juce::jmax(0.0f, waveF.getWidth() * loadingProgress_);
+        if (fillW > 0.0f)
+        {
+            juce::Rectangle<float> fill(waveF.getX(), waveF.getY(), fillW, waveF.getHeight());
+
+            // Gradient: dark stem at left edge -> bright stem at leading edge
+            juce::ColourGradient fillGrad(stemColour_.withAlpha(0.35f), fill.getX(), 0.0f,
+                                          stemColour_.withAlpha(0.85f), fill.getRight(), 0.0f,
+                                          false);
+            g.setGradientFill(fillGrad);
+            g.fillRect(fill);
+
+            // Ocean-wave overlay: multiple soft crests of brighter colour scrolling across
+            // the filled portion. Each crest is a horizontal gradient that fades in/out so
+            // the result reads as continuous flowing colour instead of a bouncing band.
+            const int   kNumCrests = 5;
+            const float spacing    = fill.getWidth() / static_cast<float>(kNumCrests);
+            const float crestW     = juce::jmax(40.0f, spacing * 1.4f);
+            // Continuous left-to-right scroll based on loadingPhase_ (1 cycle / sec at 30 Hz).
+            const float scrollPx   = std::fmod(loadingPhase_ * spacing, spacing);
+
+            for (int i = 0; i < kNumCrests + 1; ++i)
+            {
+                const float cx = fill.getX() + (static_cast<float>(i) * spacing) + scrollPx;
+                juce::Rectangle<float> crest(cx - crestW * 0.5f, fill.getY(),
+                                             crestW, fill.getHeight());
+                crest = crest.getIntersection(fill);
+                if (crest.isEmpty()) continue;
+
+                juce::ColourGradient cg(stemColour_.withAlpha(0.0f),       crest.getX(),       0.0f,
+                                        stemColour_.withAlpha(0.0f),       crest.getRight(),   0.0f,
+                                        false);
+                cg.addColour(0.5, stemColour_.brighter(0.55f).withAlpha(0.30f));
+                g.setGradientFill(cg);
+                g.fillRect(crest);
+            }
+
+            // Soft bright leading edge (no hard line — just a fade)
+            const float edgeW = 6.0f;
+            juce::Rectangle<float> edge(fill.getRight() - edgeW, fill.getY(),
+                                        edgeW, fill.getHeight());
+            juce::ColourGradient edgeGrad(stemColour_.withAlpha(0.0f),       edge.getX(),     0.0f,
+                                          stemColour_.brighter(0.5f).withAlpha(0.55f), edge.getRight(), 0.0f,
+                                          false);
+            g.setGradientFill(edgeGrad);
+            g.fillRect(edge);
+        }
+
+        // Percentage label, large, centered over the entire lane
+        const int pct = juce::roundToInt(loadingProgress_ * 100.0f);
+        juce::String label = "SEPARATING - " + juce::String(pct) + "%";
+        g.setColour(juce::Colours::white.withAlpha(0.95f));
+        g.setFont(juce::FontOptions(juce::jmax(14.0f, waveF.getHeight() * 0.28f), juce::Font::bold));
+        g.drawText(label, waveArea_, juce::Justification::centred);
+
+        return;  // skip normal waveform drawing while loading
+    }
+    // ── End loading state ─────────────────────────────────────────────────────
 
     // Stem name label (top-left of wave area)
     auto* stem = model_.getStem(stemIndex_);
@@ -948,16 +1302,21 @@ void StemWaveformComponent::mouseDoubleClick(const juce::MouseEvent& e)
 void StemWaveformComponent::mouseEnter(const juce::MouseEvent&)
 {
     // Grab keyboard focus on mouse enter so Ctrl modifier is reliably detected
-    // for Ctrl+Wheel zoom on Windows
+    // for Ctrl+Wheel zoom on Windows.
+    // No cross-lane dim from S/M/L/eye buttons or the lane itself — only the
+    // sequencer-dot hover triggers that effect.
     if (!hasKeyboardFocus(false))
         grabKeyboardFocus();
 }
 
-void StemWaveformComponent::mouseExit(const juce::MouseEvent&)
+void StemWaveformComponent::mouseExit(const juce::MouseEvent& e)
 {
     bool needRepaint = false;
     if (gridTooltipVisible_) { gridTooltipVisible_ = false; needRepaint = true; }
     if (segTooltipVisible_) { segTooltipVisible_ = false; needRepaint = true; }
+
+    // No lane-level hover dim — only the sequencer dots fire the cross-lane dim.
+    juce::ignoreUnused(e);
     if (needRepaint) repaint();
 }
 
@@ -1391,10 +1750,30 @@ void StemWaveformComponent::timerCallback()
         }
     }
 
+    // Advance loading shimmer phase (wraps 0..1 for sin-based leading-edge glow)
+    if (loadingState_)
+    {
+        loadingPhase_ += 0.033f;  // ~1 shimmer cycle per second at 30 Hz
+        if (loadingPhase_ > 1.0f) loadingPhase_ -= 1.0f;
+        anyActive = true;
+    }
+
     repaint();
 
     if (!anyActive)
         stopTimer();
+}
+
+// ── Pitch knob value sync (no callback fire) ─────────────────────────────────
+void StemWaveformComponent::setPitchSemitones(float semi)
+{
+    const float clamped = juce::jlimit(-12.0f, 12.0f, semi);
+    pitchKnob_.setValue((double) clamped, juce::dontSendNotification);
+}
+
+float StemWaveformComponent::getPitchSemitones() const
+{
+    return (float) pitchKnob_.getValue();
 }
 
 } // namespace samplar

@@ -3,6 +3,7 @@
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_graphics/juce_graphics.h>
 #include <vector>
+#include <atomic>
 
 namespace samplar {
 
@@ -34,6 +35,13 @@ public:
 
     // Randomly select a background
     bool loadRandomBackground();
+
+    // Async variant: spawns a background thread to do file I/O + decode, then
+    // posts frames back to the message thread and starts animation. Returns
+    // immediately. The component must remain alive until completion (uses
+    // SafePointer internally). Safe to call multiple times — subsequent calls
+    // are ignored while a load is in flight.
+    void loadRandomBackgroundAsync();
 
     // Component overrides
     void paint(juce::Graphics& g) override;
@@ -72,6 +80,10 @@ private:
     // Cached scaled image for performance
     juce::Image cachedScaled_;
     juce::Rectangle<int> lastBounds_;
+
+    // Async-load guard: true while a background decode is in flight, prevents
+    // re-entry from spammy preload triggers.
+    std::atomic<bool> asyncLoadInFlight_ { false };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(GifAnimatedBackground)
 };

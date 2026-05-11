@@ -11,6 +11,15 @@
 #include <array>
 #include <mutex>
 #include <atomic>
+#include <memory>
+#include <vector>
+
+// Forward-declare signalsmith-stretch so we don't pull its header into our public API.
+// Must match the upstream declaration exactly:
+//   template<typename Sample=float, class RandomEngine=void> struct SignalsmithStretch;
+namespace signalsmith { namespace stretch {
+    template <typename Sample = float, class RandomEngine = void> struct SignalsmithStretch;
+} }
 
 namespace samplar {
 
@@ -184,8 +193,13 @@ public:
     void resetComputerKeyboardHeld();
 
     // ── S-Mode direct playback (click-to-play without MIDI note) ────────────
+    /** Play a buffer directly through the voice mixer.
+     *  @param stemIdx  optional stem index (0..MAX_STEMS-1). When >= 0 the
+     *  realtime SoundTouch path is engaged for the voice and the active
+     *  stem-pitch knob is honoured. Pass -1 to skip pitch (raw playback). */
     void playBufferDirect(std::shared_ptr<const juce::AudioBuffer<float>> buffer,
-                          double bufferSampleRate, float velocity = 1.0f, bool looping = false);
+                          double bufferSampleRate, float velocity = 1.0f, bool looping = false,
+                          int stemIdx = -1);
 
     /** Stop all active voices immediately (for sequencer stop, etc.). */
     void stopAllVoices();
@@ -228,6 +242,15 @@ public:
     static constexpr int BROWSER_MAP_START_NOTE = 48;   // C3 — first pad note
     static constexpr int BROWSER_MAP_NUM_PADS   = 20;
 
+    // ── Per-stem pitch shift (realtime SoundTouch in audio path) ────────────
+    /** Set per-stem pitch in semitones. Range -12..+12. Lock-free atomic
+     *  store — the audio thread picks up the new value on the next block
+     *  via setPitchSemiTones(). Knob → audible delay is one audio block
+     *  (~10 ms at 512 frames @ 48 kHz). */
+    void  setStemPitchSemitones(int stemIdx, float semitones);
+    float getStemPitchSemitones(int stemIdx) const;
+    static constexpr int MAX_STEMS = 8;
+
 private:
     // ── MIDI Slot ───────────────────────────────────────────────────────────
 
@@ -250,6 +273,27 @@ private:
         bool   active       = false;
         bool   looping      = false;  // True = wrap to start instead of ending
         int    noteNumber   = -1;     // Which note triggered this voice
+        int    stemIdx      = -1;     // Stem index for realtime pitch (or -1 = no pitch)
+        float  lastSemi     = 0.0f;   // Last applied semitone value (dedup)
+        int    startSample  = 0;      // For S-Mode segment: start within voice.buffer
+        int    endSample    = 0;      // For S-Mode segment: end within voice.buffer (0 = use full buffer)
+
+        // Native sample rate of voice.buffer. SignalsmithStretch is configured
+        // to this rate on note-on. The block process() call uses the
+        // inputRate / deviceRate ratio for time-rate (so output stays at
+        // device rate while pitch is shifted by setTransposeSemitones).
+        double bufferSampleRate = 0.0;
+        juce::uint32 lastConfiguredSr = 0;  // Tracks SignalsmithStretch reconfig dedup
+
+        // Realtime pitch shifter (signalsmith-stretch). Lazy-allocated in
+        // prepareToPlay so we never allocate on the audio thread. The
+        // instance lives forever inside this Voice — it is just reset()'d
+        // between uses, never destroyed.
+        std::unique_ptr<signalsmith::stretch::SignalsmithStretch<float>> stretch;
+
+        // EOS tail tracking. Once the source is exhausted, we feed silence
+        // for one extra block to flush the internal latency, then deactivate.
+        bool eosFedSilence = false;
     };
 
     // ── Internal helpers ─────────────────────────────────────────────────────
@@ -259,6 +303,46 @@ private:
 
     /** Find a free voice, stealing the oldest active one if necessary. */
     Voice& allocateVoice();
+
+    /** Apply current stem pitch atomic to a signalsmith-stretch instance.
+     *  Cheap when unchanged (no-op). Called per audio block. RT-safe. */
+    static void applyPitchIfChanged(signalsmith::stretch::SignalsmithStretch<float>& s,
+                                    float& lastSemi, float targetSemi);
+
+    // ── Per-stem pitch slot — realtime path ──────────────────────────────
+    // Just an atomic semi value per stem. Audio thread reads it each block
+    // and applies via SignalsmithStretch::setTransposeSemitones (RT-safe).
+    struct StemPitchSlot
+    {
+        std::atomic<float> targetSemi { 0.0f };
+    };
+    std::array<StemPitchSlot, MAX_STEMS> stemPitch_;
+
+    // Per-stem realtime signalsmith-stretch instances for the transport mix
+    // path. Allocated in prepareToPlay; only touched on the audio thread.
+    std::array<std::unique_ptr<signalsmith::stretch::SignalsmithStretch<float>>, MAX_STEMS> stemStretch_;
+    std::array<float,        MAX_STEMS> stemLastSemi_ {};
+    // Tracks the input sample rate each stem's stretch instance has been
+    // configured for (0 = never configured / needs config). When modelSr
+    // changes (e.g. user loads a new song), reconfigure on the audio
+    // thread.
+    std::array<juce::uint32, MAX_STEMS> stemLastConfiguredSr_ {};
+
+    // Scratch buffers for planar in/out passed to SignalsmithStretch::process.
+    // signalsmith-stretch consumes/produces non-interleaved (planar) audio,
+    // matching JUCE's AudioBuffer layout — no interleave step needed. We
+    // still need these for stem mixing because we read from
+    // stem->audioBuffer (planar) but need a writable scratch for the
+    // stretcher's output before mixing into dest with per-stem volume.
+    juce::AudioBuffer<float> stemOutScratch_;   // 2ch x maxBlockSize
+    juce::AudioBuffer<float> voiceOutScratch_;  // 2ch x maxBlockSize
+    // Input scratch for the stem path (reused sequentially across stems).
+    // Holds pre-resampled deviceSr-rate input frames feeding the stretcher.
+    juce::AudioBuffer<float> stretchInScratch_; // 2ch x (maxBlockSize + slack)
+    // Separate input scratch for the voice realtime path — voices may run
+    // before stems in the same getNextAudioBlock() invocation, so we cannot
+    // share stretchInScratch_ across the two paths within a single block.
+    juce::AudioBuffer<float> voiceInScratch_;   // 2ch x maxBlockSize
 
     // ── State ────────────────────────────────────────────────────────────────
 

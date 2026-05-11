@@ -2,6 +2,7 @@
 #include "../../utils/DataPaths.h"
 #include <random>
 #include <chrono>
+#include <thread>
 
 namespace samplar {
 
@@ -234,6 +235,123 @@ bool GifAnimatedBackground::loadRandomBackground()
     }
 
     return success;
+}
+
+void GifAnimatedBackground::loadRandomBackgroundAsync()
+{
+    // Re-entry guard: only one async decode at a time. Subsequent calls are no-ops.
+    bool expected = false;
+    if (!asyncLoadInFlight_.compare_exchange_strong(expected, true))
+    {
+        juce::Logger::writeToLog("[GifBackground] Async load already in flight, skipping");
+        return;
+    }
+
+    juce::Logger::writeToLog("[GifBackground] Async load STARTING (background thread)");
+
+    // SafePointer keeps it safe if the component is destroyed mid-decode.
+    juce::Component::SafePointer<GifAnimatedBackground> safeThis(this);
+
+    std::thread([safeThis]()
+    {
+        // Pick CAMPO or LAVA randomly.
+        static std::random_device rd;
+        static std::mt19937 gen(rd());
+        std::uniform_int_distribution<> dis(0, 1);
+        int selection = dis(gen);
+        BackgroundType type = (selection == 0) ? BackgroundType::Campo : BackgroundType::Lava;
+
+        // Resolve the file path (off-thread; getAppDirectory/getUserDataDirectory are read-only).
+        auto resolveFile = [](BackgroundType t) -> juce::File
+        {
+            const juce::String filename = (t == BackgroundType::Campo)
+                                          ? "CAMPO_optimized.gif"
+                                          : "LAVA_optimized.gif";
+
+            juce::File appDir = samplar::DataPaths::getAppDirectory();
+            juce::File f = appDir.getChildFile("BACKGROUNDS").getChildFile(filename);
+            if (f.existsAsFile()) return f;
+
+            juce::File dir = juce::File::getSpecialLocation(juce::File::currentExecutableFile)
+                                 .getParentDirectory();
+            for (int i = 0; i < 10; ++i)
+            {
+                juce::File c = dir.getChildFile("BACKGROUNDS").getChildFile(filename);
+                if (c.existsAsFile()) return c;
+                dir = dir.getParentDirectory();
+            }
+
+            juce::File user = samplar::DataPaths::getUserDataDirectory()
+                                  .getChildFile("BACKGROUNDS").getChildFile(filename);
+            if (user.existsAsFile()) return user;
+
+            return {};
+        };
+
+        juce::File file = resolveFile(type);
+        if (!file.existsAsFile())
+        {
+            BackgroundType alt = (type == BackgroundType::Campo)
+                                 ? BackgroundType::Lava : BackgroundType::Campo;
+            file = resolveFile(alt);
+            if (file.existsAsFile()) type = alt;
+        }
+
+        // Decode into a LOCAL frames vector so we never touch frames_ from this thread.
+        std::vector<GifFrame> localFrames;
+        if (file.existsAsFile())
+        {
+            juce::MemoryBlock mb;
+            if (file.loadFileAsData(mb))
+            {
+                // Reuse decodeGif by temporarily decoding into a throwaway instance.
+                // Cheaper: replicate the parse loop minimally — but decodeGif writes to
+                // frames_, so we use a stack-allocated temporary GifAnimatedBackground.
+                // That's heavy on the stack; instead, we decode in-place here via a helper.
+                GifAnimatedBackground tmp;
+                if (tmp.decodeGif(static_cast<const char*>(mb.getData()),
+                                  static_cast<int>(mb.getSize())))
+                {
+                    localFrames = std::move(tmp.frames_);
+                }
+            }
+        }
+
+        const int frameCount = static_cast<int>(localFrames.size());
+        juce::Logger::writeToLog("[GifBackground] Async decode finished: "
+                                 + juce::String(frameCount) + " frames"
+                                 + " (" + (type == BackgroundType::Campo ? "CAMPO" : "LAVA") + ")");
+
+        // Hand frames back to the message thread. We need to move them into the
+        // lambda capture; std::function requires copyable, so wrap in shared_ptr.
+        auto framesPtr = std::make_shared<std::vector<GifFrame>>(std::move(localFrames));
+
+        juce::MessageManager::callAsync([safeThis, framesPtr]()
+        {
+            if (safeThis == nullptr)
+            {
+                juce::Logger::writeToLog("[GifBackground] Component gone before async swap");
+                return;
+            }
+
+            safeThis->frames_ = std::move(*framesPtr);
+            safeThis->currentFrame_ = 0;
+            safeThis->asyncLoadInFlight_.store(false);
+
+            if (!safeThis->frames_.empty())
+            {
+                juce::Logger::writeToLog("[GifBackground] Async swap done, "
+                                         + juce::String((int)safeThis->frames_.size())
+                                         + " frames live; starting animation");
+                safeThis->startAnimation();
+                safeThis->repaint();
+            }
+            else
+            {
+                juce::Logger::writeToLog("[GifBackground] Async swap: no frames decoded");
+            }
+        });
+    }).detach();
 }
 
 bool GifAnimatedBackground::decodeGif(const char* rawData, int dataSize)
