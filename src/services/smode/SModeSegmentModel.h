@@ -174,6 +174,13 @@ public:
     void setSampleRate(double sr) { sampleRate_ = sr; }
     double getSampleRate() const { return sampleRate_; }
 
+    // ── Grid Offset (beat 1 alignment) ───────────────────────────────
+    /** Sample offset (in seconds) where beat 1 of the grid lies. Set by the
+     *  auto-downbeat detector after separation completes; users can override
+     *  via grid-drag in the StemWaveformComponent UI. */
+    void setGridOffsetSeconds(double offset) { gridOffsetSeconds_ = offset; }
+    double getGridOffsetSeconds() const { return gridOffsetSeconds_; }
+
     // ── Raw access (for serialization) ───────────────────────────────
     const std::vector<StemData>& getStems() const { return stems_; }
     std::vector<StemData>& getStems() { return stems_; }
@@ -182,6 +189,7 @@ private:
     std::vector<StemData> stems_;
     double sampleRate_ { 44100.0 };
     double detectedBpm_ { 0.0 };
+    double gridOffsetSeconds_ { 0.0 };
 
     // Undo snapshot — captures everything edit-undoable. Audio buffers and
     // spectral caches stay put (those don't change with edits).

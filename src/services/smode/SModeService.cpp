@@ -1,4 +1,6 @@
 ﻿#include "SModeService.h"
+#include "../analysis/DownbeatDetector.h"
+#include <thread>
 
 namespace samplar {
 
@@ -134,6 +136,82 @@ void SModeService::loadStemAudio(const std::vector<juce::File>& stemFiles)
 
     juce::Logger::writeToLog("✅ [SModeService] All stems loaded, sampleRate=" + juce::String(sampleRate));
     bus_.publish("smode.workflow.ready", juce::var(stemCount));
+}
+
+void SModeService::runDownbeatDetectionAsync(double bpm)
+{
+    juce::Logger::writeToLog("🎵 [SModeService] === runDownbeatDetectionAsync === bpm=" + juce::String(bpm, 2));
+
+    if (!active_.load())
+    {
+        juce::Logger::writeToLog("❌ [SModeService] downbeat: service not active");
+        return;
+    }
+    if (bpm < 60.0 || bpm > 220.0)
+    {
+        juce::Logger::writeToLog("❌ [SModeService] downbeat: bpm out of range");
+        return;
+    }
+
+    // Find the drums stem (name match, then fallback to index 2 — see
+    // SModeSeparationService 4-stem order: Vocals/Bass/Drums/Melody).
+    int drumIdx = -1;
+    int stemCount = model_.getStemCount();
+    for (int i = 0; i < stemCount; ++i)
+    {
+        auto* s = model_.getStem(i);
+        if (s && s->name.containsIgnoreCase("drum")) { drumIdx = i; break; }
+    }
+    if (drumIdx < 0 && stemCount > 2) drumIdx = 2;
+    if (drumIdx < 0)
+    {
+        juce::Logger::writeToLog("❌ [SModeService] downbeat: no drums stem available");
+        return;
+    }
+
+    auto* drumStem = model_.getStem(drumIdx);
+    if (!drumStem || drumStem->audioBuffer.getNumSamples() == 0)
+    {
+        juce::Logger::writeToLog("❌ [SModeService] downbeat: drum stem empty");
+        return;
+    }
+
+    // Snapshot raw read pointers — model owns the buffer, lifetime is
+    // service-bound; safe to read on the worker thread because separation
+    // is complete and no further mutation happens to the stem audio.
+    const float* const* readPtrs = drumStem->audioBuffer.getArrayOfReadPointers();
+    int numCh = drumStem->audioBuffer.getNumChannels();
+    int numSamples = drumStem->audioBuffer.getNumSamples();
+    double sampleRate = model_.getSampleRate();
+
+    std::thread([this, readPtrs, numCh, numSamples, sampleRate, bpm]()
+    {
+        juce::AudioBuffer<float> buf(numCh, numSamples);
+        for (int ch = 0; ch < numCh; ++ch)
+            buf.copyFrom(ch, 0, readPtrs[ch], numSamples);
+
+        auto result = DownbeatDetector::detect(buf, sampleRate, bpm);
+
+        juce::MessageManager::callAsync([this, result, sampleRate]()
+        {
+            if (!result.valid)
+            {
+                juce::Logger::writeToLog("❌ [SModeService] downbeat invalid — leaving grid offset untouched");
+                return;
+            }
+            const double offsetSec = static_cast<double>(result.beat1Sample) / sampleRate;
+            model_.setGridOffsetSeconds(offsetSec);
+            juce::Logger::writeToLog("✅ [SModeService] gridOffset set: " + juce::String(offsetSec, 4)
+                                     + "s (conf=" + juce::String(result.confidence, 3) + ")");
+
+            // Notify UI to apply to all stem lanes.
+            auto* obj = new juce::DynamicObject();
+            obj->setProperty("beat1Sample", static_cast<juce::int64>(result.beat1Sample));
+            obj->setProperty("offsetSeconds", offsetSec);
+            obj->setProperty("confidence", result.confidence);
+            bus_.publish("smode.downbeat.detected", juce::var(obj));
+        });
+    }).detach();
 }
 
 juce::AudioBuffer<float> SModeService::loadAudioFile(const juce::File& file, double& outSampleRate)

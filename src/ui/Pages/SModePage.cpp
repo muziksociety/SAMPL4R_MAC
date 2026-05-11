@@ -1,6 +1,7 @@
 ﻿#include "SModePage.h"
 #include "../../utils/Tracing.h"
 #include "../../utils/RecentSongs.h"
+#include "../../utils/SamplarSettings.h"
 #include "../../app/ServiceLocator.h"
 #include "../../app/ServiceRegistry.h"
 #include "../../services/MidiMappingService.h"
@@ -175,6 +176,74 @@ SModePage::SModePage(EventBus& bus)
                             stemWaveforms_[(size_t) i]->setPitchSemitones(v);
                     }
                     juce::Logger::writeToLog("[smodeStemPitch-binding] restored");
+                }
+            });
+
+        // ── Per-stem MIDI-mod state persistence ─────────────────────────────
+        // Persists per-stem velocity curve + pitchBend/modWheel/aftertouch
+        // destinations and ranges. CC bindings are NOT persisted (user
+        // re-learns next session). TODO: persist ccBindings_ once a stable
+        // serialization of std::function callbacks is in place.
+        stemModBinding_ = std::make_unique<samplar::ScopedStateBinding>(
+            *app,
+            samplar::StateBinding {
+                juce::Identifier("smodeStemMod"), 1,
+                // save
+                [this](juce::ValueTree& t)
+                {
+                    t.removeAllProperties(nullptr);
+                    samplar::MidiMappingService* midiSvc = nullptr;
+                    if (auto* reg = samplar::ServiceLocator::getRegistry())
+                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+                    if (!midiSvc) return;
+                    using MM = samplar::MidiMappingService;
+                    for (int i = 0; i < MM::MAX_STEMS; ++i)
+                    {
+                        const juce::String suf = juce::String(i);
+                        t.setProperty("vc"  + suf,
+                            (int) midiSvc->getStemVelocityCurve(i), nullptr);
+                        t.setProperty("pbd" + suf,
+                            (int) midiSvc->getStemPitchBendDest(i),  nullptr);
+                        t.setProperty("mwd" + suf,
+                            (int) midiSvc->getStemModWheelDest(i),   nullptr);
+                        t.setProperty("atd" + suf,
+                            (int) midiSvc->getStemAftertouchDest(i), nullptr);
+                        t.setProperty("pbr" + suf,
+                            (double) midiSvc->getStemPitchBendRange(i),  nullptr);
+                        t.setProperty("mwr" + suf,
+                            (double) midiSvc->getStemModWheelRange(i),   nullptr);
+                        t.setProperty("atr" + suf,
+                            (double) midiSvc->getStemAftertouchRange(i), nullptr);
+                    }
+                    juce::Logger::writeToLog("[smodeStemMod-binding] saved");
+                },
+                // restore
+                [this](const juce::ValueTree& t)
+                {
+                    samplar::MidiMappingService* midiSvc = nullptr;
+                    if (auto* reg = samplar::ServiceLocator::getRegistry())
+                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+                    if (!midiSvc) return;
+                    using MM = samplar::MidiMappingService;
+                    for (int i = 0; i < MM::MAX_STEMS; ++i)
+                    {
+                        const juce::String suf = juce::String(i);
+                        const int vc  = (int) t.getProperty("vc"  + suf, (int) MM::VelocityCurve::Linear);
+                        const int pbd = (int) t.getProperty("pbd" + suf, (int) MM::ModDestination::Pitch);
+                        const int mwd = (int) t.getProperty("mwd" + suf, (int) MM::ModDestination::None);
+                        const int atd = (int) t.getProperty("atd" + suf, (int) MM::ModDestination::None);
+                        const float pbr = (float) (double) t.getProperty("pbr" + suf, 2.0);
+                        const float mwr = (float) (double) t.getProperty("mwr" + suf, 12.0);
+                        const float atr = (float) (double) t.getProperty("atr" + suf, 12.0);
+                        midiSvc->setStemVelocityCurve(i, (MM::VelocityCurve)  vc);
+                        midiSvc->setStemPitchBendDest (i, (MM::ModDestination) pbd);
+                        midiSvc->setStemModWheelDest  (i, (MM::ModDestination) mwd);
+                        midiSvc->setStemAftertouchDest(i, (MM::ModDestination) atd);
+                        midiSvc->setStemPitchBendRange (i, pbr);
+                        midiSvc->setStemModWheelRange  (i, mwr);
+                        midiSvc->setStemAftertouchRange(i, atr);
+                    }
+                    juce::Logger::writeToLog("[smodeStemMod-binding] restored");
                 }
             });
     }
@@ -929,6 +998,14 @@ SModePage::SModePage(EventBus& bus)
     loadSongBtn_.setTooltip("Drop a song here or click to choose a file for S-Mode separation");
     loadSongBtn_.onClick = [this]() { openLoadAudioChooser(); };
 
+    // Eject button — sits right next to LOAD SONG, removes current audio.
+    addAndMakeVisible(ejectBtn_);
+    ejectBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromRGB(180, 60, 60));
+    ejectBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
+    ejectBtn_.setTooltip("Unload current audio and return to empty state");
+    ejectBtn_.setVisible(false);  // hidden until stems load
+    ejectBtn_.onClick = [this]() { unloadCurrentAudio(); };
+
     // Empty-state overlay — sits on top of all other children
     addAndMakeVisible(loadAudioOverlay_);
     loadAudioOverlay_.onLoad = [this]() { openLoadAudioChooser(); };
@@ -938,6 +1015,20 @@ SModePage::SModePage(EventBus& bus)
         juce::Logger::writeToLog("[SModePage] " + juce::String(juce::CharPointer_UTF8("\xf0\x9f\x93\x81"))
                                  + " recent click: " + f.getFullPathName());
         samplar::RecentSongs::push(f);  // bumps it back to the top
+        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+        if (onRequestSeparation)
+            onRequestSeparation(f);
+    };
+    loadAudioOverlay_.onLoadFile = [this](const juce::File& f) {
+        if (!f.existsAsFile()) {
+            juce::Logger::writeToLog("[SModePage] drag-drop: file does not exist: "
+                                     + f.getFullPathName());
+            return;
+        }
+        juce::Logger::writeToLog("[SModePage] "
+            + juce::String(juce::CharPointer_UTF8("\xf0\x9f\x93\x81"))
+            + " drag-drop load: " + f.getFullPathName());
+        samplar::RecentSongs::push(f);
         loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
         if (onRequestSeparation)
             onRequestSeparation(f);
@@ -963,6 +1054,8 @@ SModePage::~SModePage()
         bus_.unsubscribe("smode.segment.stopped", segmentStoppedSub_);
     if (transportStoppedSub_ != 0)
         bus_.unsubscribe("smode.transport.stopped", transportStoppedSub_);
+    if (downbeatDetectedSub_ != 0)
+        bus_.unsubscribe("smode.downbeat.detected", downbeatDetectedSub_);
 }
 
 void SModePage::openLoadAudioChooser()
@@ -1677,6 +1770,32 @@ void SModePage::onStemsReady(SModeService& service)
         stopTransport();
     });
 
+    // ── Auto downbeat detection result subscription ─────────────────────
+    // Reset one-shot guard for this load session; SModeService publishes the
+    // result on this topic when background detection completes.
+    downbeatDetectionRequested_ = false;
+    if (downbeatDetectedSub_ != 0)
+        bus_.unsubscribe("smode.downbeat.detected", downbeatDetectedSub_);
+    downbeatDetectedSub_ = bus_.subscribe("smode.downbeat.detected", [this](const juce::var& v)
+    {
+        double offsetSec = 0.0;
+        double conf = 0.0;
+        if (auto* obj = v.getDynamicObject())
+        {
+            offsetSec = static_cast<double>(obj->getProperty("offsetSeconds"));
+            conf      = static_cast<double>(obj->getProperty("confidence"));
+        }
+        juce::Logger::writeToLog("🎵 [SModePage] downbeat received: offset="
+                                 + juce::String(offsetSec, 4) + "s conf="
+                                 + juce::String(conf, 3));
+
+        // Apply to every lane so the grid snaps to beat 1.
+        for (auto& wf : stemWaveforms_)
+        {
+            if (wf) wf->setGridOffsetSeconds(offsetSec);
+        }
+    });
+
     // Auto-open with one sequencer lane if none exist
     if (sequencerLanes_.empty())
         addSequencerLane();
@@ -1686,6 +1805,79 @@ void SModePage::onStemsReady(SModeService& service)
 
     // Audio is loaded — hide the empty-state overlay
     loadAudioOverlay_.setVisible(false);
+
+    // Show eject button now that audio is loaded
+    audioLoaded_ = true;
+    ejectBtn_.setVisible(true);
+    ejectBtn_.toFront(false);
+}
+
+void SModePage::unloadCurrentAudio()
+{
+    juce::Logger::writeToLog("[SModePage] === unloadCurrentAudio START ===");
+
+    // 1-3. Stop transport, kill voices, detach S-Mode model from MIDI
+    if (auto* reg = samplar::ServiceLocator::getRegistry())
+    {
+        if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
+        {
+            juce::Logger::writeToLog("[SModePage]   stopping S-Mode transport + voices");
+            midiSvc->stopSModeTransport();
+            midiSvc->stopAllVoices();
+            midiSvc->setSModeModel(nullptr);
+        }
+        else
+        {
+            juce::Logger::writeToLog("[SModePage] WARNING: midi.mapping service not found");
+        }
+    }
+
+    // 4. Reset SModeService session
+    if (smodeService_)
+    {
+        juce::Logger::writeToLog("[SModePage]   resetting SModeService");
+        smodeService_->reset();
+    }
+    smodeService_ = nullptr;
+
+    // 5. Clear UI state — remove all stem waveforms and sequencer lanes
+    juce::Logger::writeToLog("[SModePage]   clearing " + juce::String(stemWaveforms_.size())
+                              + " stem waveforms, " + juce::String(sequencerLanes_.size()) + " seq lanes");
+    for (auto& w : stemWaveforms_)
+        if (w) removeChildComponent(w.get());
+    stemWaveforms_.clear();
+
+    for (auto& l : sequencerLanes_)
+        if (l) removeChildComponent(l.get());
+    sequencerLanes_.clear();
+
+    // Reset transport / playhead / loop state
+    transportPlaying_ = false;
+    playheadTimeSec_ = 0.0;
+    looping_ = false;
+    loopStemIdx_ = -1;
+    loopSegIdx_ = -1;
+    removedStems_.clear();
+    focusedStem_ = -1;
+    detectedBpm_ = 0.0;
+    lockedBpm_ = 0.0;
+    gridLocked_ = false;
+    downbeatDetectionRequested_ = false;
+
+    // Reflect "stopped" state on the big play button
+    playBtn_.setPlaying(false);
+
+    // Show empty-state overlay again
+    audioLoaded_ = false;
+    ejectBtn_.setVisible(false);
+    loadAudioOverlay_.setVisible(true);
+    loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+    loadAudioOverlay_.toFront(true);
+
+    resized();
+    repaint();
+
+    juce::Logger::writeToLog("[SModePage] === unloadCurrentAudio END ===");
 }
 
 void SModePage::paint(juce::Graphics& g)
@@ -1835,8 +2027,15 @@ void SModePage::resized()
         tapTempoBtn_.setBounds(modeArea.removeFromLeft(54).withSizeKeepingCentre(54, 32));
     }
 
-    // Zone 8: LOAD SONG (~190px remainder)
-    loadSongBtn_.setBounds(topBar.reduced(0, 6));
+    // Zone 8: LOAD SONG + Eject (~190px remainder)
+    {
+        auto rightArea = topBar.reduced(0, 6);
+        // Eject button on the far right (32×32), same row as LOAD SONG
+        auto ejectSlot = rightArea.removeFromRight(32);
+        ejectBtn_.setBounds(ejectSlot.withSizeKeepingCentre(32, 32));
+        rightArea.removeFromRight(4);  // small gap
+        loadSongBtn_.setBounds(rightArea);
+    }
 
     // divisionCombo_ is now visible in Zone 5 above — no off-screen override needed.
 
@@ -2173,6 +2372,8 @@ void SModePage::setGridDivision(int division)
 
 void SModePage::applyBpm(double bpm)
 {
+    juce::Logger::writeToLog("[SModePage] applyBpm: " + juce::String(bpm, 4));
+
     // Push undo BEFORE any mutation. Guarded against re-entrancy inside the model.
     if (smodeService_)
         smodeService_->getModel().pushUndoState(
@@ -2236,6 +2437,21 @@ void SModePage::applyBpm(double bpm)
     }
 
     juce::Logger::writeToLog("[SModePage] BPM applied: " + juce::String(bpm, 2));
+
+    // ── Auto downbeat (beat 1) detection ────────────────────────────────
+    // One-shot per stem load: kick off background detection only if we
+    // haven't already computed a grid offset for this session and the BPM
+    // looks usable. The result lands via the "smode.downbeat.detected"
+    // event subscribed in onStemsReady().
+    if (smodeService_ && !downbeatDetectionRequested_)
+    {
+        auto& model = smodeService_->getModel();
+        if (model.getGridOffsetSeconds() == 0.0 && bpm >= 60.0 && bpm <= 220.0)
+        {
+            downbeatDetectionRequested_ = true;
+            smodeService_->runDownbeatDetectionAsync(bpm);
+        }
+    }
 }
 
 // ── Loop playback (Alt+Click) ─────────────────────────────────────────────
@@ -2677,6 +2893,12 @@ void SModePage::runBpmDetectionOnDrumStem()
         return;
     }
 
+    const bool isDrumStem = drumStem->name.containsIgnoreCase("drum");
+    if (isDrumStem)
+        juce::Logger::writeToLog("[HybridTempo] 🥁 using drum stem (cleaner ODF)");
+    else
+        juce::Logger::writeToLog("[HybridTempo] using full mix (no drum stem available)");
+
     juce::Logger::writeToLog("[SModePage] Running BPM detection on stem: " + drumStem->name
                              + " (index " + juce::String(drumIdx) + ")");
     bpmInput_.setText("...", juce::dontSendNotification);
@@ -2709,10 +2931,22 @@ void SModePage::runBpmDetectionOnDrumStem()
             + juce::String(bpm, 2) + " BPM (confidence="
             + juce::String(result.confidence, 2) + " source=" + result.getSourceName() + ")");
 
-        juce::MessageManager::callAsync([this, bpm]()
+        // Auto-round the detected BPM to the nearest integer if the user
+        // setting is enabled. The full pipeline (Beat This! → TempoRefiner)
+        // lands within ~0.2% of true, and modern productions almost
+        // universally use integer BPM — saves the user a manual round-button
+        // press for every load. Manual entry / host sync / tap tempo bypass
+        // this entirely and keep full precision (they call applyBpm directly
+        // with the user's value). Toggled in Settings → Audio.
+        const bool roundIt = samplar::SamplarSettings::getInstance().getAutoRoundBpm();
+        const double finalBpm = roundIt ? std::round(bpm) : bpm;
+        juce::Logger::writeToLog(juce::String("[SModePage] Auto-round ")
+            + (roundIt ? "ON" : "OFF") + ": "
+            + juce::String(bpm, 4) + " -> " + juce::String(finalBpm, 4));
+        juce::MessageManager::callAsync([this, finalBpm]()
         {
             if (!smodeService_) return;
-            applyBpm(bpm);
+            applyBpm(finalBpm);
         });
     }).detach();
 }

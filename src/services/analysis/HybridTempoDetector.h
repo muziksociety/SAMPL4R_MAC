@@ -5,6 +5,7 @@
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "TempoAnalyzer.h"
 #include "DWTTempoDetector.h"
+#include "BeatThisDetector.h"
 
 namespace samplar {
 
@@ -34,8 +35,21 @@ public:
         float dwtBPM = 0.0f;
         float dwtConfidence = 0.0f;
 
+        // Beat This! neural detector (ISMIR 2024) — optional 4th detector,
+        // enabled when WITH_BEAT_THIS is compiled in and Config::useBeatThis=true.
+        float beatThisBPM         = 0.0f;
+        float beatThisConfidence  = 0.0f;
+
         // Which detector was primary
-        enum class Source { None, FFT, DWT, Merged } source = Source::None;
+        enum class Source { None, FFT, DWT, Merged, BeatThis } source = Source::None;
+
+        // Octave correction (Schreiber & Müller 2014) applied as a post-step.
+        // When wasCorrected==true, bpm above is already the corrected value;
+        // preCorrectionBPM holds the fused candidate before correction.
+        bool   octaveCorrected   = false;
+        float  correctedBPM      = 0.0f;
+        float  preCorrectionBPM  = 0.0f;
+        float  onsetDensityHz    = 0.0f;
 
         juce::String getSourceName() const
         {
@@ -44,6 +58,7 @@ public:
                 case Source::FFT: return "FFT";
                 case Source::DWT: return "DWT";
                 case Source::Merged: return "Merged";
+                case Source::BeatThis: return "BeatThis";
                 default: return "None";
             }
         }
@@ -69,6 +84,14 @@ public:
         // Merge config
         float agreementThreshold = 0.03f;  // 3% tolerance for "agreement"
         float harmonicWeight = 0.8f;       // Weight for harmonic resolution
+
+        // Octave correction (Schreiber & Müller 2014) — disable-able for regression testing
+        bool  enableOctaveCorrection = true;
+
+        // Beat This! neural detector (overrides DSP result when confident enough).
+        // No effect unless WITH_BEAT_THIS is compiled in.
+        bool  useBeatThis              = true;
+        float beatThisConfidenceFloor  = 0.5f; // accept neural result if conf >= this
     };
 
     HybridTempoDetector() = default;
@@ -89,6 +112,7 @@ public:
 private:
     TempoAnalyzer fftDetector_;
     DWTTempoDetector dwtDetector_;
+    BeatThisDetector beatThisDetector_;
     juce::AudioFormatManager formatManager_;
     bool formatManagerInitialized_ = false;
 

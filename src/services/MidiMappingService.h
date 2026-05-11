@@ -13,6 +13,8 @@
 #include <atomic>
 #include <memory>
 #include <vector>
+#include <functional>
+#include <cstdint>
 
 // Forward-declare signalsmith-stretch so we don't pull its header into our public API.
 // Must match the upstream declaration exactly:
@@ -251,6 +253,48 @@ public:
     float getStemPitchSemitones(int stemIdx) const;
     static constexpr int MAX_STEMS = 8;
 
+    // ── Per-stem modulation routing (pitch bend, mod wheel, aftertouch) ─────
+    enum class ModDestination : uint8_t {
+        None = 0,
+        Pitch,         // additive on top of stem pitch knob, in semitones
+        FilterCutoff,
+        Volume,
+        Pan,
+    };
+
+    void setStemPitchBendDest  (int stemIdx, ModDestination d);
+    void setStemModWheelDest   (int stemIdx, ModDestination d);
+    void setStemAftertouchDest (int stemIdx, ModDestination d);
+    ModDestination getStemPitchBendDest  (int stemIdx) const;
+    ModDestination getStemModWheelDest   (int stemIdx) const;
+    ModDestination getStemAftertouchDest (int stemIdx) const;
+
+    void setStemPitchBendRange  (int stemIdx, float range);
+    void setStemModWheelRange   (int stemIdx, float range);
+    void setStemAftertouchRange (int stemIdx, float range);
+    float getStemPitchBendRange  (int stemIdx) const;
+    float getStemModWheelRange   (int stemIdx) const;
+    float getStemAftertouchRange (int stemIdx) const;
+
+    // ── Per-stem velocity curve ─────────────────────────────────────────────
+    enum class VelocityCurve : uint8_t {
+        Linear = 0,
+        Exponential,    // v^2
+        Logarithmic,    // sqrt(v)
+        SoftKnee,
+    };
+    void          setStemVelocityCurve(int stemIdx, VelocityCurve c);
+    VelocityCurve getStemVelocityCurve(int stemIdx) const;
+    static float  applyVelocityCurve(float v01, VelocityCurve c);
+
+    // ── Generic CC learn / bindings ─────────────────────────────────────────
+    /** Arm learn mode: the next CC received will bind to `apply`. */
+    void beginCcLearn(const juce::String& label, std::function<void(float)> apply);
+    void endCcLearn();
+    bool isCcLearning() const { return ccLearnActive_.load(std::memory_order_relaxed); }
+    /** Clear all generic CC bindings (channel/cc → callback). */
+    void clearCcBindings();
+
 private:
     // ── MIDI Slot ───────────────────────────────────────────────────────────
 
@@ -317,6 +361,82 @@ private:
         std::atomic<float> targetSemi { 0.0f };
     };
     std::array<StemPitchSlot, MAX_STEMS> stemPitch_;
+
+    // ── Per-stem mod slot: pitch bend, mod wheel, aftertouch ──────────────
+    // Message thread (handleIncomingMidiMessage) writes target atomics; the
+    // audio thread reads them once per block and slews internal `smoothed`
+    // values via a one-pole lowpass (smoothingCoeff_ from prepareToPlay).
+    // The `smoothed*` fields live on the audio thread only — no atomic.
+    struct StemModSlot
+    {
+        // Targets (-1..+1 for pitchBend, 0..1 for the others)
+        std::atomic<float> pitchBend   { 0.0f };
+        std::atomic<float> modWheel    { 0.0f };
+        std::atomic<float> aftertouch  { 0.0f };
+
+        // Routing (defaults: pitch bend → Pitch, others → None)
+        std::atomic<ModDestination> pitchBendDest  { ModDestination::Pitch };
+        std::atomic<ModDestination> modWheelDest   { ModDestination::None };
+        std::atomic<ModDestination> aftertouchDest { ModDestination::None };
+
+        // Range in destination units (for Pitch dest, units = semitones)
+        std::atomic<float> pitchBendRange  { 2.0f };
+        std::atomic<float> modWheelRange   { 12.0f };
+        std::atomic<float> aftertouchRange { 12.0f };
+
+        // Audio-thread-only smoothed values (one-pole lowpass per block)
+        float smoothedPitchBend  { 0.0f };
+        float smoothedMod        { 0.0f };
+        float smoothedAftertouch { 0.0f };
+    };
+    std::array<StemModSlot, MAX_STEMS> stemMod_;
+
+    // Decimation guards (kept on the message thread only).
+    std::array<float, MAX_STEMS> lastPitchBend_ {};
+    std::array<float, MAX_STEMS> lastModWheel_  {};
+    std::array<float, MAX_STEMS> lastAfterTouch_ {};
+
+    // One-pole smoothing coeff: a = 1 - exp(-2π·15 / sampleRate). Recomputed
+    // each prepareToPlay; defaults to a sane value for 48 kHz.
+    std::atomic<float> smoothingCoeff_ { 0.0f };
+
+    // ── Per-stem velocity curve ─────────────────────────────────────────────
+    struct StemVelSlot
+    {
+        std::atomic<VelocityCurve> curve { VelocityCurve::Linear };
+    };
+    std::array<StemVelSlot, MAX_STEMS> stemVel_;
+
+    // Inline helpers (audio thread) for routing modulation to destinations.
+    // Returns the additive offset to apply to pitch (in semitones).
+    float computeStemPitchModOffset(int stemIdx) const noexcept;
+    // Returns the multiplicative volume scalar (1.0 = unchanged).
+    float computeStemVolumeMod(int stemIdx) const noexcept;
+    // Returns the additive pan offset (-1..+1).
+    float computeStemPanMod(int stemIdx) const noexcept;
+
+    // Advance one-pole smoothing for ALL stems once per audio block.
+    void tickStemModSmoothing() noexcept;
+
+    // ── MIDI channel-message handlers (called on message thread) ─────────────
+    void onPitchBend  (int channel, float normalized);     // normalized: -1..+1
+    void onController (int channel, int cc, int value7bit);
+    void onAftertouch (int channel, float value01);
+
+    // ── Generic CC binding store ─────────────────────────────────────────────
+    struct CcBinding
+    {
+        int channel { 0 };   // 0 = omni, else 1..16
+        int cc      { 0 };
+        std::function<void(float)> apply;
+        juce::String label;
+    };
+    mutable std::mutex ccBindingsMutex_;
+    std::vector<CcBinding> ccBindings_;
+
+    std::atomic<bool>          ccLearnActive_   { false };
+    std::function<void(float)> ccLearnPendingApply_;
+    juce::String               ccLearnPendingLabel_;
 
     // Per-stem realtime signalsmith-stretch instances for the transport mix
     // path. Allocated in prepareToPlay; only touched on the audio thread.

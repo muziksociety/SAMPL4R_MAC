@@ -149,6 +149,7 @@ private:
  *  Shows a centered LOAD AUDIO button, plus a "RECENT" list below it
  *  when prior songs exist. Clicking a recent row re-opens that file. */
 class LoadAudioOverlay : public juce::Component,
+                         public  juce::FileDragAndDropTarget,
                          private juce::ListBoxModel
 {
 public:
@@ -183,6 +184,40 @@ public:
     {
         // Translucent dark-gray fill covering the whole SModePage
         g.fillAll(juce::Colour(0xCC202428));   // ~80% opaque dark grey
+
+        if (isDragHovering_)
+        {
+            const auto cyan = juce::Colour::fromRGB(0, 229, 255);
+
+            // Highlight ONLY the LOAD AUDIO button area, so the affordance is
+            // explicit — user must drop on the button, not anywhere on the
+            // overlay (the recents list below it does NOT accept drops).
+            auto r = loadButton_.getBounds().toFloat().expanded(10.0f);
+
+            // Subtle cyan wash on the button area
+            g.setColour(cyan.withAlpha(0.10f));
+            g.fillRoundedRectangle(r, 6.0f);
+
+            // Thick dashed cyan border around the button (4 px line, 10/6 dash)
+            const float dashes[] = { 10.0f, 6.0f };
+            const float lw = 3.0f;
+            g.setColour(cyan);
+            juce::Line<float> top   (r.getX(),     r.getY(),      r.getRight(), r.getY());
+            juce::Line<float> bottom(r.getX(),     r.getBottom(), r.getRight(), r.getBottom());
+            juce::Line<float> left  (r.getX(),     r.getY(),      r.getX(),     r.getBottom());
+            juce::Line<float> right (r.getRight(), r.getY(),      r.getRight(), r.getBottom());
+            g.drawDashedLine(top,    dashes, 2, lw);
+            g.drawDashedLine(bottom, dashes, 2, lw);
+            g.drawDashedLine(left,   dashes, 2, lw);
+            g.drawDashedLine(right,  dashes, 2, lw);
+
+            // Hint text just below the highlighted button
+            g.setColour(cyan);
+            g.setFont(juce::Font(13.0f, juce::Font::bold).withExtraKerningFactor(0.15f));
+            auto hint = juce::Rectangle<int>(0, 0, getWidth(), 18)
+                            .withCentre({ getWidth() / 2, (int) r.getBottom() + 16 });
+            g.drawText("DROP HERE", hint, juce::Justification::centred, false);
+        }
     }
 
     void resized() override
@@ -229,6 +264,94 @@ public:
 
     std::function<void()>                    onLoad;
     std::function<void(const juce::File&)>   onLoadRecent;
+    std::function<void(const juce::File&)>   onLoadFile;
+
+    // ── FileDragAndDropTarget ────────────────────────────────────
+    bool isInterestedInFileDrag(const juce::StringArray& files) override
+    {
+        for (const auto& f : files)
+            if (isAcceptedAudioFile(f)) return true;
+        return false;
+    }
+
+    void fileDragEnter(const juce::StringArray& files, int x, int y) override
+    {
+        updateHover(files, x, y);
+    }
+
+    void fileDragMove(const juce::StringArray& files, int x, int y) override
+    {
+        updateHover(files, x, y);
+    }
+
+    void fileDragExit(const juce::StringArray& /*files*/) override
+    {
+        if (isDragHovering_)
+        {
+            isDragHovering_ = false;
+            juce::Logger::writeToLog("[LoadAudioOverlay] fileDragExit: hover cleared");
+            repaint();
+        }
+    }
+
+    // Hit-test rectangle for accepting drops. Slightly bigger than the
+    // visible button so the user has a forgiving target.
+    juce::Rectangle<int> dropHitRect() const
+    {
+        return loadButton_.getBounds().expanded(10);
+    }
+
+    void updateHover(const juce::StringArray& files, int x, int y)
+    {
+        const bool fileOk = std::any_of(files.begin(), files.end(),
+            [](const juce::String& f) { return isAcceptedAudioFile(f); });
+        const bool inDropZone = dropHitRect().contains(x, y);
+        const bool wantHover  = fileOk && inDropZone;
+        if (isDragHovering_ != wantHover)
+        {
+            isDragHovering_ = wantHover;
+            repaint();
+        }
+    }
+
+    void filesDropped(const juce::StringArray& files, int x, int y) override
+    {
+        juce::Logger::writeToLog("[LoadAudioOverlay] === filesDropped START ===");
+        juce::Logger::writeToLog("[LoadAudioOverlay]   files.size: " + juce::String(files.size())
+            + " at (" + juce::String(x) + "," + juce::String(y) + ")");
+
+        // Only accept the drop if it landed in the button hit rect.
+        if (!dropHitRect().contains(x, y))
+        {
+            juce::Logger::writeToLog("[LoadAudioOverlay] drop outside button rect — ignored");
+            if (isDragHovering_) { isDragHovering_ = false; repaint(); }
+            return;
+        }
+        isDragHovering_ = false;
+        repaint();
+
+        for (const auto& path : files)
+        {
+            if (!isAcceptedAudioFile(path)) {
+                juce::Logger::writeToLog("[LoadAudioOverlay]   skip non-audio: " + path);
+                continue;
+            }
+            juce::File f(path);
+            juce::Logger::writeToLog("[LoadAudioOverlay]   accepted: " + f.getFullPathName());
+            if (onLoadFile) onLoadFile(f);
+            else juce::Logger::writeToLog("[LoadAudioOverlay] WARNING: onLoadFile not set");
+            juce::Logger::writeToLog("[LoadAudioOverlay] === filesDropped END (accepted first) ===");
+            return;
+        }
+        juce::Logger::writeToLog("[LoadAudioOverlay] === filesDropped END (no accepted file) ===");
+    }
+
+    static bool isAcceptedAudioFile(const juce::String& path)
+    {
+        auto ext = juce::File(path).getFileExtension().toLowerCase();
+        return ext == ".wav" || ext == ".mp3" || ext == ".flac"
+            || ext == ".aiff" || ext == ".aif" || ext == ".ogg";
+    }
 
 private:
     // ── ListBoxModel ─────────────────────────────────────────────
@@ -300,6 +423,7 @@ private:
     juce::Label                recentLabel_;
     juce::ListBox              recentList_;
     std::vector<juce::File>    recents_;
+    bool                       isDragHovering_ { false };
 };
 
 /**
@@ -372,6 +496,12 @@ private:
     // Load Song button — triggers S-Mode separation flow (also accepts drag-drop)
     juce::TextButton loadSongBtn_ { "LOAD SONG" };
     bool dragHighlight_ { false };  // true while audio file is dragged over window
+
+    // Eject button — dumps current S-Mode session and returns to LoadAudioOverlay.
+    // Hidden while LoadAudioOverlay is visible (no audio loaded); shown after onStemsReady().
+    juce::TextButton ejectBtn_ { juce::String::charToString(0x2715) };  // ✕
+    bool audioLoaded_ { false };
+    void unloadCurrentAudio();
 
     // ── Top-bar additions (Phase 1 visual build-out) ────────────────────
     // Logo
@@ -469,6 +599,9 @@ private:
     std::unique_ptr<samplar::ScopedStateBinding> stateBinding_;
     // AppState binding: persist per-stem pitch shift (semitones, -12..+12).
     std::unique_ptr<samplar::ScopedStateBinding> stemPitchBinding_;
+    // AppState binding: persist per-stem MIDI mod state — velocity curve and
+    // pitchBend/modWheel/aftertouch destinations + ranges.
+    std::unique_ptr<samplar::ScopedStateBinding> stemModBinding_;
     juce::TextButton addSeqBtn_ { "+ SEQ" };
     juce::TextButton smartFillBtn_ { "Smart Fill" };
     juce::TextButton playAllSeqBtn_ { "Play All" };
@@ -531,6 +664,11 @@ private:
     juce::Rectangle<int> playheadStripArea_;   // Thin strip above waveforms
 
     EventBus::HandlerId transportStoppedSub_ { 0 };
+    EventBus::HandlerId downbeatDetectedSub_ { 0 };
+
+    // One-shot guard: only kick off auto-downbeat detection once per
+    // stem-load session (BPM may be re-applied many times from user input).
+    bool downbeatDetectionRequested_ { false };
 
     // Tracks which stems have been "removed" (hidden) by the user
     std::set<int> removedStems_;

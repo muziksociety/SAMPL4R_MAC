@@ -391,3 +391,8 @@ tools/tutorial_gen/out/
 
 # AI separation models (downloaded separately, 680MB)
 models/
+
+# Beat This! large ONNX model + runtime DLLs (fetched/copied at build time)
+third_party/beat_this/models/*.onnx
+third_party/beat_this/models/
+**/onnxruntime*.dll

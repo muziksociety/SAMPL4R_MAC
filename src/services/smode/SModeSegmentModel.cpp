@@ -11,6 +11,7 @@ void SModeSegmentModel::clear()
     undoStack_.clear();
     redoStack_.clear();
     detectedBpm_ = 0.0;
+    gridOffsetSeconds_ = 0.0;
     notifyUndoStackChanged();
 }
 

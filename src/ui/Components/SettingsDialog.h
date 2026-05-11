@@ -99,16 +99,23 @@ private:
     juce::Label bufferHelpLabel_{ {}, "Lower = less latency, higher CPU. Higher = more stable." };
     juce::Label deviceHelpLabel_{ {}, "Select your audio output device for sample preview." };
 
+    // Analysis settings — auto-round detected BPM
+    juce::Label analysisSectionLabel_{ {}, "ANALYSIS" };
+    juce::ToggleButton autoRoundBpmToggle_{ "Auto-round detected BPM" };
+    juce::Label autoRoundBpmHelpLabel_{ {}, "Rounds auto-detected BPM to the nearest integer. Manual / host / tap-tempo entry is unaffected." };
+
     // Colors
     juce::Colour bgColor_{ 0xff1a1a2e };
     juce::Colour sectionBgColor_{ 0xff252540 };
     juce::Colour borderColor_{ 0xff00ffff };
     juce::Colour textColor_{ 0xffe0e0e0 };
     juce::Colour dimTextColor_{ 0xff808090 };
+    juce::Colour enabledColor_{ 0xff44ff44 };
 
     void onDeviceChanged();
     void onBufferChanged();
     void updateSampleRateDisplay();
+    void onAutoRoundBpmToggled();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioSettingsPanel)
 };

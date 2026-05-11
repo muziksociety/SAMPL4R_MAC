@@ -43,6 +43,13 @@ public:
     /** Fully reset S-Mode state (model, active flag, source file). */
     void reset();
 
+    /** Run automatic downbeat (beat 1) detection on the Drums stem in the
+     *  background. On success, updates model.setGridOffsetSeconds() and
+     *  publishes "smode.downbeat.detected" on the EventBus with the sample
+     *  offset (int64) — UI subscribes to refresh stem-lane grids.
+     *  One-shot, non-blocking. BPM must be > 0 (use applyBpm output). */
+    void runDownbeatDetectionAsync(double bpm);
+
     /** Get/set the source file being processed. */
     const juce::File& getSourceFile() const { return sourceFile_; }
     void setSourceFile(const juce::File& f) { sourceFile_ = f; }

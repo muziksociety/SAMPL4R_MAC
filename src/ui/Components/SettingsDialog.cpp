@@ -5,6 +5,7 @@
 #include "../../app/ServiceLocator.h"
 #include "../../services/LicenseSystemService.h"
 #include "../../services/MidiMappingService.h"
+#include "../../utils/SamplarSettings.h"
 #include "../licensing/LicenseActivationDialog.h"
 
 namespace samplar {
@@ -261,10 +262,35 @@ AudioSettingsPanel::AudioSettingsPanel()
     sampleRateValue_.setColour(juce::Label::textColourId, borderColor_);
     addAndMakeVisible(sampleRateValue_);
 
+    // ── Analysis section: Auto-round detected BPM ───────────────────
+    analysisSectionLabel_.setFont(juce::Font(16.0f, juce::Font::bold));
+    analysisSectionLabel_.setColour(juce::Label::textColourId, textColor_);
+    addAndMakeVisible(analysisSectionLabel_);
+
+    autoRoundBpmToggle_.setColour(juce::ToggleButton::textColourId, textColor_);
+    autoRoundBpmToggle_.setColour(juce::ToggleButton::tickColourId, enabledColor_);
+    autoRoundBpmToggle_.setTooltip("When ON, automatically rounds the auto-detected BPM "
+                                   "to the nearest integer. Manual entry / host tempo / "
+                                   "tap-tempo are unaffected. Default: ON.");
+    autoRoundBpmToggle_.setToggleState(SamplarSettings::getInstance().getAutoRoundBpm(),
+                                       juce::dontSendNotification);
+    autoRoundBpmToggle_.onClick = [this] { onAutoRoundBpmToggled(); };
+    addAndMakeVisible(autoRoundBpmToggle_);
+
+    autoRoundBpmHelpLabel_.setFont(juce::Font(11.0f));
+    autoRoundBpmHelpLabel_.setColour(juce::Label::textColourId, dimTextColor_);
+    addAndMakeVisible(autoRoundBpmHelpLabel_);
+
     // Populate device list
     refreshDeviceList();
 
     juce::Logger::writeToLog("[AudioSettingsPanel] === CONSTRUCTOR END ===");
+}
+
+void AudioSettingsPanel::onAutoRoundBpmToggled()
+{
+    const bool value = autoRoundBpmToggle_.getToggleState();
+    SamplarSettings::getInstance().setAutoRoundBpm(value);
 }
 
 void AudioSettingsPanel::paint(juce::Graphics& g)
@@ -294,6 +320,15 @@ void AudioSettingsPanel::paint(juce::Graphics& g)
     g.fillRoundedRectangle(bufferSection.toFloat(), 4.0f);
     g.setColour(borderColor_.withAlpha(0.2f));
     g.drawRoundedRectangle(bufferSection.toFloat(), 4.0f, 1.0f);
+
+    bounds.removeFromTop(15);
+
+    // Analysis section background (Auto-round BPM)
+    auto analysisSection = bounds.removeFromTop(95);
+    g.setColour(sectionBgColor_.withAlpha(0.3f));
+    g.fillRoundedRectangle(analysisSection.toFloat(), 4.0f);
+    g.setColour(borderColor_.withAlpha(0.2f));
+    g.drawRoundedRectangle(analysisSection.toFloat(), 4.0f, 1.0f);
 }
 
 void AudioSettingsPanel::resized()
@@ -326,6 +361,16 @@ void AudioSettingsPanel::resized()
 
     bufferSection.removeFromTop(5);
     bufferHelpLabel_.setBounds(bufferSection.removeFromTop(20));
+
+    bounds.removeFromTop(15);
+
+    // Analysis section (auto-round BPM toggle)
+    auto analysisSection = bounds.removeFromTop(95).reduced(10);
+    analysisSectionLabel_.setBounds(analysisSection.removeFromTop(22));
+    analysisSection.removeFromTop(4);
+    autoRoundBpmToggle_.setBounds(analysisSection.removeFromTop(28));
+    analysisSection.removeFromTop(2);
+    autoRoundBpmHelpLabel_.setBounds(analysisSection.removeFromTop(20));
 }
 
 void AudioSettingsPanel::refreshDeviceList()

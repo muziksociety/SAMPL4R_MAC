@@ -105,6 +105,13 @@ endif()
 option(WITH_SOUNDTOUCH "Enable SoundTouch for constant-pitch time-stretch preview" ON)
 option(WITH_ZEROMQ "Enable ZeroMQ IPC clients (Python bridge)" OFF)
 
+# Beat This! neural beat tracker (Foscarin et al., ISMIR 2024) — adds a 4th
+# detector to the tempo pipeline that produces explicit beat timestamps via
+# ONNX inference. Robust against metric-ratio ambiguity (95 vs 126 BPM on
+# 16th-note hat patterns) that confuses autocorrelation-based detectors.
+# Pulls in ONNX Runtime as a runtime dependency (DLL copied next to exe).
+option(WITH_BEAT_THIS "Enable Beat This! neural beat tracker (ONNX, ~83 MB model)" ON)
+
 # signalsmith-stretch — MIT, header-only realtime pitch shifter used by
 # MidiMappingService for stem + voice pitch in the audio path. Vendored
 # at third_party/signalsmith-stretch (depends on third_party/signalsmith-linear).
@@ -155,6 +162,78 @@ if(WITH_SOUNDTOUCH)
   set(SOUNDTOUCH_TARGET soundtouch_local)
 endif()
 
+# -----------------------------------------------------------------------
+# Beat This! neural beat tracker (vendored at third_party/beat_this/)
+#   - ONNX Runtime fetched from GitHub releases (pre-built Windows x64)
+#   - C++ inference wrapper compiled into a static library
+#   - 83 MB ONNX model copied next to the exe at install time
+# -----------------------------------------------------------------------
+set(BEAT_THIS_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/beat_this")
+if(WITH_BEAT_THIS)
+  if(NOT EXISTS "${BEAT_THIS_DIR}/models/beat_this.onnx")
+    message(WARNING "WITH_BEAT_THIS=ON but ${BEAT_THIS_DIR}/models/beat_this.onnx not found. Disabling.")
+    set(WITH_BEAT_THIS OFF)
+  endif()
+endif()
+
+if(WITH_BEAT_THIS)
+  message(STATUS "========================================")
+  message(STATUS "Beat This! neural beat tracker: ENABLED")
+  message(STATUS "========================================")
+
+  include(FetchContent)
+  set(ORT_VERSION "1.20.1")
+  if(WIN32)
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip")
+  elseif(APPLE)
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-universal2-${ORT_VERSION}.tgz")
+  else()
+    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz")
+  endif()
+
+  FetchContent_Declare(
+    onnxruntime_prebuilt
+    URL ${ORT_URL}
+  )
+  FetchContent_MakeAvailable(onnxruntime_prebuilt)
+  set(ORT_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}")
+  message(STATUS "ONNX Runtime ${ORT_VERSION} at: ${ORT_ROOT}")
+
+  if(WIN32)
+    set(ORT_LIB "${ORT_ROOT}/lib/onnxruntime.lib")
+    set(ORT_DLL "${ORT_ROOT}/lib/onnxruntime.dll")
+  elseif(APPLE)
+    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib")
+    set(ORT_DLL "${ORT_LIB}")
+  else()
+    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.so.${ORT_VERSION}")
+    set(ORT_DLL "${ORT_LIB}")
+  endif()
+
+  if(NOT EXISTS "${ORT_LIB}")
+    message(FATAL_ERROR "ONNX Runtime archive extracted but lib not at ${ORT_LIB}")
+  endif()
+
+  # Static library wrapping the vendored beat_this_cpp inference engine.
+  set(BEAT_THIS_LIB_SOURCES
+    ${BEAT_THIS_DIR}/src/InferenceProcessor.cpp
+    ${BEAT_THIS_DIR}/src/MelSpectrogram.cpp
+    ${BEAT_THIS_DIR}/src/Postprocessor.cpp
+    ${BEAT_THIS_DIR}/src/beat_this_api.cpp
+  )
+  add_library(beat_this_engine STATIC ${BEAT_THIS_LIB_SOURCES})
+  target_include_directories(beat_this_engine PUBLIC
+    ${BEAT_THIS_DIR}/src
+    ${BEAT_THIS_DIR}/third_party/pocketfft
+    ${ORT_ROOT}/include
+  )
+  target_link_libraries(beat_this_engine PUBLIC ${ORT_LIB})
+  target_compile_features(beat_this_engine PUBLIC cxx_std_17)
+  if(MSVC)
+    target_compile_options(beat_this_engine PRIVATE /wd4244 /wd4267 /wd4996)
+  endif()
+endif()
+
 # Sources
 set(SAMPLAR_SOURCES
   src/app/App.cpp
@@ -192,12 +271,20 @@ set(SAMPLAR_SOURCES
   src/services/analysis/DWTTempoDetector.cpp
   src/services/analysis/HybridTempoDetector.h
   src/services/analysis/HybridTempoDetector.cpp
+  src/services/analysis/BeatThisDetector.h
+  src/services/analysis/BeatThisDetector.cpp
+  src/services/analysis/OctaveCorrection.h
+  src/services/analysis/OctaveCorrection.cpp
+  src/services/analysis/TempoRefiner.h
+  src/services/analysis/TempoRefiner.cpp
   src/services/analysis/TempoCache.h
   src/services/analysis/TempoCache.cpp
   src/services/analysis/LoopDivider.h
   src/services/analysis/LoopDivider.cpp
   src/services/analysis/BeatAlignedSlicer.h
   src/services/analysis/BeatAlignedSlicer.cpp
+  src/services/analysis/DownbeatDetector.h
+  src/services/analysis/DownbeatDetector.cpp
   src/services/LicenseSystemService.h
   src/services/LicenseSystemService.cpp
   src/services/UpdateCheckService.h
@@ -377,6 +464,39 @@ endif()
 if(WITH_SOUNDTOUCH AND SOUNDTOUCH_TARGET)
   target_link_libraries(SamplarApp PRIVATE ${SOUNDTOUCH_TARGET})
   target_compile_definitions(SamplarApp PRIVATE WITH_SOUNDTOUCH=1)
+endif()
+
+# Beat This! integration on SamplarApp
+if(WITH_BEAT_THIS)
+  target_link_libraries(SamplarApp PRIVATE beat_this_engine)
+  target_compile_definitions(SamplarApp PRIVATE WITH_BEAT_THIS=1)
+  target_include_directories(SamplarApp PRIVATE ${BEAT_THIS_DIR}/src ${ORT_ROOT}/include)
+
+  # Copy onnxruntime.dll next to the exe so ONNX session creation succeeds.
+  add_custom_command(TARGET SamplarApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${ORT_DLL}"
+      "$<TARGET_FILE_DIR:SamplarApp>/"
+    COMMENT "Copying ONNX Runtime DLL next to SamplarApp"
+  )
+  # Provider extras (CUDA/DirectML stubs) — copy if present, but never fail.
+  file(GLOB ORT_EXTRA_DLLS "${ORT_ROOT}/lib/*.dll")
+  foreach(_dll IN LISTS ORT_EXTRA_DLLS)
+    add_custom_command(TARGET SamplarApp POST_BUILD
+      COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:SamplarApp>/"
+    )
+  endforeach()
+
+  # Copy beat_this.onnx into <exe-dir>/third_party/beat_this/models/ so
+  # BeatThisDetector::resolveModelPath() finds it next to the binary.
+  add_custom_command(TARGET SamplarApp POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E make_directory
+      "$<TARGET_FILE_DIR:SamplarApp>/third_party/beat_this/models"
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+      "${BEAT_THIS_DIR}/models/beat_this.onnx"
+      "$<TARGET_FILE_DIR:SamplarApp>/third_party/beat_this/models/beat_this.onnx"
+    COMMENT "Copying beat_this.onnx model next to SamplarApp"
+  )
 endif()
 
 # Optional ZeroMQ (user-provided system install)
@@ -574,6 +694,12 @@ endif()
 if(WITH_SOUNDTOUCH AND SOUNDTOUCH_TARGET)
     target_link_libraries(SamplarPlugin PRIVATE ${SOUNDTOUCH_TARGET})
     target_compile_definitions(SamplarPlugin PRIVATE WITH_SOUNDTOUCH=1)
+endif()
+
+if(WITH_BEAT_THIS)
+    target_link_libraries(SamplarPlugin PRIVATE beat_this_engine)
+    target_compile_definitions(SamplarPlugin PRIVATE WITH_BEAT_THIS=1)
+    target_include_directories(SamplarPlugin PRIVATE ${BEAT_THIS_DIR}/src ${ORT_ROOT}/include)
 endif()
 
 if (SAMPLAR_ENABLE_DEV_FALLBACK)

@@ -144,6 +144,29 @@ void MidiMappingService::handleIncomingMidiMessage(juce::MidiInput* source,
         handleNoteOff(message.getChannel(),
                       message.getNoteNumber());
     }
+    else if (message.isPitchWheel())
+    {
+        // 0..16383, center 8192 → normalized -1..+1
+        const int raw = message.getPitchWheelValue();
+        const float normalized = ((float) raw - 8192.0f) / 8192.0f;
+        onPitchBend(message.getChannel(), normalized);
+    }
+    else if (message.isController())
+    {
+        onController(message.getChannel(),
+                     message.getControllerNumber(),
+                     message.getControllerValue());
+    }
+    else if (message.isAftertouch())
+    {
+        onAftertouch(message.getChannel(),
+                     message.getAfterTouchValue() / 127.0f);
+    }
+    else if (message.isChannelPressure())
+    {
+        onAftertouch(message.getChannel(),
+                     message.getChannelPressureValue() / 127.0f);
+    }
 }
 
 // ────────────────────────────────────────────────────────────────────────────
@@ -158,11 +181,31 @@ void MidiMappingService::prepareToPlay(int samplesPerBlockExpected, double sampl
     currentSampleRate_ = sampleRate;
     blockSize_         = samplesPerBlockExpected;
 
+    // Per-block one-pole smoothing coefficient for mod targets.
+    // a = 1 - exp(-2π · fc / fs)  with fc = 15 Hz  → ~50 ms glide.
+    // Applied per BLOCK (not per sample) so we use sampleRate/blockSize as fs.
+    {
+        const double fc = 15.0;
+        const double fs = (samplesPerBlockExpected > 0)
+                          ? (sampleRate / (double) samplesPerBlockExpected)
+                          : sampleRate;
+        const float a = (float) (1.0 - std::exp(-2.0 * juce::MathConstants<double>::pi * fc / fs));
+        smoothingCoeff_.store(juce::jlimit(0.0f, 1.0f, a), std::memory_order_relaxed);
+    }
+
     // Silence all voices on reconfigure
     for (auto& v : voices_)
     {
         v.active = false;
         v.stemIdx = -1;
+    }
+
+    // Reset stem mod smoothed values (audio-thread-only state).
+    for (auto& slot : stemMod_)
+    {
+        slot.smoothedPitchBend  = 0.0f;
+        slot.smoothedMod        = 0.0f;
+        slot.smoothedAftertouch = 0.0f;
     }
 
     // ── Allocate realtime signalsmith-stretch instances (NEVER allocate on audio thread) ──
@@ -274,6 +317,10 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
 
     const int numSamples = bufferToFill.numSamples;
 
+    // Advance per-block one-pole smoothing for ALL stems' mod targets.
+    // smoothed += a · (target - smoothed). Cheap; runs once per block.
+    tickStemModSmoothing();
+
     for (auto& voice : voices_)
     {
         if (!voice.active || voice.buffer == nullptr)
@@ -303,8 +350,9 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
         // stem-transport path below — same threshold (1e-3 semitone).
         const float voiceTargetSemi =
             (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS)
-                ? stemPitch_[(size_t) voice.stemIdx]
-                      .targetSemi.load(std::memory_order_relaxed)
+                ? (stemPitch_[(size_t) voice.stemIdx]
+                       .targetSemi.load(std::memory_order_relaxed)
+                   + computeStemPitchModOffset(voice.stemIdx))
                 : 0.0f;
         const bool voiceUseRealtimeStretch =
             (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS
@@ -333,9 +381,10 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
             // only for binary-compat with any external readers; never
             // consulted here. Can be removed in a future cleanup.
 
-            // Update pitch from atomic. RT-safe — just sets internal field.
+            // Update pitch from atomic + mod modulation. RT-safe.
             const float targetSemi = stemPitch_[(size_t) voice.stemIdx]
-                                        .targetSemi.load(std::memory_order_relaxed);
+                                        .targetSemi.load(std::memory_order_relaxed)
+                                   + computeStemPitchModOffset(voice.stemIdx);
             applyPitchIfChanged(*voice.stretch, voice.lastSemi, targetSemi);
 
             const int endLimit  = (voice.endSample > 0) ? voice.endSample : srcSamples;
@@ -398,14 +447,23 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
             float* inBuf[2] = { inL, inR };
             voice.stretch->process(inBuf, inFrames, outBuf, blockOut);
 
-            // Mix into dest at velocity. signalsmith-stretch does NOT add
-            // overlap-add gain, so no compensation needed (full unity).
-            const float gain = voice.velocity;
+            // Mix into dest at velocity + per-stem mod (vol/pan). signalsmith
+            // does NOT add overlap-add gain, so no compensation needed.
+            const float vMod = (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS)
+                                  ? computeStemVolumeMod(voice.stemIdx) : 1.0f;
+            const float pan  = (voice.stemIdx >= 0 && voice.stemIdx < MAX_STEMS)
+                                  ? juce::jlimit(-1.0f, 1.0f,
+                                                 computeStemPanMod(voice.stemIdx))
+                                  : 0.0f;
+            const float panL = (pan <= 0.0f) ? 1.0f : (1.0f - pan);
+            const float panR = (pan >= 0.0f) ? 1.0f : (1.0f + pan);
+            const float gainL = voice.velocity * vMod * panL;
+            const float gainR = voice.velocity * vMod * panR;
             for (int i = 0; i < blockOut; ++i)
             {
-                destL[i] += outBuf[0][i] * gain;
+                destL[i] += outBuf[0][i] * gainL;
                 if (destR != nullptr)
-                    destR[i] += outBuf[1][i] * gain;
+                    destR[i] += outBuf[1][i] * gainR;
             }
 
             if (reachedEnd && !voice.looping)
@@ -519,7 +577,8 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
             auto& s = *sPtr;
 
             const float targetSemi = stemPitch_[(size_t) si]
-                                        .targetSemi.load(std::memory_order_relaxed);
+                                        .targetSemi.load(std::memory_order_relaxed)
+                                   + computeStemPitchModOffset(si);
             applyPitchIfChanged(s, stemLastSemi_[(size_t) si], targetSemi);
 
             const int blockOut = numSamples;
@@ -555,12 +614,20 @@ void MidiMappingService::getNextAudioBlock(const juce::AudioSourceChannelInfo& b
             // EQUAL in/out counts — pure pitch shift, no time stretch.
             s.process(inBuf, inFrames, outBuf, blockOut);
 
-            // Mix into dest at stem volume. Output is already at deviceSr.
+            // Mix into dest at stem volume + mod (volume / pan destinations).
+            // Output is already at deviceSr. volMod scales (1 + mod·range).
+            // panMod is added to a base pan of 0 (center) and clipped to [-1, +1].
+            const float volMod = computeStemVolumeMod(si);
+            const float pan    = juce::jlimit(-1.0f, 1.0f, computeStemPanMod(si));
+            const float panL   = (pan <= 0.0f) ? 1.0f : (1.0f - pan);
+            const float panR   = (pan >= 0.0f) ? 1.0f : (1.0f + pan);
+            const float gainL  = vol * volMod * panL;
+            const float gainR  = vol * volMod * panR;
             for (int i = 0; i < blockOut; ++i)
             {
-                destL[i] += outBuf[0][i] * vol;
+                destL[i] += outBuf[0][i] * gainL;
                 if (destR != nullptr)
-                    destR[i] += outBuf[1][i] * vol;
+                    destR[i] += outBuf[1][i] * gainR;
             }
             // Note: transport `pos` advances once after the stem loop using
             // `pos + numSamples * ratio` (in input-sample-space at modelSr).
@@ -690,7 +757,10 @@ void MidiMappingService::handleNoteOn(int /*channel*/, int noteNumber, float vel
                 v.startSample   = 0;
                 v.endSample     = segLen;
                 v.resampleRatio = modelSr / currentSampleRate_;
-                v.velocity      = velocity;
+                // Apply per-stem velocity curve before assigning.
+                v.velocity      = applyVelocityCurve(
+                                      velocity,
+                                      stemVel_[(size_t) stemIdx].curve.load(std::memory_order_relaxed));
                 v.noteNumber    = noteNumber;
                 v.looping       = seg->effects.loop;
                 v.stemIdx       = stemIdx;          // engage realtime pitch
@@ -1839,5 +1909,312 @@ void MidiMappingService::renderPitchedStem(int stemIdx, float semi, int generati
 #endif
 }
 #endif // 0  end of dead offline render code
+
+// ────────────────────────────────────────────────────────────────────────────
+// Per-stem modulation (pitch bend / mod wheel / aftertouch) + CC bindings
+// ────────────────────────────────────────────────────────────────────────────
+
+void MidiMappingService::tickStemModSmoothing() noexcept
+{
+    const float a = smoothingCoeff_.load(std::memory_order_relaxed);
+    if (a <= 0.0f) return;  // not configured yet
+    for (int s = 0; s < MAX_STEMS; ++s)
+    {
+        auto& slot = stemMod_[(size_t) s];
+        const float tBend  = slot.pitchBend  .load(std::memory_order_relaxed);
+        const float tMod   = slot.modWheel   .load(std::memory_order_relaxed);
+        const float tAfter = slot.aftertouch .load(std::memory_order_relaxed);
+        slot.smoothedPitchBend  += a * (tBend  - slot.smoothedPitchBend);
+        slot.smoothedMod        += a * (tMod   - slot.smoothedMod);
+        slot.smoothedAftertouch += a * (tAfter - slot.smoothedAftertouch);
+    }
+}
+
+float MidiMappingService::computeStemPitchModOffset(int stemIdx) const noexcept
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    const auto& slot = stemMod_[(size_t) stemIdx];
+    float semis = 0.0f;
+    if (slot.pitchBendDest .load(std::memory_order_relaxed) == ModDestination::Pitch)
+        semis += slot.smoothedPitchBend  * slot.pitchBendRange .load(std::memory_order_relaxed);
+    if (slot.modWheelDest  .load(std::memory_order_relaxed) == ModDestination::Pitch)
+        semis += slot.smoothedMod        * slot.modWheelRange  .load(std::memory_order_relaxed);
+    if (slot.aftertouchDest.load(std::memory_order_relaxed) == ModDestination::Pitch)
+        semis += slot.smoothedAftertouch * slot.aftertouchRange.load(std::memory_order_relaxed);
+    return semis;
+}
+
+float MidiMappingService::computeStemVolumeMod(int stemIdx) const noexcept
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 1.0f;
+    const auto& slot = stemMod_[(size_t) stemIdx];
+    // Mod sources contribute (mod · range) where range here is taken as a 0..1
+    // gain delta. We clamp to [0..2] so volume can be cut to zero or doubled.
+    float gain = 1.0f;
+    auto add = [&](float smoothed, float range, ModDestination dst)
+    {
+        if (dst == ModDestination::Volume)
+            gain += smoothed * range;
+    };
+    add(slot.smoothedPitchBend,  slot.pitchBendRange .load(std::memory_order_relaxed),
+        slot.pitchBendDest .load(std::memory_order_relaxed));
+    add(slot.smoothedMod,        slot.modWheelRange  .load(std::memory_order_relaxed),
+        slot.modWheelDest  .load(std::memory_order_relaxed));
+    add(slot.smoothedAftertouch, slot.aftertouchRange.load(std::memory_order_relaxed),
+        slot.aftertouchDest.load(std::memory_order_relaxed));
+    return juce::jlimit(0.0f, 2.0f, gain);
+}
+
+float MidiMappingService::computeStemPanMod(int stemIdx) const noexcept
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    const auto& slot = stemMod_[(size_t) stemIdx];
+    float pan = 0.0f;
+    auto add = [&](float smoothed, float range, ModDestination dst)
+    {
+        if (dst == ModDestination::Pan)
+            pan += smoothed * range;
+    };
+    add(slot.smoothedPitchBend,  slot.pitchBendRange .load(std::memory_order_relaxed),
+        slot.pitchBendDest .load(std::memory_order_relaxed));
+    add(slot.smoothedMod,        slot.modWheelRange  .load(std::memory_order_relaxed),
+        slot.modWheelDest  .load(std::memory_order_relaxed));
+    add(slot.smoothedAftertouch, slot.aftertouchRange.load(std::memory_order_relaxed),
+        slot.aftertouchDest.load(std::memory_order_relaxed));
+    return pan;
+}
+
+// ── Channel mapping helper: which stems does this MIDI channel hit? ─────────
+// Channel 1 → stem 0, channel 2 → stem 1, ... channel 0 → omni (all stems).
+static inline void forEachStemForChannel(int channel,
+                                         int maxStems,
+                                         const std::function<void(int)>& f)
+{
+    if (channel <= 0)            // omni
+    {
+        for (int s = 0; s < maxStems; ++s) f(s);
+        return;
+    }
+    const int s = channel - 1;
+    if (s >= 0 && s < maxStems) f(s);
+}
+
+void MidiMappingService::onPitchBend(int channel, float normalized)
+{
+    if (destroyed_.load(std::memory_order_acquire)) return;
+    forEachStemForChannel(channel, MAX_STEMS, [this, normalized](int s)
+    {
+        // Decimation: 1 LSB at 14-bit ≈ 1/16384.
+        if (std::abs(normalized - lastPitchBend_[(size_t) s]) < (1.0f / 16384.0f))
+            return;
+        lastPitchBend_[(size_t) s] = normalized;
+        stemMod_[(size_t) s].pitchBend.store(normalized, std::memory_order_relaxed);
+    });
+}
+
+void MidiMappingService::onAftertouch(int channel, float value01)
+{
+    if (destroyed_.load(std::memory_order_acquire)) return;
+    const float v = juce::jlimit(0.0f, 1.0f, value01);
+    forEachStemForChannel(channel, MAX_STEMS, [this, v](int s)
+    {
+        if (std::abs(v - lastAfterTouch_[(size_t) s]) < (1.0f / 128.0f))
+            return;
+        lastAfterTouch_[(size_t) s] = v;
+        stemMod_[(size_t) s].aftertouch.store(v, std::memory_order_relaxed);
+    });
+}
+
+void MidiMappingService::onController(int channel, int cc, int value7bit)
+{
+    if (destroyed_.load(std::memory_order_acquire)) return;
+    const float v = juce::jlimit(0, 127, value7bit) / 127.0f;
+
+    // 1) Mod wheel (CC #1) routes to per-stem mod slot.
+    if (cc == 1)
+    {
+        forEachStemForChannel(channel, MAX_STEMS, [this, v](int s)
+        {
+            if (std::abs(v - lastModWheel_[(size_t) s]) < (1.0f / 128.0f))
+                return;
+            lastModWheel_[(size_t) s] = v;
+            stemMod_[(size_t) s].modWheel.store(v, std::memory_order_relaxed);
+        });
+        return;
+    }
+
+    // 2) CC learn: bind the next non-mod-wheel CC to the pending callback.
+    if (ccLearnActive_.load(std::memory_order_relaxed))
+    {
+        juce::String label;
+        std::function<void(float)> apply;
+        {
+            std::lock_guard<std::mutex> lk(ccBindingsMutex_);
+            apply = std::move(ccLearnPendingApply_);
+            label = ccLearnPendingLabel_;
+            ccLearnPendingApply_ = nullptr;
+            ccLearnPendingLabel_ = juce::String();
+            if (apply)
+                ccBindings_.push_back({ channel, cc, apply, label });
+        }
+        ccLearnActive_.store(false, std::memory_order_relaxed);
+
+        juce::Logger::writeToLog("[MidiMappingService] CC learn bound: ch="
+            + juce::String(channel) + " cc=" + juce::String(cc)
+            + " label=" + label);
+
+        juce::MessageManager::callAsync([this, channel, cc, label]()
+        {
+            if (destroyed_.load(std::memory_order_seq_cst)) return;
+            auto* p = new juce::DynamicObject();
+            p->setProperty("channel", channel);
+            p->setProperty("cc",      cc);
+            p->setProperty("label",   label);
+            bus_.publish("midi.cc.bound", juce::var(p));
+        });
+
+        // Apply immediately so the user gets feedback on the first move.
+        if (apply) apply(v);
+        return;
+    }
+
+    // 3) Generic CC bindings: invoke any matching callback (channel = 0 → omni).
+    std::vector<std::function<void(float)>> matched;
+    {
+        std::lock_guard<std::mutex> lk(ccBindingsMutex_);
+        for (const auto& b : ccBindings_)
+        {
+            if (b.cc != cc) continue;
+            if (b.channel != 0 && b.channel != channel) continue;
+            if (b.apply) matched.push_back(b.apply);
+        }
+    }
+    for (auto& fn : matched) fn(v);
+}
+
+void MidiMappingService::beginCcLearn(const juce::String& label,
+                                      std::function<void(float)> apply)
+{
+    {
+        std::lock_guard<std::mutex> lk(ccBindingsMutex_);
+        ccLearnPendingLabel_ = label;
+        ccLearnPendingApply_ = std::move(apply);
+    }
+    ccLearnActive_.store(true, std::memory_order_relaxed);
+    juce::Logger::writeToLog("[MidiMappingService] CC learn ARMED: " + label);
+}
+
+void MidiMappingService::endCcLearn()
+{
+    {
+        std::lock_guard<std::mutex> lk(ccBindingsMutex_);
+        ccLearnPendingApply_ = nullptr;
+        ccLearnPendingLabel_ = juce::String();
+    }
+    ccLearnActive_.store(false, std::memory_order_relaxed);
+    juce::Logger::writeToLog("[MidiMappingService] CC learn cancelled");
+}
+
+void MidiMappingService::clearCcBindings()
+{
+    std::lock_guard<std::mutex> lk(ccBindingsMutex_);
+    ccBindings_.clear();
+}
+
+// ── Per-stem routing setters / getters ─────────────────────────────────────
+void MidiMappingService::setStemPitchBendDest(int stemIdx, ModDestination d)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].pitchBendDest.store(d, std::memory_order_relaxed);
+}
+void MidiMappingService::setStemModWheelDest(int stemIdx, ModDestination d)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].modWheelDest.store(d, std::memory_order_relaxed);
+}
+void MidiMappingService::setStemAftertouchDest(int stemIdx, ModDestination d)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].aftertouchDest.store(d, std::memory_order_relaxed);
+}
+MidiMappingService::ModDestination
+MidiMappingService::getStemPitchBendDest(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return ModDestination::None;
+    return stemMod_[(size_t) stemIdx].pitchBendDest.load(std::memory_order_relaxed);
+}
+MidiMappingService::ModDestination
+MidiMappingService::getStemModWheelDest(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return ModDestination::None;
+    return stemMod_[(size_t) stemIdx].modWheelDest.load(std::memory_order_relaxed);
+}
+MidiMappingService::ModDestination
+MidiMappingService::getStemAftertouchDest(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return ModDestination::None;
+    return stemMod_[(size_t) stemIdx].aftertouchDest.load(std::memory_order_relaxed);
+}
+
+void MidiMappingService::setStemPitchBendRange(int stemIdx, float r)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].pitchBendRange.store(juce::jlimit(0.0f, 48.0f, r),
+                                                    std::memory_order_relaxed);
+}
+void MidiMappingService::setStemModWheelRange(int stemIdx, float r)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].modWheelRange.store(juce::jlimit(0.0f, 48.0f, r),
+                                                   std::memory_order_relaxed);
+}
+void MidiMappingService::setStemAftertouchRange(int stemIdx, float r)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemMod_[(size_t) stemIdx].aftertouchRange.store(juce::jlimit(0.0f, 48.0f, r),
+                                                     std::memory_order_relaxed);
+}
+float MidiMappingService::getStemPitchBendRange(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    return stemMod_[(size_t) stemIdx].pitchBendRange.load(std::memory_order_relaxed);
+}
+float MidiMappingService::getStemModWheelRange(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    return stemMod_[(size_t) stemIdx].modWheelRange.load(std::memory_order_relaxed);
+}
+float MidiMappingService::getStemAftertouchRange(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return 0.0f;
+    return stemMod_[(size_t) stemIdx].aftertouchRange.load(std::memory_order_relaxed);
+}
+
+// ── Per-stem velocity curves ───────────────────────────────────────────────
+void MidiMappingService::setStemVelocityCurve(int stemIdx, VelocityCurve c)
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return;
+    stemVel_[(size_t) stemIdx].curve.store(c, std::memory_order_relaxed);
+}
+MidiMappingService::VelocityCurve
+MidiMappingService::getStemVelocityCurve(int stemIdx) const
+{
+    if (stemIdx < 0 || stemIdx >= MAX_STEMS) return VelocityCurve::Linear;
+    return stemVel_[(size_t) stemIdx].curve.load(std::memory_order_relaxed);
+}
+
+float MidiMappingService::applyVelocityCurve(float v, VelocityCurve c)
+{
+    v = juce::jlimit(0.0f, 1.0f, v);
+    switch (c)
+    {
+        case VelocityCurve::Linear:      return v;
+        case VelocityCurve::Exponential: return v * v;
+        case VelocityCurve::Logarithmic: return std::sqrt(v);
+        case VelocityCurve::SoftKnee:    return v < 0.7f ? v
+                                                        : 0.7f + (v - 0.7f) * 0.5f;
+    }
+    return v;
+}
 
 } // namespace samplar

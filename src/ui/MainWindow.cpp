@@ -1354,6 +1354,10 @@ private:
     int f1Count_ { 0 };
     const int resetMs_ { 4000 };
     samplar::SamplarLookAndFeel lnf_;
+    // Tooltip window — provides the surface JUCE renders tooltip text on.
+    // Without this, every setTooltip(...) call in the tree is dormant.
+    // 600 ms hover delay before showing.
+    juce::TooltipWindow tooltipWindow_ { this, 600 };
     // Window control buttons (macOS-style traffic lights + settings)
     ExitButton exitBtn_;
     PinButton pinBtn_;

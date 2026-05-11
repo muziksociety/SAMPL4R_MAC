@@ -1,4 +1,6 @@
 ﻿#include "HybridTempoDetector.h"
+#include "OctaveCorrection.h"
+#include "TempoRefiner.h"
 #include <cmath>
 
 namespace samplar {
@@ -58,11 +60,148 @@ HybridTempoDetector::Result HybridTempoDetector::detect(
         juce::String(result.dwtConfidence, 2) + ")");
 
     // ==========================================
-    // 3. Merge Results
+    // 3. Merge DSP Results
     // ==========================================
-    result = mergeResults(result.fftBPM, result.fftConfidence,
-                          result.dwtBPM, result.dwtConfidence,
-                          config);
+    const float fftBpmIn  = result.fftBPM;
+    const float fftConfIn = result.fftConfidence;
+    const float dwtBpmIn  = result.dwtBPM;
+    const float dwtConfIn = result.dwtConfidence;
+
+    result = mergeResults(fftBpmIn, fftConfIn, dwtBpmIn, dwtConfIn, config);
+    const float dspFusedBpm = result.bpm;
+
+#if WITH_BEAT_THIS
+    // ==========================================
+    // 3b. Beat This! Neural Detector
+    //     Runs after DSP fusion. If confident, REPLACES the result and
+    //     skips octave correction (the model already produces beat-level
+    //     timestamps — no metric-ratio ambiguity to fix).
+    // ==========================================
+    bool useBeatThisResult = false;
+    if (config.useBeatThis)
+    {
+        juce::Logger::writeToLog("[Hybrid] Running BeatThis! neural detector...");
+        auto bt = beatThisDetector_.detect(buffer, sampleRate);
+        if (bt.valid)
+        {
+            result.beatThisBPM        = static_cast<float>(bt.bpm);
+            result.beatThisConfidence = static_cast<float>(bt.confidence);
+            useBeatThisResult = (bt.confidence >= config.beatThisConfidenceFloor);
+        }
+
+        juce::Logger::writeToLog("[Hybrid] BeatThis: " + juce::String(result.beatThisBPM, 2)
+            + " BPM conf=" + juce::String(result.beatThisConfidence, 2)
+            + " | DSP fused: " + juce::String(dspFusedBpm, 2)
+            + " - picking " + (useBeatThisResult ? juce::String("BeatThis") : juce::String("DSP")));
+
+        if (useBeatThisResult)
+        {
+            // Preserve individual DSP results in the struct for debugging.
+            result.bpm        = result.beatThisBPM;
+            result.confidence = result.beatThisConfidence;
+            result.source     = Result::Source::BeatThis;
+
+            // ==========================================
+            // 3c. Tempo Refinement (sample-level autocorr around BeatThis hint)
+            //     Beat This! gets the right octave/metric but is quantized by
+            //     the model's ~20ms frame rate (median IBI ≈ 0.640s = 93.75 BPM
+            //     for a 95 BPM track — 1.3% off). Narrow-band autocorrelation
+            //     on the ODF with parabolic peak refinement recovers sub-decimal
+            //     BPM precision. Tolerance ±5% — won't cross octave boundaries.
+            // ==========================================
+            if (result.beatThisConfidence >= 0.5f)
+            {
+                auto refined = samplar::refineTempoNearBPM(
+                    buffer, sampleRate,
+                    static_cast<double>(result.beatThisBPM),
+                    0.05);
+
+                if (refined.improved && refined.confidence > 0.15)
+                {
+                    juce::Logger::writeToLog("[Hybrid] Refined "
+                        + juce::String(result.beatThisBPM, 2)
+                        + " -> " + juce::String(refined.refinedBPM, 2)
+                        + " (conf=" + juce::String(refined.confidence, 2) + ")");
+                    result.bpm    = static_cast<float>(refined.refinedBPM);
+                    result.source = Result::Source::BeatThis;  // still neural-decided
+                }
+                else
+                {
+                    juce::Logger::writeToLog("[Hybrid] Refinement skipped (improved="
+                        + juce::String(refined.improved ? 1 : 0)
+                        + " conf=" + juce::String(refined.confidence, 3) + ")");
+                }
+            }
+        }
+    }
+#else
+    (void) dspFusedBpm; // unused without WITH_BEAT_THIS
+#endif
+
+    // ==========================================
+    // 4. Octave Correction (Schreiber & Müller 2014)
+    //    Post-step on the fused candidate. Reversible via Config flag.
+    //    SKIPPED when BeatThis result was selected.
+    // ==========================================
+#if WITH_BEAT_THIS
+    const bool skipOctaveCorrection = (result.source == Result::Source::BeatThis);
+#else
+    const bool skipOctaveCorrection = false;
+#endif
+    result.preCorrectionBPM = result.bpm;
+    if (skipOctaveCorrection)
+    {
+        juce::Logger::writeToLog("[Hybrid] Octave correction SKIPPED (BeatThis result is authoritative)");
+        result.correctedBPM = result.bpm;
+    }
+    else if (config.enableOctaveCorrection && result.bpm > 0.0f)
+    {
+        juce::Logger::writeToLog("[Hybrid] Running octave correction post-step...");
+
+        // Build a mono view for the ODF computation. Detectors above accept a
+        // multi-channel buffer; reduce to mono here (recomputing ODF inside
+        // OctaveCorrection is cheap — one FFT pass).
+        juce::AudioBuffer<float> mono;
+        if (buffer.getNumChannels() == 1)
+        {
+            mono.setSize(1, buffer.getNumSamples(), false, false, true);
+            mono.copyFrom(0, 0, buffer, 0, 0, buffer.getNumSamples());
+        }
+        else if (buffer.getNumChannels() >= 2)
+        {
+            mono.setSize(1, buffer.getNumSamples(), false, false, true);
+            mono.clear();
+            const int nCh = buffer.getNumChannels();
+            const float scale = 1.0f / static_cast<float>(nCh);
+            for (int ch = 0; ch < nCh; ++ch)
+                mono.addFrom(0, 0, buffer, ch, 0, buffer.getNumSamples(), scale);
+        }
+
+        auto oc = correctOctaveFromBuffer(static_cast<double>(result.bpm), mono, sampleRate);
+        result.onsetDensityHz = static_cast<float>(oc.onsetDensityHz);
+
+        if (oc.wasCorrected)
+        {
+            result.octaveCorrected = true;
+            result.correctedBPM    = static_cast<float>(oc.correctedBPM);
+            result.bpm             = static_cast<float>(oc.correctedBPM);
+            juce::Logger::writeToLog("[Hybrid] Octave-corrected: " +
+                juce::String(result.preCorrectionBPM, 2) + " -> " +
+                juce::String(result.bpm, 2) + " | " + oc.reasoning);
+        }
+        else
+        {
+            result.octaveCorrected = false;
+            result.correctedBPM    = result.bpm;
+            juce::Logger::writeToLog("[Hybrid] Octave correction: no change | " + oc.reasoning);
+        }
+    }
+    else
+    {
+        result.correctedBPM = result.bpm;
+        if (!config.enableOctaveCorrection)
+            juce::Logger::writeToLog("[Hybrid] Octave correction DISABLED via config");
+    }
 
     juce::Logger::writeToLog("=== HYBRID RESULT ===");
     juce::Logger::writeToLog("[Hybrid] Final BPM: " + juce::String(result.bpm, 2));
