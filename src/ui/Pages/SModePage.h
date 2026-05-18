@@ -557,6 +557,9 @@ private:
     // BPM / tempo controls
     juce::Label bpmTitleLabel_ { {}, "BPM:" };
     juce::TextEditor bpmInput_;
+    // Animates the "..." text in bpmInput_ while a BPM detection is in flight.
+    // Reset to nullptr (stops timer) once applyBpm() commits a real value.
+    std::unique_ptr<juce::Timer> bpmDotsAnim_;
     juce::TextButton bpmRoundBtn_ { "R" };
     juce::TextButton halfTempoBtn_ { "Half" };
     juce::TextButton doubleTempoBtn_ { "Dbl" };
@@ -644,6 +647,11 @@ private:
 
     bool transportPlaying_ { false };
     double playheadTimeSec_ { 0.0 };
+
+    // Context-aware spacebar: re-bound each time the user clicks one of the
+    // play buttons (top transport / play-all sequencer / per-lane play). The
+    // spacebar handler in keyPressed() simply invokes whatever is bound here.
+    std::function<void()> spaceKeyAction_;
 
     // Computer keyboard MIDI — track held keys for note-off on release
     std::set<int> heldKeyboardNotes_;

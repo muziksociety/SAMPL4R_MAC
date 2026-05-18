@@ -3,6 +3,7 @@
 #include "../security/HardwareFingerprintGenerator.h"
 #include "../security/LicenseCache.h"
 #include "../security/SecureSessionManager.h"
+#include "../security/SignedTokenVerifier.h"
 #include "../networking/LicenseServerClient.h"
 #include "../networking/OAuthBrowserAuthenticator.h"
 #include "../licensing/FeatureManager.h"
@@ -12,14 +13,40 @@
 
 #include <algorithm>
 #include <map>
+#include <regex>
 
 namespace samplar {
 
 namespace {
-// Server URL for OAuth and license validation
+// SAMPL4R production license server (live Render deployment).
+// NOTE: the license.samplemonsta.com CNAME is not yet resolving — use the
+// Render hostname directly until DNS is live.
 constexpr auto kDefaultLicenseServerUrl = "https://license-server-n5it.onrender.com";
 constexpr auto kClientVersion = "5.0.0";
-constexpr auto kClientUserAgent = "Samplar/5.0.0";
+constexpr auto kClientUserAgent = "SAMPLAR-sampl4r/5.0.0";
+constexpr auto kSamplarProductId = "sampl4r";
+
+// SAMPL4R license key regex:
+//   SAMPL4R-{TYPE3}-{HARDWARE_HASH10}-{YYYYMMDD8}-{SIG5}
+// where TYPE is PRO/STD/EDU/TRL/PROMO (3 chars), hash is alphanumeric or 0000000000,
+// date is 8 digits (or 00000000 for first-use trials), signature is 5 chars.
+const std::regex& samplarLicenseRegex()
+{
+    static const std::regex re(R"(^SAMPL4R-[A-Z0-9]{3}-[A-Z0-9]{10}-[0-9]{8}-[A-Z0-9]{5}$)");
+    return re;
+}
+
+bool isSamplarKeyFormatValid(const std::string& key)
+{
+    return std::regex_match(key, samplarLicenseRegex());
+}
+
+// Truncate license key for logging — keep first 10 chars (covers "SAMPL4R-PRO")
+std::string truncateKeyForLog(const std::string& key)
+{
+    if (key.size() <= 10) return key;
+    return key.substr(0, 10) + "...";
+}
 
 const std::map<std::string, FeatureManager::FeatureType>& featureNameMap()
 {
@@ -320,6 +347,297 @@ bool LicenseSystemService::activateLicense(const std::string& licenseKey,
     return status == LicenseStatus::Valid;
 }
 
+bool LicenseSystemService::activateWithKey(const std::string& licenseKey)
+{
+    juce::Logger::writeToLog("[License] === activateWithKey START === key=" +
+        juce::String(truncateKeyForLog(licenseKey)));
+
+    // Client-side format check first — fail fast before hitting the server
+    if (!isSamplarKeyFormatValid(licenseKey)) {
+        std::scoped_lock lock(stateMutex_);
+        lastResultMessage_ = "Invalid license key format. Expected: SAMPL4R-XXX-XXXXXXXXXX-YYYYMMDD-XXXXX";
+        currentStatus_ = LicenseStatus::InvalidKey;
+        juce::Logger::writeToLog("[License] Format check failed for: " +
+            juce::String(truncateKeyForLog(licenseKey)));
+        publishStatusUpdate("activation_format_invalid");
+        return false;
+    }
+
+    std::string hardwareId;
+    {
+        std::scoped_lock lock(stateMutex_);
+        if (!serverClient_ || !hardwareGenerator_ || !cache_) {
+            currentStatus_ = LicenseStatus::NotInitialised;
+            lastResultMessage_ = "Service not initialised";
+            return false;
+        }
+        hardwareId = currentHardwareId_.empty() ? hardwareGenerator_->generateHardwareId() : currentHardwareId_;
+        currentHardwareId_ = hardwareId;
+    }
+
+    LicenseServerClient::ValidationRequest request;
+    request.licenseKey = licenseKey;
+    request.hardwareId = hardwareId;
+    request.appVersion = kClientVersion;
+    request.userAgent = kClientUserAgent;
+
+    const auto response = serverClient_->validateLicense(request);
+
+    const auto status = applyServerResponse(licenseKey,
+                                            hardwareId,
+                                            response.valid,
+                                            response.statusCode,
+                                            response.licenseInfo,
+                                            response.validationInfo,
+                                            response.message);
+
+    if (status == LicenseStatus::Valid) {
+        juce::Logger::writeToLog("[License] Activation OK for " +
+            juce::String(truncateKeyForLog(licenseKey)));
+        // Immediately fetch the signed token so we have offline coverage from t=0
+        revalidateCachedLicense();
+    } else {
+        juce::Logger::writeToLog("[License] Activation failed: " + juce::String(response.message));
+    }
+
+    return status == LicenseStatus::Valid;
+}
+
+bool LicenseSystemService::activateWithAccount(const std::string& email, const std::string& password)
+{
+    // Truncate email for logs (first 4 chars + "..."), never log password.
+    const auto truncEmail = email.size() > 4 ? email.substr(0, 4) + "..." : email;
+    juce::Logger::writeToLog("[License] === activateWithAccount START === email=" +
+        juce::String(truncEmail));
+
+    if (email.empty() || password.empty()) {
+        std::scoped_lock lock(stateMutex_);
+        lastResultMessage_ = "Email and password are required";
+        currentStatus_ = LicenseStatus::InvalidKey;
+        publishStatusUpdate("account_activation_input_invalid");
+        return false;
+    }
+
+    std::string hardwareId;
+    {
+        std::scoped_lock lock(stateMutex_);
+        if (!serverClient_ || !hardwareGenerator_ || !cache_) {
+            currentStatus_ = LicenseStatus::NotInitialised;
+            lastResultMessage_ = "Service not initialised";
+            return false;
+        }
+        hardwareId = currentHardwareId_.empty() ? hardwareGenerator_->generateHardwareId() : currentHardwareId_;
+        currentHardwareId_ = hardwareId;
+    }
+
+    // Call the live server. This is a blocking network call — callers must
+    // invoke from a background thread (see LicenseActivationDialog).
+    const auto resp = serverClient_->loginWithHardware(email, password, hardwareId);
+
+    // Handle: !success → auth failed (bad password / unknown user / server error)
+    if (!resp.success) {
+        std::scoped_lock lock(stateMutex_);
+        lastResultMessage_ = resp.message.empty()
+            ? std::string("Sign-in failed. Check your email and password.")
+            : resp.message;
+        // Map HTTP status to a friendlier status
+        if (resp.statusCode == 0 || resp.statusCode >= 500) {
+            currentStatus_ = LicenseStatus::NetworkError;
+        } else if (resp.statusCode == 423) {
+            currentStatus_ = LicenseStatus::UserLockedOut;
+        } else {
+            currentStatus_ = LicenseStatus::InvalidKey; // auth failure
+        }
+        juce::Logger::writeToLog("[License] account auth FAILED status=" +
+            juce::String(resp.statusCode) + " msg=" + juce::String(lastResultMessage_));
+        publishStatusUpdate("account_activation_auth_failed");
+        return false;
+    }
+
+    // Handle: success but license_valid=false → no entitlement on this account
+    if (!resp.licenseValid) {
+        std::scoped_lock lock(stateMutex_);
+        lastResultMessage_ = resp.message.empty()
+            ? std::string("No SAMPL4R license on this account — purchase at samplemonsta.com")
+            : resp.message;
+        currentStatus_ = LicenseStatus::InvalidKey;
+        juce::Logger::writeToLog("[License] account auth OK but no SAMPL4R entitlement");
+        publishStatusUpdate("account_activation_no_entitlement");
+        return false;
+    }
+
+    // SUCCESS — verify signed_token (if present) for tamper protection, then cache.
+    if (!resp.signedToken.empty()) {
+        auto verified = SignedTokenVerifier::verify(resp.signedToken, hardwareId, kSamplarProductId);
+        if (!verified.has_value()) {
+            std::scoped_lock lock(stateMutex_);
+            lastResultMessage_ = "Signed token verification failed — possible MITM";
+            currentStatus_ = LicenseStatus::InvalidKey;
+            juce::Logger::writeToLog("[License] signed_token HMAC verification FAILED — rejecting");
+            publishStatusUpdate("account_activation_token_invalid");
+            return false;
+        }
+    }
+
+    // Build the cached license blob: customer_email + license_type + signed_token.
+    // We synthesise an account-style cache entry; the server returns no license_key
+    // for account auth, so we key the cache on a constant marker derived from email.
+    juce::DynamicObject::Ptr data(new juce::DynamicObject());
+    data->setProperty("customer_email", juce::String(resp.email));
+    data->setProperty("license_type",   juce::String(resp.licenseType));
+    if (!resp.signedToken.empty())
+        data->setProperty("signed_token", juce::String(resp.signedToken));
+    if (!resp.expiresAt.empty())
+        data->setProperty("expires_at",   juce::String(resp.expiresAt));
+    // Persist email as the cache "licenseKey" slot so legacy code paths still find
+    // something — but it will fail isSamplarKeyFormatValid(), so the legacy key
+    // path no longer mistakes this for a real SAMPL4R key. The startup-validation
+    // logic has a dedicated "if email-shaped → use account revalidation" branch.
+    const std::string cacheKey = std::string("ACCOUNT:") + resp.email;
+
+    {
+        std::scoped_lock lock(stateMutex_);
+        currentStatus_ = LicenseStatus::Valid;
+        lastResultMessage_.clear();
+        currentLicense_.customerEmail = resp.email;
+        currentLicense_.licenseType   = resp.licenseType;
+        if (!resp.expiresAt.empty()) {
+            auto t = juce::Time::fromISO8601(juce::String(resp.expiresAt));
+            if (t != juce::Time()) {
+                currentLicense_.expiresAt = std::chrono::system_clock::time_point(
+                    std::chrono::milliseconds(t.toMilliseconds()));
+            }
+        }
+        if (cache_) {
+            cache_->storeLicense(cacheKey, juce::var(data.get()), hardwareId);
+            cache_->updateLastValidation(hardwareId);
+        }
+    }
+
+    juce::Logger::writeToLog("[License] account activation SUCCESS email=" +
+        juce::String(truncEmail) + " type=" + juce::String(resp.licenseType));
+    publishStatusUpdate("account_activation_success");
+    return true;
+}
+
+LicenseSystemService::LicenseStatus LicenseSystemService::revalidateCachedLicense()
+{
+    juce::Logger::writeToLog("[License] === revalidateCachedLicense START ===");
+
+    std::string licenseKey;
+    std::string hardwareId;
+
+    {
+        std::scoped_lock lock(stateMutex_);
+        if (!cache_ || !serverClient_) {
+            juce::Logger::writeToLog("[License] Service not initialised");
+            return LicenseStatus::NotInitialised;
+        }
+        hardwareId = currentHardwareId_;
+        auto entry = cache_->retrieveLicense(hardwareId);
+        if (!entry.has_value() || entry->licenseKey.empty()) {
+            juce::Logger::writeToLog("[License] No cached license to revalidate");
+            return LicenseStatus::InvalidKey;
+        }
+        licenseKey = entry->licenseKey;
+    }
+
+    // Online check
+    const auto response = serverClient_->validateToken(licenseKey, hardwareId, kSamplarProductId);
+
+    if (response.valid && !response.signedToken.empty()) {
+        // Verify the signed token offline. Even though the server said valid,
+        // we re-verify HMAC so an attacker who can MITM cannot fake responses.
+        auto verified = SignedTokenVerifier::verify(response.signedToken,
+                                                    hardwareId,
+                                                    kSamplarProductId);
+        if (!verified.has_value()) {
+            juce::Logger::writeToLog("[License] Server returned token but HMAC failed — rejecting");
+            std::scoped_lock lock(stateMutex_);
+            currentStatus_ = LicenseStatus::InvalidKey;
+            lastResultMessage_ = "Invalid license signature";
+            publishStatusUpdate("token_signature_invalid");
+            return LicenseStatus::InvalidKey;
+        }
+
+        // Cache token data + refresh last-validation timestamp (resets 30-day grace)
+        {
+            std::scoped_lock lock(stateMutex_);
+            // Re-store the cache entry with the fresh signed token embedded so we
+            // can verify offline next time.
+            auto entry = cache_->retrieveLicense(hardwareId);
+            if (entry.has_value()) {
+                if (auto* obj = entry->licenseData.getDynamicObject()) {
+                    obj->setProperty("signed_token", juce::String(response.signedToken));
+                    cache_->storeLicense(licenseKey, entry->licenseData, hardwareId);
+                } else {
+                    juce::DynamicObject::Ptr data(new juce::DynamicObject());
+                    data->setProperty("signed_token", juce::String(response.signedToken));
+                    data->setProperty("customer_email", juce::String(verified->email));
+                    cache_->storeLicense(licenseKey, juce::var(data.get()), hardwareId);
+                }
+            }
+            cache_->updateLastValidation(hardwareId);
+            currentStatus_ = LicenseStatus::Valid;
+            lastResultMessage_.clear();
+        }
+        publishStatusUpdate("revalidation_online_success");
+        return LicenseStatus::Valid;
+    }
+
+    // Server unreachable or returned an error — try offline grace
+    juce::Logger::writeToLog("[License] Server check failed (status=" +
+        juce::String(response.statusCode) + ") — trying offline grace");
+
+    // Use the cached signed_token from last successful online validation
+    std::string cachedToken;
+    {
+        std::scoped_lock lock(stateMutex_);
+        auto entry = cache_->retrieveLicense(hardwareId);
+        if (entry.has_value() && entry->licenseData.isObject()) {
+            if (auto* obj = entry->licenseData.getDynamicObject()) {
+                cachedToken = obj->getProperty(juce::Identifier("signed_token")).toString().toStdString();
+            }
+        }
+    }
+
+    const bool networkError = (response.statusCode == 0 || response.statusCode >= 500);
+
+    if (networkError && !cachedToken.empty()) {
+        auto verified = SignedTokenVerifier::verify(cachedToken, hardwareId, kSamplarProductId);
+        if (verified.has_value()) {
+            // Check 30-day offline grace window (720 hours from last validation)
+            constexpr int kGraceHours = 30 * 24;
+            const auto grace = cache_->getOfflineGraceStatus(hardwareId, kGraceHours);
+            if (grace.hasGrace) {
+                std::scoped_lock lock(stateMutex_);
+                currentStatus_ = LicenseStatus::GracePeriodActive;
+                lastResultMessage_ = "Offline — " +
+                    std::to_string(grace.remainingTime.count() / (60 * 24)) + " days of grace remaining";
+                juce::Logger::writeToLog("[License] Offline grace active: " +
+                    juce::String(lastResultMessage_));
+                publishStatusUpdate("revalidation_offline_grace");
+                return LicenseStatus::GracePeriodActive;
+            }
+            juce::Logger::writeToLog("[License] 30-day grace expired");
+            std::scoped_lock lock(stateMutex_);
+            currentStatus_ = LicenseStatus::GracePeriodExpired;
+            lastResultMessage_ = "Offline grace expired — please reconnect to verify your license";
+            publishStatusUpdate("revalidation_grace_expired");
+            return LicenseStatus::GracePeriodExpired;
+        }
+    }
+
+    // Either non-network error from server, or no cached token — surface server status
+    return applyServerResponse(licenseKey,
+                               hardwareId,
+                               false,
+                               response.statusCode,
+                               response.licenseInfo,
+                               response.validationInfo,
+                               response.message);
+}
+
 bool LicenseSystemService::deactivateLicense()
 {
     juce::Logger::writeToLog("[LicenseSystem] === deactivateLicense START ===");
@@ -590,12 +908,16 @@ void LicenseSystemService::setupEventSubscriptions()
         const auto email = extractEventString(payload, "email");
         const auto password = extractEventString(payload, "password");
 
-        if (licenseKey.isEmpty() || email.isEmpty() || password.isEmpty()) {
-            juce::Logger::writeToLog("[LicenseSystem] license.activate missing credentials");
+        if (licenseKey.isEmpty()) {
+            juce::Logger::writeToLog("[License] license.activate missing license_key");
             return;
         }
 
-        const bool success = activateLicense(licenseKey.toStdString(), email.toStdString(), password.toStdString());
+        // SAMPL4R: key-only activation when no email/password supplied.
+        // Legacy email+password path retained for compatibility.
+        const bool success = (email.isEmpty() && password.isEmpty())
+            ? activateWithKey(licenseKey.toStdString())
+            : activateLicense(licenseKey.toStdString(), email.toStdString(), password.toStdString());
 
         LicenseStatus statusSnapshot;
         {
@@ -711,40 +1033,141 @@ void LicenseSystemService::performStartupValidation()
             lastResultMessage_ = "License activation required";
             if (cache_) cache_->clearCache();  // Clear any invalid cache
         }
-        juce::Logger::writeToLog("[LicenseSystem] No valid license - activation required (hasCached=" +
-            juce::String(hasCachedLicense ? "Y" : "N") + ", hasKey=" +
-            juce::String(!cachedLicenseKey.empty() ? "Y" : "N") + ")");
+        juce::Logger::writeToLog("[License] No valid license - activation required");
+        publishStatusUpdate("startup_no_license");
         return;
     }
 
-    // Check if we need periodic re-validation (3 days = 72 hours)
-    constexpr int REVALIDATION_INTERVAL_HOURS = 72;  // 3 days
-    bool needsRevalidation = cache_->needsPeriodicValidation(currentHardwareId_, REVALIDATION_INTERVAL_HOURS);
+    // Account-based cache entry: keys are prefixed "ACCOUNT:<email>". For these
+    // we don't validate via key regex — instead verify the cached signed_token
+    // offline against current hardware. If verification fails, require sign-in.
+    const bool isAccountEntry = cachedLicenseKey.rfind("ACCOUNT:", 0) == 0;
+    if (isAccountEntry) {
+        // Extract + truncate the email portion of the ACCOUNT:<email> key for log safety.
+        std::string emailPart = cachedLicenseKey.size() > 8 ? cachedLicenseKey.substr(8) : std::string();
+        std::string truncEmail = emailPart;
+        if (truncEmail.size() > 6) {
+            auto at = truncEmail.find('@');
+            if (at != std::string::npos && at > 3) {
+                truncEmail = truncEmail.substr(0, 3) + "***" + truncEmail.substr(at);
+            }
+        }
+        juce::Logger::writeToLog("[LicenseSystem] Startup: found ACCOUNT cache for " +
+            juce::String(truncEmail) + ", verifying signed_token...");
+
+        std::string cachedToken;
+        {
+            std::scoped_lock lock(stateMutex_);
+            auto entry = cache_->retrieveLicense(currentHardwareId_);
+            if (entry.has_value() && entry->licenseData.isObject()) {
+                if (auto* obj = entry->licenseData.getDynamicObject()) {
+                    cachedToken = obj->getProperty(juce::Identifier("signed_token")).toString().toStdString();
+                }
+            }
+        }
+
+        if (cachedToken.empty()) {
+            juce::Logger::writeToLog("[License] Account entry has no signed_token — forcing re-auth");
+            {
+                std::scoped_lock lock(stateMutex_);
+                currentStatus_ = LicenseStatus::InvalidKey;
+                lastResultMessage_ = "Please sign in again";
+            }
+            if (cache_) cache_->clearCache();
+            resetCurrentLicense();
+            publishStatusUpdate("startup_account_no_token");
+            return;
+        }
+
+        auto verified = SignedTokenVerifier::verify(cachedToken, currentHardwareId_, kSamplarProductId);
+        if (!verified.has_value()) {
+            juce::Logger::writeToLog("[License] signed_token verification FAILED at startup — forcing re-auth");
+            {
+                std::scoped_lock lock(stateMutex_);
+                currentStatus_ = LicenseStatus::InvalidKey;
+                lastResultMessage_ = "Session expired — please sign in again";
+            }
+            if (cache_) cache_->clearCache();
+            resetCurrentLicense();
+            publishStatusUpdate("startup_account_token_invalid");
+            return;
+        }
+
+        // Check 30-day offline grace from last validation
+        constexpr int kGraceHours = 30 * 24;
+        const auto grace = cache_->getOfflineGraceStatus(currentHardwareId_, kGraceHours);
+        if (!grace.hasGrace) {
+            // Grace expired — UX limitation: account auth requires password re-entry
+            // because the server has no token-refresh endpoint. Flag this for the
+            // user to address with the server author.
+            juce::Logger::writeToLog("[License] WARNING: 30-day offline grace expired for account session. "
+                                     "Server has no token-refresh endpoint; user must re-enter password.");
+            {
+                std::scoped_lock lock(stateMutex_);
+                currentStatus_ = LicenseStatus::GracePeriodExpired;
+                lastResultMessage_ = "Session expired — please sign in again to refresh";
+            }
+            publishStatusUpdate("startup_account_grace_expired");
+            return;
+        }
+
+        // Valid signed_token within grace — proceed without server round-trip.
+        {
+            std::scoped_lock lock(stateMutex_);
+            currentStatus_ = LicenseStatus::Valid;
+            lastResultMessage_.clear();
+            loadCachedLicense();
+        }
+        juce::Logger::writeToLog("[License] Account session verified offline via signed_token");
+        publishStatusUpdate("startup_account_cached_valid");
+        return;
+    }
+
+    // Reject any cached key that does NOT match the SAMPL4R format (e.g. legacy
+    // SM5- prefixed keys, OAuth email-as-key entries, raw emails). Force re-auth.
+    if (!isSamplarKeyFormatValid(cachedLicenseKey)) {
+        juce::Logger::writeToLog("[License] Cached key '" +
+            juce::String(cachedLicenseKey.substr(0, juce::jmin<int>(12, (int)cachedLicenseKey.size()))) +
+            "...' is not in SAMPL4R format — clearing cache and requiring account sign-in");
+
+        // Tight lock scope: set state under the mutex, then RELEASE before
+        // calling resetCurrentLicense() / publishStatusUpdate() — both of
+        // those acquire stateMutex_ themselves. Holding it across the call
+        // is a recursive lock on a non-recursive mutex → Windows deadlock
+        // detection fires ("resource deadlock would occur").
+        {
+            std::scoped_lock lock(stateMutex_);
+            currentStatus_ = LicenseStatus::InvalidKey;
+            lastResultMessage_ = "Please sign in with your SAMPLAR account";
+        }
+        if (cache_) cache_->clearCache();
+        resetCurrentLicense();
+        publishStatusUpdate("startup_legacy_key_purged");
+        return;
+    }
+
+    // Within 3-day window — use cached license directly without server check.
+    // (Avoids hammering the server on every launch.)
+    constexpr int kRevalidationIntervalHours = 72;
+    const bool needsRevalidation = cache_->needsPeriodicValidation(currentHardwareId_, kRevalidationIntervalHours);
 
     if (!needsRevalidation) {
-        // Within 3-day window - use cached license directly without server check
-        juce::Logger::writeToLog("[LicenseSystem] Within 3-day window - using cached license");
+        juce::Logger::writeToLog("[License] Within 3-day window — using cached license");
         std::scoped_lock lock(stateMutex_);
         currentStatus_ = LicenseStatus::Valid;
         lastResultMessage_.clear();
         loadCachedLicense();
+        publishStatusUpdate("startup_cached_valid");
         return;
     }
 
-    juce::Logger::writeToLog("[LicenseSystem] Cache expired (>7 days) - re-authentication required");
-
-    // Beyond 7 days - require browser re-authentication
-    // We don't clear the cache, just require re-login
-    {
-        std::scoped_lock lock(stateMutex_);
-        currentStatus_ = LicenseStatus::InvalidKey;
-        lastResultMessage_ = "Please log in again to continue using SAMPLAR";
-        resetCurrentLicense();
-    }
-
-    juce::Logger::writeToLog("[LicenseSystem] Startup validation result: " +
-        juce::String(static_cast<int>(currentStatus_)) + " - " + juce::String(lastResultMessage_));
-    publishStatusUpdate("startup_validation");
+    // Beyond the 3-day fast-path: hit the server (or fall back to 30-day grace).
+    // This runs synchronously here because performStartupValidation is already
+    // called synchronously at startup before showing the main window. If you
+    // need to background it, call from a separate thread.
+    juce::Logger::writeToLog("[License] Cache stale — calling revalidateCachedLicense");
+    revalidateCachedLicense();
+    publishStatusUpdate("startup_revalidated");
 }
 
 void LicenseSystemService::publishStatusUpdate(const std::string& reason) const
@@ -1202,6 +1625,27 @@ void LicenseSystemService::startBrowserAuthentication(OAuthCompletionCallback ca
                 juce::Logger::writeToLog("[LicenseSystem]   License Key: " +
                     juce::String(result.licenseKey.empty() ? "(empty)" : result.licenseKey.substr(0, 8) + "..."));
 
+                // SAMPL4R-entitlement gate: the OAuth login may succeed for an
+                // account that has *other* SampleMonsta-product licenses (e.g.
+                // SM5) but NO SAMPL4R license. Block activation if the server
+                // didn't return a SAMPL4R-prefixed license_key.
+                const bool hasSamplarKey = result.licenseKey.size() >= 7
+                                        && result.licenseKey.compare(0, 7, "SAMPL4R") == 0;
+                if (!hasSamplarKey)
+                {
+                    juce::Logger::writeToLog("[License] OAuth login OK but account has NO SAMPL4R license "
+                        "(returned key prefix='" + juce::String(result.licenseKey.substr(0, 8)) + "') — rejecting");
+                    {
+                        std::scoped_lock lock(stateMutex_);
+                        currentStatus_ = LicenseStatus::InvalidKey;
+                        lastResultMessage_ = "This account does not own SAMPL4R. "
+                            "Purchase at samplemonsta.com or sign in with a different account.";
+                    }
+                    publishStatusUpdate("oauth_no_samplar_entitlement");
+                    if (callback) callback(false, lastResultMessage_);
+                    return;
+                }
+
                 {
                     std::scoped_lock lock(stateMutex_);
 
@@ -1223,12 +1667,42 @@ void LicenseSystemService::startBrowserAuthentication(OAuthCompletionCallback ca
                         }
                     }
 
-                    // Cache the license
-                    if (cache_ && !result.licenseKey.empty()) {
-                        juce::Logger::writeToLog("[LicenseSystem] Caching OAuth license...");
-                        cache_->storeLicense(result.licenseKey, result.licenseInfo, hardwareId);
+                    // Cache the license as an ACCOUNT-keyed entry so startup
+                    // validation does NOT regex-check the legacy license_key
+                    // (which may be a foreign SM5- prefixed key the user owns
+                    // on the SampleMonsta account but is not a SAMPL4R key).
+                    // We synthesise the cache key from the email and stash the
+                    // signed_token + metadata inside the licenseData blob so
+                    // SignedTokenVerifier can verify offline on next launch.
+                    if (cache_ && !result.email.empty()) {
+                        const std::string cacheKey = std::string("ACCOUNT:") + result.email;
+
+                        // Truncate email for log safety (e.g. "san***@muzik...")
+                        std::string truncEmail = result.email;
+                        if (truncEmail.size() > 6) {
+                            auto at = truncEmail.find('@');
+                            if (at != std::string::npos && at > 3) {
+                                truncEmail = truncEmail.substr(0, 3) + "***" + truncEmail.substr(at);
+                            }
+                        }
+                        juce::Logger::writeToLog("[LicenseSystem] OAuth cached as ACCOUNT:" +
+                            juce::String(truncEmail) + " with signed_token");
+
+                        // Build account-style cache blob: customer_email + license_type
+                        // + signed_token + expires_at. Mirrors activateWithAccount().
+                        // OAuth delivers the signed token via the URL "token" param,
+                        // which is mapped to AuthResult::accessToken by the parser.
+                        juce::DynamicObject::Ptr data(new juce::DynamicObject());
+                        data->setProperty("customer_email", juce::String(result.email));
+                        data->setProperty("license_type",   juce::String(result.licenseType));
+                        if (!result.accessToken.empty())
+                            data->setProperty("signed_token", juce::String(result.accessToken));
+                        if (!result.expiresAt.empty())
+                            data->setProperty("expires_at",   juce::String(result.expiresAt));
+
+                        cache_->storeLicense(cacheKey, juce::var(data.get()), hardwareId);
                         cache_->updateLastValidation(hardwareId);
-                        juce::Logger::writeToLog("[LicenseSystem] License cached successfully");
+                        juce::Logger::writeToLog("[LicenseSystem] License cached successfully (ACCOUNT entry)");
                     }
 
                     // Store session if we have access token

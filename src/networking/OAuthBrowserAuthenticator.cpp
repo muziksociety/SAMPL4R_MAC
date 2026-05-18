@@ -167,10 +167,14 @@ void OAuthBrowserAuthenticator::run()
     debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] Server started on port " + juce::String(callbackPort_) + "\n");
 
     // 2. Build OAuth URL and open browser
+    //    `product_id=sampl4r` tells the server which product is requesting auth
+    //    so it can filter the user's licenses and pick the SAMPL4R one rather
+    //    than e.g. an SM5 license attached to the same account.
     std::string oauthUrl = serverBaseUrl_ + "/auth/app-login"
         "?callback_port=" + std::to_string(callbackPort_) +
         "&state=" + urlEncode(stateToken_) +
         "&hardware_id=" + urlEncode(hardwareId_) +
+        "&product_id=sampl4r" +
         "&app_version=" + urlEncode(samplar::kAppVersion) +
         "&app_signature=" + urlEncode(computeVersionSignature(samplar::kAppVersion, hardwareId_));
 

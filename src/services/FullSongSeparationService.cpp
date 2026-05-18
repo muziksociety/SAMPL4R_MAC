@@ -96,7 +96,7 @@ void FullSongSeparationService::runWorker(juce::File sourceFile)
     fullSongSvc.initialise();
 
     FullSongService::Config cfg;
-    cfg.uvrDrumsOnly = true;
+    cfg.drumsOnly = true;
     cfg.onProgress = [this](int pct, const juce::String& msg) {
         if (cancelRequested_.load()) return;
 
@@ -250,7 +250,7 @@ void FullSongSeparationService::runBatchWorker(std::vector<juce::File> sources)
         });
 
         FullSongService::Config cfg;
-        cfg.uvrDrumsOnly = true;
+        cfg.drumsOnly = true;
         cfg.onProgress = [this, idx, total](int pct, const juce::String& msg) {
             if (cancelRequested_.load()) return;
 

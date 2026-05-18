@@ -9,6 +9,7 @@ namespace samplar {
 SequencerSlotComponent::SequencerSlotComponent()
 {
     setInterceptsMouseClicks(true, false);
+    setWantsKeyboardFocus(false);  // ESC handled via global modifier check / mouseDrag
 }
 
 void SequencerSlotComponent::setSlotData(const PatternSlot& slot,
@@ -35,6 +36,27 @@ void SequencerSlotComponent::paint(juce::Graphics& g)
 {
     auto bounds = getLocalBounds().toFloat().reduced(1.0f);
 
+    // ── COPY preview: source slot stays put + faint ghost at target ──
+    // (For Copy we keep this component at its source bounds and let the
+    //  lane parent draw the destination ghost. We render a "copying" glow
+    //  outline here so the user sees the source is being duplicated.)
+    if (previewActive_ && previewMode_ == DragMode::Copy && !slot_.empty)
+    {
+        // Source rendering — slightly dimmed
+        g.setColour(stemColour_.withAlpha(0.15f));
+        g.fillRoundedRectangle(bounds, 3.0f);
+        g.setColour(juce::Colours::yellow.withAlpha(0.7f));
+        float dashLen[] = { 3.0f, 2.0f };
+        juce::Path outline;
+        outline.addRoundedRectangle(bounds, 3.0f);
+        juce::PathStrokeType stroke(1.5f);
+        g.strokePath(outline, stroke);
+        g.setColour(juce::Colours::yellow);
+        g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+        g.drawText("COPY", getLocalBounds(), juce::Justification::centred);
+        return;
+    }
+
     if (slot_.empty)
     {
         // Empty slot — dashed outline
@@ -55,16 +77,23 @@ void SequencerSlotComponent::paint(juce::Graphics& g)
     g.setColour(stemColour_.withAlpha(0.6f));
     g.drawRoundedRectangle(bounds, 3.0f, 1.0f);
 
-    // Trim shading — dark overlay on trimmed regions
-    if (slot_.trimStart > 0.01f)
+    // Trim shading — dark overlay on trimmed regions (use preview when active)
+    const float visTrimStart = (previewActive_ &&
+        (previewMode_ == DragMode::TrimLeft || previewMode_ == DragMode::TrimRight))
+        ? previewTrimStart_ : slot_.trimStart;
+    const float visTrimEnd = (previewActive_ &&
+        (previewMode_ == DragMode::TrimLeft || previewMode_ == DragMode::TrimRight))
+        ? previewTrimEnd_ : slot_.trimEnd;
+
+    if (visTrimStart > 0.01f)
     {
-        float trimX = bounds.getX() + bounds.getWidth() * slot_.trimStart;
+        float trimX = bounds.getX() + bounds.getWidth() * visTrimStart;
         g.setColour(juce::Colours::black.withAlpha(0.4f));
         g.fillRect(bounds.getX(), bounds.getY(), trimX - bounds.getX(), bounds.getHeight());
     }
-    if (slot_.trimEnd < 0.99f)
+    if (visTrimEnd < 0.99f)
     {
-        float trimX = bounds.getX() + bounds.getWidth() * slot_.trimEnd;
+        float trimX = bounds.getX() + bounds.getWidth() * visTrimEnd;
         g.setColour(juce::Colours::black.withAlpha(0.4f));
         g.fillRect(trimX, bounds.getY(), bounds.getRight() - trimX, bounds.getHeight());
     }
@@ -105,26 +134,45 @@ void SequencerSlotComponent::paint(juce::Graphics& g)
         g.setFont(juce::FontOptions(8.0f));
         g.drawText("REV", getLocalBounds().reduced(3, 1), juce::Justification::bottomLeft);
     }
-    if (std::abs(slot_.speed - 1.0f) > 0.01f)
+    const float visSpeed = (previewActive_ &&
+        (previewMode_ == DragMode::SpeedLeft || previewMode_ == DragMode::SpeedRight))
+        ? previewSpeed_ : slot_.speed;
+    if (std::abs(visSpeed - 1.0f) > 0.01f)
     {
-        g.setColour(juce::Colours::green.withAlpha(0.8f));
-        g.setFont(juce::FontOptions(7.0f));
-        g.drawText(juce::String(slot_.speed, 2) + "x", getLocalBounds().reduced(2, 1), juce::Justification::centredLeft);
+        g.setColour(juce::Colours::green.withAlpha(previewActive_ && previewMode_ != DragMode::None ? 1.0f : 0.8f));
+        g.setFont(juce::FontOptions(previewActive_ && (previewMode_ == DragMode::SpeedLeft || previewMode_ == DragMode::SpeedRight) ? 10.0f : 7.0f,
+                                    juce::Font::bold));
+        g.drawText(juce::String(visSpeed, 2) + "x", getLocalBounds().reduced(2, 1), juce::Justification::centredLeft);
     }
-    if (std::abs(slot_.pitchSemitones) > 0.1f)
+    const float visPitch = (previewActive_ && previewMode_ == DragMode::Pitch)
+        ? previewPitch_ : slot_.pitchSemitones;
+    if (std::abs(visPitch) > 0.1f || (previewActive_ && previewMode_ == DragMode::Pitch))
     {
-        g.setColour(juce::Colours::yellow.withAlpha(0.8f));
-        g.setFont(juce::FontOptions(8.0f));
-        juce::String pitchStr = (slot_.pitchSemitones > 0 ? "+" : "") + juce::String((int)slot_.pitchSemitones);
-        g.drawText(pitchStr, getLocalBounds().reduced(3, 1), juce::Justification::bottomRight);
+        bool isPitchPreview = (previewActive_ && previewMode_ == DragMode::Pitch);
+        g.setColour(juce::Colours::yellow.withAlpha(isPitchPreview ? 1.0f : 0.8f));
+        g.setFont(juce::FontOptions(isPitchPreview ? 12.0f : 8.0f, juce::Font::bold));
+        juce::String pitchStr = (visPitch > 0 ? "+" : "") + juce::String((int)visPitch) + "st";
+        g.drawText(pitchStr, getLocalBounds().reduced(3, 1),
+                   isPitchPreview ? juce::Justification::centred : juce::Justification::bottomRight);
+        if (isPitchPreview)
+        {
+            // Tint overlay to convey pitch change
+            float tint = juce::jlimit(0.0f, 1.0f, std::abs(visPitch) / 12.0f) * 0.25f;
+            g.setColour((visPitch > 0 ? juce::Colours::yellow : juce::Colours::cyan).withAlpha(tint));
+            g.fillRoundedRectangle(bounds, 3.0f);
+        }
     }
 
     // Cell span indicator (show if wider than 1 cell)
-    if (slot_.cellSpan > 1)
+    const int visSpan = (previewActive_ &&
+        (previewMode_ == DragMode::TrimLeft || previewMode_ == DragMode::TrimRight ||
+         previewMode_ == DragMode::SpeedLeft || previewMode_ == DragMode::SpeedRight))
+        ? previewCellSpan_ : slot_.cellSpan;
+    if (visSpan > 1)
     {
         g.setColour(juce::Colours::orange.withAlpha(0.8f));
         g.setFont(juce::FontOptions(7.0f));
-        g.drawText(juce::String(slot_.cellSpan) + "x", getLocalBounds().reduced(2, 1), juce::Justification::topRight);
+        g.drawText(juce::String(visSpan) + "x", getLocalBounds().reduced(2, 1), juce::Justification::topRight);
     }
 
     // Playing highlight — progress fill + glow border
@@ -362,6 +410,24 @@ void SequencerSlotComponent::mouseDown(const juce::MouseEvent& e)
     dragStartTrimEnd_ = slot_.trimEnd;
     lastAppliedCellSteps_ = 0;
 
+    // Record base bounds so we can do live-preview bounds updates and
+    // restore them on cancel.
+    slotBaseX_ = getX();
+    slotBaseY_ = getY();
+    slotBaseW_ = getWidth();
+    slotBaseH_ = getHeight();
+
+    // Initialize preview state to match committed state.
+    previewActive_     = false;
+    previewMode_       = DragMode::None;
+    previewGridCell_   = slot_.gridCell;
+    previewGridCellL_  = slot_.gridCell;
+    previewCellSpan_   = slot_.cellSpan;
+    previewTrimStart_  = slot_.trimStart;
+    previewTrimEnd_    = slot_.trimEnd;
+    previewSpeed_      = slot_.speed;
+    previewPitch_      = slot_.pitchSemitones;
+
     // 4-corner zone detection: top = trim, bottom = speed-stretch
     int edgeZone = juce::jmin(kEdgeZone, getWidth() / 4);
     bool inLeftEdge = (edgeZone >= 3 && e.x <= edgeZone);
@@ -387,8 +453,8 @@ void SequencerSlotComponent::mouseDown(const juce::MouseEvent& e)
     // Shift+click → copy
     // Ctrl+click → pitch
     // Plain click → move
-    if (e.mods.isShiftDown())
-        dragMode_ = DragMode::Copy;
+    if (e.mods.isShiftDown() || e.mods.isAltDown())
+        dragMode_ = DragMode::Copy;   // Shift+drag OR Alt+drag → copy
     else if (e.mods.isCtrlDown())
         dragMode_ = DragMode::Pitch;
     else
@@ -412,11 +478,17 @@ void SequencerSlotComponent::mouseDrag(const juce::MouseEvent& e)
     float deltaY = static_cast<float>(e.getScreenY() - dragStartY_);
     float cw = cellWidth_ > 1.0f ? cellWidth_ : 20.0f;
 
-    juce::Logger::writeToLog("[SlotDRAG] idx=" + juce::String(slotIndex)
-                             + " mode=" + juce::String((int)dragMode_)
-                             + " dX=" + juce::String(deltaX));
+    // Activate preview on first drag.
+    if (!previewActive_)
+    {
+        previewActive_ = true;
+        previewMode_   = dragMode_;
+        dragging_      = true;
+        toFront(false);  // ensure we render above sibling slots while dragging
+        if (onDragStarted) onDragStarted(slotIndex);
+    }
 
-    // ── Trim (top edges): resize box + crop audio ──
+    // ── Trim (top edges): live preview span + trim crop ──
     if (dragMode_ == DragMode::TrimLeft || dragMode_ == DragMode::TrimRight)
     {
         int cellDelta = static_cast<int>(std::round(deltaX / cw));
@@ -424,34 +496,43 @@ void SequencerSlotComponent::mouseDrag(const juce::MouseEvent& e)
 
         if (dragMode_ == DragMode::TrimRight)
         {
-            // Trim right: can shrink AND restore (up to totalCells_ bounds)
             newGridCell = dragStartGridCell_;
             newSpan = juce::jlimit(1, totalCells_ - newGridCell, dragStartCellSpan_ + cellDelta);
         }
         else
         {
-            // Trim left: can shrink AND restore
             int fixedRight = dragStartGridCell_ + dragStartCellSpan_;
             newGridCell = juce::jlimit(0, fixedRight - 1, dragStartGridCell_ + cellDelta);
             newSpan = fixedRight - newGridCell;
         }
 
-        // Update trimStart/trimEnd to crop audio proportionally
+        // Compute preview trim values proportional to the ORIGINAL span.
         float origSpan = static_cast<float>(dragStartCellSpan_);
         if (dragMode_ == DragMode::TrimLeft)
-            slot_.trimStart = juce::jlimit(0.0f, 0.95f,
+        {
+            previewTrimStart_ = juce::jlimit(0.0f, 0.95f,
                 static_cast<float>(newGridCell - dragStartGridCell_) / origSpan);
+            previewTrimEnd_   = dragStartTrimEnd_;
+        }
         else
-            slot_.trimEnd = juce::jlimit(slot_.trimStart + 0.05f, 1.0f,
-                static_cast<float>(newSpan) / origSpan + slot_.trimStart);
+        {
+            previewTrimStart_ = dragStartTrimStart_;
+            previewTrimEnd_   = juce::jlimit(previewTrimStart_ + 0.05f, 1.0f,
+                static_cast<float>(newSpan) / origSpan + previewTrimStart_);
+        }
 
-        if ((newGridCell != slot_.gridCell || newSpan != slot_.cellSpan) && onSlotResized)
-            onSlotResized(slotIndex, newGridCell, newSpan);
+        previewGridCellL_ = newGridCell;
+        previewCellSpan_  = newSpan;
 
+        // Live bounds update — make the slot's rectangle follow the cursor.
+        int newX = slotBaseX_ + static_cast<int>((newGridCell - dragStartGridCell_) * cw);
+        int newW = juce::jmax(6, static_cast<int>(newSpan * cw));
+        setBounds(newX, slotBaseY_, newW, slotBaseH_);
+        repaint();
         return;
     }
 
-    // ── Speed-stretch (bottom edges): resize cell + set speed ratio ──
+    // ── Speed-stretch (bottom edges): live preview span + speed ratio ──
     if (dragMode_ == DragMode::SpeedLeft || dragMode_ == DragMode::SpeedRight)
     {
         int cellDelta = static_cast<int>(std::round(deltaX / cw));
@@ -459,7 +540,6 @@ void SequencerSlotComponent::mouseDrag(const juce::MouseEvent& e)
 
         if (dragMode_ == DragMode::SpeedRight)
         {
-            // Allow growing past original — up to grid bounds
             newGridCell = dragStartGridCell_;
             newSpan = juce::jlimit(1, totalCells_ - newGridCell, dragStartCellSpan_ + cellDelta);
         }
@@ -470,57 +550,55 @@ void SequencerSlotComponent::mouseDrag(const juce::MouseEvent& e)
             newSpan = fixedRight - newGridCell;
         }
 
-        // Speed ratio: original span / new span
-        slot_.speed = static_cast<float>(dragStartCellSpan_) / static_cast<float>(juce::jmax(1, newSpan));
+        previewSpeed_     = static_cast<float>(dragStartCellSpan_) / static_cast<float>(juce::jmax(1, newSpan));
+        previewGridCellL_ = newGridCell;
+        previewCellSpan_  = newSpan;
 
-        if ((newGridCell != slot_.gridCell || newSpan != slot_.cellSpan) && onSlotResized)
-            onSlotResized(slotIndex, newGridCell, newSpan);
-
-        return;
-    }
-
-    // ── Pitch: Ctrl+drag up/down ──
-    if (dragMode_ == DragMode::Pitch)
-    {
-        float pitchDelta = -deltaY / 30.0f;  // 30px = 1 semitone
-        slot_.pitchSemitones = dragStartPitch_ + std::round(pitchDelta);
-        slot_.pitchSemitones = juce::jlimit(-12.0f, 12.0f, slot_.pitchSemitones);
+        int newX = slotBaseX_ + static_cast<int>((newGridCell - dragStartGridCell_) * cw);
+        int newW = juce::jmax(6, static_cast<int>(newSpan * cw));
+        setBounds(newX, slotBaseY_, newW, slotBaseH_);
         repaint();
         return;
     }
 
-    // ── Move: click+drag → snap to cell grid (absolute target) ──
+    // ── Pitch: Ctrl+drag up/down — preview only, no bounds change ──
+    if (dragMode_ == DragMode::Pitch)
+    {
+        float pitchDelta = -deltaY / 30.0f;  // 30px = 1 semitone
+        previewPitch_ = juce::jlimit(-12.0f, 12.0f,
+                                     dragStartPitch_ + std::round(pitchDelta));
+        repaint();
+        return;
+    }
+
+    // ── Move: click+drag — slot slides live with cursor, snaps to grid ──
     if (dragMode_ == DragMode::Move)
     {
         int totalCellSteps = static_cast<int>(std::round(deltaX / cw));
         int targetCell = juce::jlimit(0, totalCells_ - slot_.cellSpan,
                                        dragStartGridCell_ + totalCellSteps);
+        previewGridCell_ = targetCell;
 
-        if (targetCell != slot_.gridCell && onSlotMoved)
-        {
-            // Pass absolute target cell (not a delta)
-            onSlotMoved(slotIndex, targetCell);
-        }
+        // Live bounds update — slot follows cursor (snapped to grid).
+        int newX = slotBaseX_ + static_cast<int>((targetCell - dragStartGridCell_) * cw);
+        setBounds(newX, slotBaseY_, slotBaseW_, slotBaseH_);
+        repaint();
         return;
     }
 
-    // ── Copy: shift+drag → one-shot copy by cell offset ──
+    // ── Copy: Shift/Alt+drag — ghost at destination, source stays put ──
     if (dragMode_ == DragMode::Copy)
     {
         int totalCellSteps = static_cast<int>(std::round(deltaX / cw));
-        if (totalCellSteps != 0 && onSlotCopied)
-        {
-            auto copySlot = slot_;
-            copySlot.empty = false;
-            // Reset effects on copy — start fresh
-            copySlot.trimStart = 0.0f;
-            copySlot.trimEnd = 1.0f;
-            copySlot.speed = 1.0f;
-            copySlot.gridCell = juce::jlimit(0, totalCells_ - copySlot.cellSpan,
-                                              dragStartGridCell_ + totalCellSteps);
-            onSlotCopied(-1, copySlot);
-            dragMode_ = DragMode::None;  // One-shot
-        }
+        int targetCell = juce::jlimit(0, totalCells_ - slot_.cellSpan,
+                                       dragStartGridCell_ + totalCellSteps);
+        previewGridCell_ = targetCell;
+        // Source stays put — do NOT update our own bounds.
+        // The parent lane is responsible for drawing the ghost; for now we
+        // re-purpose our paint() to show a "COPY" indicator on the source.
+        repaint();
+        if (auto* parent = getParentComponent())
+            parent->repaint();
         return;
     }
 }
@@ -529,14 +607,89 @@ void SequencerSlotComponent::mouseDrag(const juce::MouseEvent& e)
 
 void SequencerSlotComponent::mouseUp(const juce::MouseEvent&)
 {
-    // Trim and speed-stretch go through onSlotResized — sync trim values back
-    if (dragMode_ == DragMode::TrimLeft || dragMode_ == DragMode::TrimRight)
-        notifyModified();  // Push trimStart/trimEnd to lane
-    else if (dragMode_ == DragMode::Pitch)
-        notifyModified();
+    if (!previewActive_)
+    {
+        // No actual drag occurred (just a click). Nothing to commit.
+        dragMode_ = DragMode::None;
+        dragging_ = false;
+        previewMode_ = DragMode::None;
+        return;
+    }
 
-    dragMode_ = DragMode::None;
-    dragging_ = false;
+    juce::Logger::writeToLog("[SlotUP] idx=" + juce::String(slotIndex)
+                             + " mode=" + juce::String((int)previewMode_)
+                             + " → committing preview");
+
+    // ── Commit preview to model ──
+    switch (previewMode_)
+    {
+        case DragMode::TrimLeft:
+        case DragMode::TrimRight:
+        {
+            slot_.trimStart = previewTrimStart_;
+            slot_.trimEnd   = previewTrimEnd_;
+            if ((previewGridCellL_ != slot_.gridCell || previewCellSpan_ != slot_.cellSpan)
+                && onSlotResized)
+            {
+                onSlotResized(slotIndex, previewGridCellL_, previewCellSpan_);
+            }
+            notifyModified();  // push new trimStart/trimEnd to lane
+            break;
+        }
+        case DragMode::SpeedLeft:
+        case DragMode::SpeedRight:
+        {
+            slot_.speed = previewSpeed_;
+            if ((previewGridCellL_ != slot_.gridCell || previewCellSpan_ != slot_.cellSpan)
+                && onSlotResized)
+            {
+                onSlotResized(slotIndex, previewGridCellL_, previewCellSpan_);
+            }
+            notifyModified();
+            break;
+        }
+        case DragMode::Pitch:
+        {
+            slot_.pitchSemitones = previewPitch_;
+            notifyModified();
+            break;
+        }
+        case DragMode::Move:
+        {
+            if (previewGridCell_ != slot_.gridCell && onSlotMoved)
+                onSlotMoved(slotIndex, previewGridCell_);
+            else
+            {
+                // No net change — restore bounds.
+                setBounds(slotBaseX_, slotBaseY_, slotBaseW_, slotBaseH_);
+            }
+            break;
+        }
+        case DragMode::Copy:
+        {
+            // Build the new slot at preview destination and commit.
+            if (onSlotCopied)
+            {
+                auto copySlot = slot_;
+                copySlot.empty     = false;
+                copySlot.trimStart = 0.0f;
+                copySlot.trimEnd   = 1.0f;
+                copySlot.speed     = 1.0f;
+                copySlot.gridCell  = previewGridCell_;
+                if (previewGridCell_ != dragStartGridCell_)
+                    onSlotCopied(slotIndex, copySlot);
+            }
+            break;
+        }
+        default: break;
+    }
+
+    // Clear preview state.
+    previewActive_ = false;
+    previewMode_   = DragMode::None;
+    dragMode_      = DragMode::None;
+    dragging_      = false;
+    repaint();
 }
 
 // ── Mouse: double-click → play ──────────────────────────────────────────
@@ -620,7 +773,11 @@ void SequencerSlotComponent::mouseDoubleClick(const juce::MouseEvent&)
         if (midiSvc)
         {
             midiSvc->stopAllVoices();
-            midiSvc->playBufferDirect(buf, sampleRate_, 1.0f, false, slot_.stemIndex);
+            // Sequencer slot playback: do NOT pass stemIndex. The slot's
+            // waveform thumbnail is rendered from untransposed audio; passing
+            // stemIndex would route through realtime signalsmith pitch and
+            // make the playback diverge from the visual.
+            midiSvc->playBufferDirect(buf, sampleRate_, 1.0f, false);
         }
     }
 
@@ -639,6 +796,29 @@ void SequencerSlotComponent::mouseExit(const juce::MouseEvent&)
         tooltipVisible_ = false;
         repaint();
     }
+}
+
+// ── Cancel drag-preview on ESC / lost modifier (best-effort) ──
+bool SequencerSlotComponent::keyPressed(const juce::KeyPress& k)
+{
+    if (k == juce::KeyPress::escapeKey && previewActive_)
+    {
+        // Cancel — restore bounds, discard preview.
+        previewActive_ = false;
+        previewMode_   = DragMode::None;
+        dragMode_      = DragMode::None;
+        dragging_      = false;
+        setBounds(slotBaseX_, slotBaseY_, slotBaseW_, slotBaseH_);
+        repaint();
+        return true;
+    }
+    return false;
+}
+
+void SequencerSlotComponent::modifierKeysChanged(const juce::ModifierKeys&)
+{
+    // No-op: we lock the drag mode at mouseDown so changing modifiers
+    // mid-drag doesn't reinterpret the drag (consistent with DAWs).
 }
 
 // ── Mouse: hover cursor + tooltip ────────────────────────────────────────

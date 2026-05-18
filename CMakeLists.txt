@@ -1,8 +1,13 @@
+# SAMPLAR build:
+#   Release / commercial:  cmake -B build -G "Visual Studio 17 2022" -A x64      (VST3 only — SamplarPlugin_VST3)
+#   Dev with standalone:   cmake -B build -G "Visual Studio 17 2022" -A x64 -DSAMPLAR_BUILD_STANDALONE=ON
+
 cmake_minimum_required(VERSION 3.20)
 
-project(samplar VERSION 0.1.0 LANGUAGES CXX)
+project(samplar VERSION 1.0.0 LANGUAGES CXX)
 
 option(SAMPLAR_BUILD_TESTS "Build SAMPLAR unit tests" OFF)
+option(SAMPLAR_BUILD_STANDALONE "Build the SamplarApp standalone target (dev only)" OFF)
 
 # Emit Release PDB for crash-dump analysis. /Zi keeps line info; /OPT:REF,ICF
 # stays on so the linker still produces tight code.
@@ -251,6 +256,9 @@ set(SAMPLAR_SOURCES
   src/services/FullSongService.cpp
   src/services/FullSongSeparationService.h
   src/services/FullSongSeparationService.cpp
+  # Native ONNX 4-stem separation (ported from SM5) — replaces Python/UVR path
+  src/services/separation/OnnxSeparationProvider.h
+  src/services/separation/OnnxSeparationProvider.cpp
   # S-Mode services
   src/services/smode/SModeService.h
   src/services/smode/SModeService.cpp
@@ -299,6 +307,9 @@ set(SAMPLAR_SOURCES
   src/security/LicenseCleanerUtility.cpp
   src/security/SecureSessionManager.h
   src/security/SecureSessionManager.cpp
+  src/security/SamplarVerificationKey.h
+  src/security/SignedTokenVerifier.h
+  src/security/SignedTokenVerifier.cpp
   src/networking/LicenseServerClient.h
   src/networking/LicenseServerClient.cpp
   src/networking/OAuthBrowserAuthenticator.h
@@ -371,13 +382,22 @@ set(SAMPLAR_SOURCES
 )
 
 
+# -----------------------------------------------------------------------
+# SamplarApp — Standalone GUI app (dev-only). Gated by SAMPLAR_BUILD_STANDALONE.
+# Commercial release builds ship VST3 only (SamplarPlugin below). When the
+# option is OFF, none of the SamplarApp target / target_sources / POST_BUILD
+# commands are generated.
+# -----------------------------------------------------------------------
+if (SAMPLAR_BUILD_STANDALONE)
+message(STATUS "SAMPLAR_BUILD_STANDALONE=ON — SamplarApp standalone target enabled")
+
 juce_add_gui_app(SamplarApp
     PRODUCT_NAME "SAMPLAR"
     COMPANY_NAME "Muziksociety"
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "com.muziksociety.samplar"
-    VERSION "0.1.0"
+    VERSION "1.0.0"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
@@ -582,6 +602,12 @@ else()
   )
 endif()
 
+endif() # SAMPLAR_BUILD_STANDALONE — end of SamplarApp standalone target block
+
+# -----------------------------------------------------------------------
+# SamplarResources — shared juce_add_binary_data target (used by both
+# SamplarApp [when enabled] and SamplarPlugin VST3). Always built.
+# -----------------------------------------------------------------------
 # Embed static resources (e.g., backdrop.png) so images are always available
 juce_add_binary_data(SamplarResources SOURCES
   ${CMAKE_CURRENT_LIST_DIR}/backdrop.png
@@ -605,11 +631,13 @@ juce_add_binary_data(SamplarResources SOURCES
   # BACKGROUNDS/ folder on the filesystem at runtime.
 )
 
-target_link_libraries(SamplarApp PRIVATE SamplarResources)
+if (SAMPLAR_BUILD_STANDALONE)
+    target_link_libraries(SamplarApp PRIVATE SamplarResources)
+endif()
 
 
 # -----------------------------------------------------------------------
-# SamplarPlugin � VST3 + Standalone plugin target (Phase 1 VST3 conversion)
+# SamplarPlugin — VST3 + Standalone plugin target (Phase 1 VST3 conversion)
 # -----------------------------------------------------------------------
 juce_add_plugin(SamplarPlugin
     PRODUCT_NAME "SAMPLAR"
@@ -617,7 +645,7 @@ juce_add_plugin(SamplarPlugin
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "com.muziksociety.samplar.vst3"
-    VERSION "0.1.0"
+    VERSION "1.0.0"
     PLUGIN_MANUFACTURER_CODE Mzks
     PLUGIN_CODE Smpl
     IS_SYNTH TRUE
@@ -710,9 +738,11 @@ if (SAMPLAR_ENABLE_DEV_FALLBACK)
 endif()
 
 if (SAMPLAR_ENABLE_TRACING)
-    message(STATUS "SAMPLAR tracing enabled � Chrome Trace JSON profiler active")
+    message(STATUS "SAMPLAR tracing enabled — Chrome Trace JSON profiler active")
     target_compile_definitions(SamplarPlugin PRIVATE SAMPLAR_ENABLE_TRACING=1)
-    target_compile_definitions(SamplarApp    PRIVATE SAMPLAR_ENABLE_TRACING=1)
+    if (SAMPLAR_BUILD_STANDALONE)
+        target_compile_definitions(SamplarApp PRIVATE SAMPLAR_ENABLE_TRACING=1)
+    endif()
 endif()
 
 if(MSVC)
@@ -736,37 +766,89 @@ endif()
 
 target_link_libraries(SamplarPlugin PRIVATE SamplarResources)
 
-# Copy data folder (pattern databases) next to VST3 bundle for plugin mode
-# Also copy to %APPDATA%/Samplar/data for reliable VST3 access
-add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$<TARGET_FILE_DIR:SamplarPlugin_VST3>/../../../data"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/data/patterns_with_rolls.json"
-    "$<TARGET_FILE_DIR:SamplarPlugin_VST3>/../../../data/patterns_with_rolls.json"
-  COMMAND ${CMAKE_COMMAND} -E copy_if_different
-    "${CMAKE_CURRENT_SOURCE_DIR}/data/latin_patterns.json"
-    "$<TARGET_FILE_DIR:SamplarPlugin_VST3>/../../../data/latin_patterns.json"
-  COMMENT "Copying pattern data files next to VST3 bundle"
-)
+# ----------------------------------------------------------------------
+# Delay-load onnxruntime.dll on Windows
+# Windows ships a 2,832-byte WinML forwarder stub at System32\onnxruntime.dll
+# (owned by TrustedInstaller). When a DAW LoadLibrary()'s our .vst3, the
+# default DLL search hits that stub first and fails with ERROR_BAD_EXE_FORMAT.
+# Solution: delay-load onnxruntime.dll, and our custom failure hook in
+# src/utils/OnnxDelayLoad.cpp manually LoadLibraryEx's the real DLL from the
+# .vst3's own directory. See that file for details.
+# ----------------------------------------------------------------------
+if(WIN32 AND MSVC)
+    target_sources(SamplarPlugin PRIVATE src/utils/OnnxDelayLoad.cpp)
+    if(TARGET SamplarPlugin_VST3)
+        target_link_options(SamplarPlugin_VST3 PRIVATE
+            /DELAYLOAD:onnxruntime.dll
+            # Force-include the TLS callback, delay-load hooks, and beacon
+            # at the FINAL link step. Per-TU pragmas don't propagate from
+            # the static lib to the final binary, so we have to repeat them
+            # here on the executable target.
+            /INCLUDE:_tls_used
+            /INCLUDE:samplar_tls_callback_ptr
+            /INCLUDE:__pfnDliNotifyHook2
+            /INCLUDE:__pfnDliFailureHook2)
+        target_link_libraries(SamplarPlugin_VST3 PRIVATE delayimp)
+    endif()
+    if(TARGET SamplarApp)
+        target_link_options(SamplarApp PRIVATE
+            /DELAYLOAD:onnxruntime.dll
+            /INCLUDE:_tls_used
+            /INCLUDE:samplar_tls_callback_ptr
+            /INCLUDE:__pfnDliNotifyHook2
+            /INCLUDE:__pfnDliFailureHook2)
+        target_link_libraries(SamplarApp PRIVATE delayimp)
+    endif()
+endif()
 
-# Copy BACKGROUNDS folder to AppData for VST3 mode
-# DataPaths::getBackgroundsDirectory() falls back to %APPDATA%/Samplar/BACKGROUNDS
-add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$ENV{APPDATA}/Samplar/BACKGROUNDS"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/BACKGROUNDS"
-    "$ENV{APPDATA}/Samplar/BACKGROUNDS"
-  COMMENT "Copying BACKGROUNDS to AppData for VST3 mode"
-)
+# VST3 bundle staging: copies ALL runtime resources INTO the .vst3 bundle's
+# Contents/x86_64-win/ directory ($VstDir). Result is a fully self-contained
+# bundle that the Inno installer just drops into Program Files\Common\VST3.
+#
+# Bundle layout produced:
+#   Samplar.vst3/Contents/x86_64-win/
+#     SAMPLAR.vst3        (binary - JUCE places this)
+#     SAMPLAR.map         (debug map)
+#     onnxruntime.dll     (delay-loaded by TLS callback)
+#     models/             (htdemucs.onnx + beat_this.onnx)
+#     data/               (pattern JSONs)
+#     BACKGROUNDS/        (UI animations + tilesets)
+#     Samples/            (808 + GM kit)
+#     tools/ffmpeg.exe    (audio decode for non-WAV input)
+#
+# Failures are non-fatal so locked files (DAW holding the VST3) don't kill
+# the build. The Inno installer is the canonical distribution path.
+set(_SAMPLAR_VST3_STAGE_SCRIPT "${CMAKE_BINARY_DIR}/samplar_vst3_stage.ps1")
+file(WRITE  "${_SAMPLAR_VST3_STAGE_SCRIPT}" "param([string]$VstDir, [string]$RepoRoot)\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$ErrorActionPreference = 'SilentlyContinue'\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function MakeDir([string]$d) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null } }\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function CopyFile([string]$src, [string]$dst) { if (Test-Path -LiteralPath $src) { try { MakeDir (Split-Path -Parent $dst); Copy-Item -Force -LiteralPath $src -Destination $dst } catch { Write-Host \"[stage] file skip: $src\" } } }\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function CopyTree([string]$src, [string]$dst) { if (Test-Path -LiteralPath $src) { try { MakeDir $dst; Get-ChildItem -LiteralPath $src | ForEach-Object { Copy-Item -Force -Recurse -LiteralPath $_.FullName -Destination $dst } } catch { Write-Host \"[stage] tree skip: $src\" } } }\n")
+# 1) onnxruntime.dll alongside the .vst3 binary (required for TLS preload)
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$ortHit = Get-ChildItem -Path (Join-Path $RepoRoot 'build/_deps') -Recurse -Filter 'onnxruntime.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'onnxruntime_prebuilt-src' } | Select-Object -First 1\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "if ($ortHit) { CopyFile $ortHit.FullName (Join-Path $VstDir 'onnxruntime.dll') }\n")
+# 2) models/ - htdemucs.onnx + beat_this.onnx
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$modelsDst = Join-Path $VstDir 'models'\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $modelsDst\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile (Join-Path $RepoRoot 'models/htdemucs.onnx')          (Join-Path $modelsDst 'htdemucs.onnx')\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile (Join-Path $RepoRoot 'third_party/beat_this/models/beat_this.onnx') (Join-Path $modelsDst 'beat_this.onnx')\n")
+# 3) data/ - pattern JSONs (multiple candidate source locations)
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$dataDst = Join-Path $VstDir 'data'\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $dataDst\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($p in @('data/patterns_with_rolls.json','SM5_Portable_2026-02-18/data/patterns_with_rolls.json','data/latin_patterns.json','SM5_Portable_2026-02-18/data/latin_patterns.json')) { $src = Join-Path $RepoRoot $p; if (Test-Path -LiteralPath $src) { try { Copy-Item -Force -LiteralPath $src -Destination $dataDst } catch { } } }\n")
+# 4) BACKGROUNDS/
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyTree (Join-Path $RepoRoot 'BACKGROUNDS') (Join-Path $VstDir 'BACKGROUNDS')\n")
+# 5) Samples/
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyTree (Join-Path $RepoRoot 'Samples') (Join-Path $VstDir 'Samples')\n")
+# 6) tools/ffmpeg.exe (try multiple candidate locations)
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$toolsDst = Join-Path $VstDir 'tools'\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $toolsDst\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($p in @('portable_cache/ffmpeg/ffmpeg.exe','SAMPLAR_Portable/python/Scripts/ffmpeg.exe')) { $src = Join-Path $RepoRoot $p; if (Test-Path -LiteralPath $src) { CopyFile $src (Join-Path $toolsDst 'ffmpeg.exe'); break } }\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "exit 0\n")
 
-# Copy Samples/ folder to AppData for VST3 mode (808 preview kit + GM samples)
-# GMSampleGenerator::loadWavFile() checks %APPDATA%/Samplar/Samples/ as VST3 fallback.
 add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
-  COMMAND ${CMAKE_COMMAND} -E make_directory "$ENV{APPDATA}/Samplar/Samples"
-  COMMAND ${CMAKE_COMMAND} -E copy_directory
-    "${CMAKE_CURRENT_SOURCE_DIR}/Samples"
-    "$ENV{APPDATA}/Samplar/Samples"
-  COMMENT "Copying Samples (808 kit + GM) to AppData for VST3 mode"
+  COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+  COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
 )
 # -----------------------------------------------------------------------
 

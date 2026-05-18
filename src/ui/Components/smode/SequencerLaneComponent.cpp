@@ -496,21 +496,30 @@ void SequencerLaneComponent::buildSlotComponents()
             repaint();
         };
 
-        // Copy: one-shot — append new slot, then full rebuild so all callbacks are wired
-        sc->onSlotCopied = [this](int /*targetIdx*/, const PatternSlot& copy)
+        // Copy: one-shot — append new slot, then full rebuild so all callbacks are wired.
+        // sourceIdx = the index of the slot that was shift/alt-dragged from;
+        // we EXCLUDE that slot from the overlap check so a short drag adjacent
+        // to the source isn't always rejected.
+        sc->onSlotCopied = [this](int sourceIdx, const PatternSlot& copy)
         {
-            // Overlap check: does [copy.gridCell, copy.gridCell+copy.cellSpan) intersect any slot?
             int copyEnd = copy.gridCell + copy.cellSpan;
             for (int j = 0; j < static_cast<int>(slots_.size()); ++j)
             {
+                if (j == sourceIdx) continue;        // skip the source slot
                 if (slots_[j].empty) continue;
                 int otherStart = slots_[j].gridCell;
                 int otherEnd = otherStart + slots_[j].cellSpan;
-                if (copy.gridCell < otherEnd && copyEnd > otherStart) return;
+                if (copy.gridCell < otherEnd && copyEnd > otherStart)
+                {
+                    juce::Logger::writeToLog("[SequencerLane] Copy REJECTED — overlaps slot "
+                        + juce::String(j) + " at cell " + juce::String(otherStart));
+                    return;
+                }
             }
 
             slots_.push_back(copy);
-            juce::Logger::writeToLog("[SequencerLane] Copied slot at cell " + juce::String(copy.gridCell));
+            juce::Logger::writeToLog("[SequencerLane] Copied slot from " + juce::String(sourceIdx)
+                + " to cell " + juce::String(copy.gridCell));
 
             buildSlotComponents();
             resized();
@@ -685,6 +694,51 @@ void SequencerLaneComponent::paint(juce::Graphics& g)
 
 void SequencerLaneComponent::paintOverChildren(juce::Graphics& g)
 {
+    // ── Copy-drag destination ghost ─────────────────────────────────────
+    // Any slot currently in Copy preview paints a faint cyan rectangle
+    // at the destination cell, following the cursor. Shows the user
+    // where the copy will land BEFORE they release.
+    if (!slotArea_.isEmpty() && numBars_ > 0)
+    {
+        const int   totalCells = numBars_ * 4;
+        const float cellW      = (totalCells > 0)
+            ? static_cast<float>(slotArea_.getWidth()) / static_cast<float>(totalCells)
+            : 20.0f;
+
+        for (auto& sc : slotComponents_)
+        {
+            if (!sc) continue;
+            const int destCell = sc->getCopyPreviewCell();
+            if (destCell < 0) continue;
+            const int span = juce::jmax(1, sc->getCopyPreviewCellSpan());
+
+            const float ghostX = static_cast<float>(slotArea_.getX()) + destCell * cellW;
+            const float ghostW = span * cellW;
+            juce::Rectangle<float> ghost(ghostX + 1.0f,
+                                         static_cast<float>(slotArea_.getY()) + 2.0f,
+                                         ghostW - 2.0f,
+                                         static_cast<float>(slotArea_.getHeight()) - 4.0f);
+
+            const auto cyan = juce::Colour::fromRGB(0, 229, 255);
+            g.setColour(cyan.withAlpha(0.18f));
+            g.fillRoundedRectangle(ghost, 4.0f);
+            g.setColour(cyan.withAlpha(0.85f));
+            float dashes[] = { 6.0f, 4.0f };
+            juce::Path outline;
+            outline.addRoundedRectangle(ghost, 4.0f);
+            juce::PathStrokeType stroke(2.0f);
+            float dashArray[] = { 6.0f, 4.0f };
+            juce::Path dashed;
+            stroke.createDashedStroke(dashed, outline, dashArray, 2);
+            g.strokePath(dashed, juce::PathStrokeType(2.0f));
+            g.setColour(cyan);
+            g.setFont(juce::FontOptions(9.0f, juce::Font::bold));
+            g.drawText("DROP HERE", ghost.toNearestInt(),
+                       juce::Justification::centred);
+            juce::ignoreUnused(dashes);
+        }
+    }
+
     // Mute overlay — paints OVER child slot components but NOT the control row
     if (muted_ && !slotArea_.isEmpty())
     {

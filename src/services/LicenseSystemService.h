@@ -58,6 +58,27 @@ public:
                          const std::string& email,
                          const std::string& password);
 
+    // [DEPRECATED] Legacy key-entry activation. Account-based auth is now the
+    // primary path. Retained as a thin forwarder for any caller still using
+    // license keys; new code MUST use activateWithAccount().
+    bool activateWithKey(const std::string& licenseKey);
+
+    // ── PRIMARY activation: account-based ─────────────────────────────────
+    // POSTs {email, password, hardware_id} to /auth/login-with-hardware on
+    // the license server. On success && license_valid, caches the email +
+    // signed_token (never the password), sets currentStatus_=Valid, and
+    // publishes the standard activation event. The cached signed_token is
+    // offline-verifiable via SignedTokenVerifier for the 30-day grace window.
+    bool activateWithAccount(const std::string& email, const std::string& password);
+
+    // SAMPL4R every-launch signed-token check.
+    // Hits POST /api/licenses/validate-token, verifies the returned signed_token
+    // offline via SignedTokenVerifier, and refreshes the cache + last-validation
+    // timestamp on success. Honors a 30-day offline grace period if the server
+    // is unreachable but a previously verified token is still within its expiry.
+    // Runs synchronously — call from a background thread.
+    LicenseStatus revalidateCachedLicense();
+
     // New credential-based methods for username/password authentication
     LicenseStatus validateUserCredentials(const std::string& email, const std::string& password);
     bool activateWithCredentials(const std::string& email, const std::string& password);

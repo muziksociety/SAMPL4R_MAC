@@ -24,19 +24,19 @@ void SModeSeparationService::shutdown()
 
 juce::StringArray SModeSeparationService::getStemNames() const
 {
-    if (stemCount_ == StemCount::Six)
-        return { "Vocals", "Bass", "Drums", "Piano", "Guitar", "Melody" };
-    else
-        return { "Vocals", "Bass", "Drums", "Melody" };
+    // 6-stem flow deprecated 2026-05-18 along with the UVR/Python backend.
+    // The native ONNX provider (htdemucs.onnx) is 4-stem only.
+    // The StemCount enum is retained for ABI/UI compatibility but ::Six is
+    // now a no-op alias for ::Four.
+    juce::ignoreUnused(stemCount_);
+    return { "Vocals", "Bass", "Drums", "Melody" };
 }
 
 juce::String SModeSeparationService::getModelName() const
 {
-    // Use the same model names as audio-separator expects.
-    // 4-stem path uses htdemucs_ft (fine-tuned 4-stem) — this is what we
-    // actually pack and ship. The plain "htdemucs.yaml" is not bundled with
-    // the installer and referencing it caused "model not found" for users.
-    return stemCount_ == StemCount::Six ? "htdemucs_6s.yaml" : "htdemucs_ft.yaml";
+    // Log-only identifier; the actual model file (htdemucs.onnx) is resolved
+    // by FullSongService::locateOnnxModel via DataPaths.
+    return "htdemucs.onnx (4-stem ONNX)";
 }
 
 void SModeSeparationService::startSeparation(const juce::File& sourceFile)
@@ -67,11 +67,10 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
         FullSongService fullSongSvc(bus_);
         fullSongSvc.initialise();
 
-        // Configure for ALL stems (not drums only)
+        // Configure for ALL stems (not drums only). ONNX-only path -
+        // the legacy UVR/Python backend was removed 2026-05-18.
         FullSongService::Config cfg;
-        cfg.uvrModelName = getModelName();
-        cfg.uvrDrumsOnly = false;  // KEY: Get ALL stems, not just drums
-        cfg.uvrOutputFormat = "FLAC";  // FLAC: ~60% smaller than WAV, lossless, much less disk I/O for 4-6 stems
+        cfg.drumsOnly = false;
 
         // Progress callback → publish S-Mode progress events
         cfg.onProgress = [this](int pct, const juce::String& msg) {

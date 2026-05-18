@@ -103,6 +103,23 @@ void SamplarAudioProcessor::initServices()
             }
         }
 
+        // 0.5. Inside the VST3 bundle (Inno installer layout, default 2026-05-18+)
+        //      The installer drops models/, data/, BACKGROUNDS/, Samples/, tools/
+        //      INTO .vst3/Contents/x86_64-win/ so the bundle is self-contained.
+        //      That dir IS the parent of the .vst3 binary, so just check it.
+        if (!resolvedDir.isDirectory())
+        {
+            auto vst3Dll = juce::File::getSpecialLocation(
+                               juce::File::currentApplicationFile);
+            auto binaryDir = vst3Dll.getParentDirectory();  // .../Contents/x86_64-win/
+            if (hasResources(binaryDir))
+            {
+                resolvedDir = binaryDir;
+                juce::Logger::writeToLog("[SamplarAudioProcessor] VST3 mode: app directory from bundle Contents/x86_64-win: "
+                                         + binaryDir.getFullPathName());
+            }
+        }
+
         // 1. Registry install path (handles custom install directories)
         juce::String regPath;
         if (juce::WindowsRegistry::valueExists(

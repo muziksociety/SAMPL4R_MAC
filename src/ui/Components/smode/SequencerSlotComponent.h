@@ -46,6 +46,8 @@ public:
     void mouseMove(const juce::MouseEvent& e) override;
     void mouseExit(const juce::MouseEvent& e) override;
     void mouseDoubleClick(const juce::MouseEvent& e) override;
+    bool keyPressed(const juce::KeyPress& k) override;
+    void modifierKeysChanged(const juce::ModifierKeys&) override;
 
     int slotIndex { -1 };
 
@@ -55,6 +57,12 @@ public:
 
     /** Enable/disable tooltips. */
     void setTooltipsEnabled(bool e) { tooltipsEnabled_ = e; }
+
+    // ── Copy-drag ghost query (used by the parent lane to paint a ghost
+    //    rectangle at the destination cell while the user is shift/alt
+    //    dragging from this slot). Returns -1 when not in copy preview. */
+    int  getCopyPreviewCell()    const { return (previewActive_ && previewMode_ == DragMode::Copy) ? previewGridCell_ : -1; }
+    int  getCopyPreviewCellSpan()const { return slot_.cellSpan; }
 
 private:
     bool playing_ { false };
@@ -89,6 +97,23 @@ private:
     // Tooltip
     bool tooltipVisible_ { false };
     juce::Point<int> tooltipPos_;
+
+    // ── Live-preview state (during drag — WYSIWYG) ──
+    // While dragging these reflect the PREVIEW state (not yet committed to slot_).
+    // On mouseUp, they're applied via callbacks; on cancel, discarded.
+    bool      previewActive_     { false };
+    DragMode  previewMode_       { DragMode::None };
+    int       previewGridCell_   { 0 };       // Move/Copy target cell
+    int       previewCellSpan_   { 1 };       // Trim/Speed new span
+    int       previewGridCellL_  { 0 };       // Trim/Speed new gridCell (left-side resize)
+    float     previewTrimStart_  { 0.0f };
+    float     previewTrimEnd_    { 1.0f };
+    float     previewSpeed_      { 1.0f };
+    float     previewPitch_      { 0.0f };
+    int       slotBaseX_         { 0 };       // X recorded at mouseDown for restoring on cancel
+    int       slotBaseY_         { 0 };
+    int       slotBaseW_         { 0 };
+    int       slotBaseH_         { 0 };
 
     static constexpr int kEdgeZone = 8;
 

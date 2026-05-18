@@ -254,6 +254,16 @@ SModePage::SModePage(EventBus& bus)
     addAndMakeVisible(logoLabel_);
     // SamplarLogo paints itself (gradient fill + cyan glow); no text/font setters.
 
+    // Default spacebar action: top transport toggle. Re-bound when the user
+    // clicks a per-lane / play-all sequencer button (see those onClick handlers).
+    spaceKeyAction_ = [this]()
+    {
+        if (!smodeService_) return;
+        stopLoop();
+        if (transportPlaying_) stopTransport();
+        else startTransport(playheadTimeSec_);
+    };
+
     // Play/Stop toggle button — BigPlayButton paints triangle (stopped) or square (playing)
     addAndMakeVisible(playBtn_);
     playBtn_.onClick = [this]()
@@ -261,6 +271,16 @@ SModePage::SModePage(EventBus& bus)
         if (!smodeService_) return;
         if (transportPlaying_) stopTransport();
         else startTransport(playheadTimeSec_);
+
+        // Lock spacebar back to top transport.
+        spaceKeyAction_ = [this]()
+        {
+            if (!smodeService_) return;
+            stopLoop();
+            if (transportPlaying_) stopTransport();
+            else startTransport(playheadTimeSec_);
+        };
+        juce::Logger::writeToLog("[SModePage] spaceKeyAction_ -> transport (top play button)");
     };
 
     // (Stem status indicators removed — MainWindow already has these ball buttons at top.)
@@ -575,8 +595,12 @@ SModePage::SModePage(EventBus& bus)
 
             std::thread([this, snapshots = std::move(snapshots)]() mutable
             {
-                // Compute RMS per segment off message thread
+                // Compute RMS per segment off message thread.
+                //   toAssign — segments above the silence threshold (get MIDI notes)
+                //   toDelete — segments below the threshold (get removed from the
+                //              model so the stem lane is visually clean)
                 std::vector<std::pair<int,int>> toAssign;
+                std::vector<std::pair<int,int>> toDelete;
                 for (auto& ss : snapshots)
                 {
                     for (auto& seg : ss.segs)
@@ -592,23 +616,42 @@ SModePage::SModePage(EventBus& bus)
                         float db = rms > 0.0f ? 20.0f * std::log10(rms) : -100.0f;
                         if (db > -40.0f)
                             toAssign.push_back({ ss.stemIdx, seg.segIdx });
+                        else
+                            toDelete.push_back({ ss.stemIdx, seg.segIdx });
                     }
                 }
 
-                juce::MessageManager::callAsync([this, toAssign = std::move(toAssign)]()
+                juce::MessageManager::callAsync([this,
+                    toAssign = std::move(toAssign),
+                    toDelete = std::move(toDelete)]()
                 {
                     if (!smodeService_) return;
                     auto& model = smodeService_->getModel();
                     model.pushUndoState("Quick-assign MIDI notes");
+
+                    // Assign first (uses current indices, before any deletion).
                     int note = 36;
                     for (const auto& [si, segi] : toAssign)
                     {
                         if (note > 127) break;
                         model.assignMidiNote(si, segi, note++);
                     }
+
+                    // Delete silent segments in DESCENDING index order per-stem
+                    // so removal doesn't invalidate the indices of later deletions.
+                    auto sortedToDelete = toDelete;
+                    std::sort(sortedToDelete.begin(), sortedToDelete.end(),
+                        [](const auto& a, const auto& b) {
+                            return a.first == b.first ? a.second > b.second : a.first < b.first;
+                        });
+                    for (const auto& [si, segi] : sortedToDelete)
+                        model.removeSegment(si, segi);
+
                     quickAssignBtn_.setEnabled(true);
                     quickAssignBtn_.setButtonText("Quick Assign");
-                    juce::Logger::writeToLog("✅ [SModePage] Quick Assign: " + juce::String(toAssign.size()) + " segments assigned");
+                    juce::Logger::writeToLog("✅ [SModePage] Quick Assign: "
+                        + juce::String(toAssign.size()) + " segments assigned, "
+                        + juce::String(toDelete.size()) + " silent segments removed");
                     for (auto& wf : stemWaveforms_) wf->repaint();
                 });
             }).detach();
@@ -882,6 +925,24 @@ SModePage::SModePage(EventBus& bus)
             playAllSeqBtn_.setButtonText("Stop");
             playAllSeqBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
         }
+
+        // Lock spacebar to Play-All sequencer toggle.
+        spaceKeyAction_ = [this]()
+        {
+            if (seqPlayingFlag_ && seqPlayingFlag_->load())
+            {
+                stopAllSequencerPlayback();
+                playAllSeqBtn_.setButtonText("Play All");
+                playAllSeqBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d6d3a));
+            }
+            else
+            {
+                playAllLanesSimultaneous();
+                playAllSeqBtn_.setButtonText("Stop");
+                playAllSeqBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
+            }
+        };
+        juce::Logger::writeToLog("[SModePage] spaceKeyAction_ -> sequencer-all (Play All button)");
     };
 
     // Chain button kept in code but hidden from UI
@@ -2374,6 +2435,9 @@ void SModePage::applyBpm(double bpm)
 {
     juce::Logger::writeToLog("[SModePage] applyBpm: " + juce::String(bpm, 4));
 
+    // Stop the "..." dots animation now that we have a real BPM to display.
+    bpmDotsAnim_.reset();
+
     // Push undo BEFORE any mutation. Guarded against re-entrancy inside the model.
     if (smodeService_)
         smodeService_->getModel().pushUndoState(
@@ -2655,10 +2719,20 @@ bool SModePage::keyPressed(const juce::KeyPress& key, juce::Component* /*origina
     }
     if (key == juce::KeyPress::spaceKey)
     {
-        if (!smodeService_) return true;
-        stopLoop();
-        if (transportPlaying_) stopTransport();
-        else startTransport(playheadTimeSec_);
+        // Context-aware: invoke whichever play action the user most recently
+        // triggered (top transport / Play All / per-lane). Default is top
+        // transport, set in the SModePage constructor.
+        if (spaceKeyAction_)
+        {
+            spaceKeyAction_();
+        }
+        else if (smodeService_)
+        {
+            // Defensive fallback — should never happen.
+            stopLoop();
+            if (transportPlaying_) stopTransport();
+            else startTransport(playheadTimeSec_);
+        }
         return true;
     }
     // Ctrl+Shift+Z = redo (match before Ctrl+Z so shifted variant wins)
@@ -2903,6 +2977,28 @@ void SModePage::runBpmDetectionOnDrumStem()
                              + " (index " + juce::String(drumIdx) + ")");
     bpmInput_.setText("...", juce::dontSendNotification);
 
+    // Kick off the "..." animation in the BPM field while detection runs.
+    // Stops automatically when applyBpm() commits the real result.
+    {
+        struct BpmDotsTimer : juce::Timer
+        {
+            juce::Component::SafePointer<juce::TextEditor> target;
+            int phase = 0;
+            void timerCallback() override
+            {
+                if (target == nullptr) { stopTimer(); return; }
+                static const char* frames[] = {
+                    ".  ", ".. ", "...", " ..", "  .", "  .", " ..", "..."
+                };
+                target->setText(frames[(phase++) % 8], juce::dontSendNotification);
+            }
+        };
+        auto t = std::make_unique<BpmDotsTimer>();
+        t->target = juce::Component::SafePointer<juce::TextEditor>(&bpmInput_);
+        t->startTimerHz(6);   // ~167 ms per frame
+        bpmDotsAnim_ = std::move(t);
+    }
+
     // Pass raw pointers to background thread — model is processor-lifetime,
     // buffers won't be deleted while we read. Avoids blocking the message
     // thread with a multi-MB buffer copy.
@@ -3090,7 +3186,22 @@ void SModePage::addSequencerLane()
             stemWaveforms_[static_cast<size_t>(i)]->setAlpha(alpha);
         }
     };
-    lane->onPlayRequested = [this](int idx) { playSequencerLane(idx); };
+    lane->onPlayRequested = [this](int idx)
+    {
+        playSequencerLane(idx);
+
+        // Lock spacebar to THIS lane: pressing space stops all sequencer
+        // playback if anything is playing, otherwise replays this lane.
+        spaceKeyAction_ = [this, idx]()
+        {
+            if (idx < 0 || idx >= (int) sequencerLanes_.size()) return;
+            if (seqPlayingFlag_ && seqPlayingFlag_->load())
+                stopAllSequencerPlayback();
+            else
+                playSequencerLane(idx);
+        };
+        juce::Logger::writeToLog("[SModePage] spaceKeyAction_ -> sequencer-lane " + juce::String(idx));
+    };
     lane->onStopRequested = [this](int /*idx*/)
     {
         stopAllSequencerPlayback();
@@ -3128,10 +3239,14 @@ void SModePage::addSequencerLane()
         for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
             segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
 
-        const float pitchSemi = midiSvc->getStemPitchSemitones(stemIdx);
-        juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(stemIdx)
-            + " pitch=" + juce::String(pitchSemi, 2));
-        midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, false, stemIdx);
+        juce::Logger::writeToLog("[SModePage] sequencer slot play stem=" + juce::String(stemIdx)
+            + " (pitch bypass — slot waveform shows untransposed audio)");
+        // NO stemIndex passed → sequencer plays at native pitch, matching
+        // the slot's displayed waveform. Otherwise realtime signalsmith pitch
+        // is applied to playback while the waveform stays untransposed, so
+        // "what you see" ≠ "what you hear". The stem transport + segment
+        // direct-clicks still apply pitch (they don't have this visual lock).
+        midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, false);
     };
 
     addAndMakeVisible(lane.get());
@@ -3405,8 +3520,9 @@ void SModePage::playSequencerLane(int laneIndex)
         if (sp.slotIndex >= 0 && sp.buffer)
         {
             ms->stopAllVoices();
-            // Pass stemIndex so realtime SoundTouch pitch applies during this slot.
-            ms->playBufferDirect(sp.buffer, modelSr, 1.0f, false, sp.stemIndex);
+            // Sequencer playback: NO stemIndex passed — keeps audio in sync
+            // with the slot's displayed waveform (which is untransposed).
+            ms->playBufferDirect(sp.buffer, modelSr, 1.0f, false);
             sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayingSlot(sp.slotIndex);
         }
         else

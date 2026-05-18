@@ -81,29 +81,14 @@ void StemCountDialog::resized()
 
 void StemCountDialog::show(juce::Component* parent, std::function<void(int stemCount)> callback)
 {
-    juce::Logger::writeToLog("🎵 [StemCountDialog] === show ===");
-
-    auto* dialog = new StemCountDialog();
-
-    // Wrap callback to also close the dialog
-    dialog->onStemCountSelected = [dialog, cb = std::move(callback)](int count)
-    {
-        if (cb) cb(count);
-
-        // Close the dialog window
-        if (auto* dw = dialog->findParentComponentOfClass<juce::DialogWindow>())
-            dw->exitModalState(0);
-    };
-
-    juce::DialogWindow::LaunchOptions opts;
-    opts.content.setOwned(dialog);
-    opts.dialogTitle = "S-Mode: Stem Count";
-    opts.dialogBackgroundColour = juce::Colour(0xff1a1a2e);
-    opts.escapeKeyTriggersCloseButton = true;
-    opts.useNativeTitleBar = false;
-    opts.resizable = false;
-
-    opts.launchAsync();
+    // 6-stem flow deprecated 2026-05-17: native C++/ONNX separation
+    // (htdemucs.onnx) is 4-stem only. The dialog and its UI components are
+    // kept compiled so call sites stay unchanged, but show() just dispatches
+    // the 4-stem choice immediately instead of presenting a dialog.
+    juce::ignoreUnused(parent);
+    juce::Logger::writeToLog("[StemCountDialog] show() bypassed - auto-selecting 4 stems");
+    if (callback)
+        callback(4);
 }
 
 } // namespace samplar

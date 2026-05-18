@@ -26,13 +26,21 @@ bool looksLikeLicenseInfo(const juce::var& candidate)
 
 LicenseServerClient::ValidationResponse LicenseServerClient::validateLicense(const ValidationRequest& request)
 {
-    juce::URL url(juce::String(serverUrl_) + "/api/license/validate");
+    // SAMPL4R first-launch activation now uses /api/licenses/validate-token
+    // (the production server does not deploy /api/v1/validate; validate-token
+    // handles both first-time activation and recurring revalidation — the
+    // server distinguishes via internal state).
+    const auto truncatedKey = request.licenseKey.size() > 10
+        ? request.licenseKey.substr(0, 10) + "..."
+        : request.licenseKey;
+    juce::Logger::writeToLog("[LicenseServerClient] validateLicense (activate) key=" +
+        juce::String(truncatedKey) + " server=" + juce::String(serverUrl_));
+
+    juce::URL url(juce::String(serverUrl_) + "/api/licenses/validate-token");
     auto* payloadObject = new juce::DynamicObject();
     payloadObject->setProperty("license_key", juce::String(request.licenseKey));
     payloadObject->setProperty("hardware_id", juce::String(request.hardwareId));
-    payloadObject->setProperty("app_version", juce::String(request.appVersion));
-    payloadObject->setProperty("user_agent", juce::String(request.userAgent));
-    payloadObject->setProperty("ip_address", juce::String(request.ipAddress));
+    payloadObject->setProperty("product_id", juce::String("sampl4r"));
 
     ValidationResponse response;
     {
@@ -40,15 +48,56 @@ LicenseServerClient::ValidationResponse LicenseServerClient::validateLicense(con
         response = performPost(url, juce::var(payloadObject));
     }
 
+    juce::Logger::writeToLog("[LicenseServerClient] validateLicense result: valid=" +
+        juce::String(response.valid ? "true" : "false") +
+        " status=" + juce::String(response.statusCode) +
+        " msg=" + juce::String(response.message));
+
+    return response;
+}
+
+LicenseServerClient::ValidationResponse LicenseServerClient::validateToken(const std::string& licenseKey,
+                                                                          const std::string& hardwareId,
+                                                                          const std::string& productId)
+{
+    // SAMPL4R every-launch signed-token check endpoint
+    const auto truncatedKey = licenseKey.size() > 10
+        ? licenseKey.substr(0, 10) + "..."
+        : licenseKey;
+    juce::Logger::writeToLog("[LicenseServerClient] validateToken key=" +
+        juce::String(truncatedKey) + " product=" + juce::String(productId) +
+        " server=" + juce::String(serverUrl_));
+
+    juce::URL url(juce::String(serverUrl_) + "/api/licenses/validate-token");
+    auto* payloadObject = new juce::DynamicObject();
+    payloadObject->setProperty("license_key", juce::String(licenseKey));
+    payloadObject->setProperty("hardware_id", juce::String(hardwareId));
+    payloadObject->setProperty("product_id", juce::String(productId));
+
+    ValidationResponse response;
+    {
+        std::scoped_lock lock(networkMutex_);
+        response = performPost(url, juce::var(payloadObject));
+    }
+
+    juce::Logger::writeToLog("[LicenseServerClient] validateToken result: valid=" +
+        juce::String(response.valid ? "true" : "false") +
+        " status=" + juce::String(response.statusCode) +
+        " hasSignedToken=" + juce::String(response.signedToken.empty() ? "no" : "yes"));
+
     return response;
 }
 
 LicenseServerClient::ValidationResponse LicenseServerClient::activateLicense(const ActivationRequest& request)
 {
-    juce::URL url(juce::String(serverUrl_) + "/api/license/activate");
+    // Credentials-style activation routes through the same validate-token
+    // endpoint (production does not deploy /api/v1/validate). Email/password
+    // are passed alongside so the server can associate the activation.
+    juce::URL url(juce::String(serverUrl_) + "/api/licenses/validate-token");
     auto* payloadObject = new juce::DynamicObject();
     payloadObject->setProperty("license_key", juce::String(request.licenseKey));
     payloadObject->setProperty("hardware_id", juce::String(request.hardwareId));
+    payloadObject->setProperty("product_id", juce::String("sampl4r"));
     payloadObject->setProperty("email", juce::String(request.email));
     payloadObject->setProperty("password", juce::String(request.password));
 
@@ -66,7 +115,7 @@ LicenseServerClient::ValidationResponse LicenseServerClient::deactivateLicense(c
 {
     juce::Logger::writeToLog("[LicenseServerClient] Deactivating license for hardware: " + juce::String(hardwareId));
 
-    juce::URL url(juce::String(serverUrl_) + "/api/license/deactivate");
+    juce::URL url(juce::String(serverUrl_) + "/api/licenses/deactivate");
     auto* payloadObject = new juce::DynamicObject();
     payloadObject->setProperty("license_key", juce::String(licenseKey));
     payloadObject->setProperty("hardware_id", juce::String(hardwareId));
@@ -128,7 +177,7 @@ LicenseServerClient::ValidationResponse LicenseServerClient::performPost(const j
     juce::String headers;
     headers << "Content-Type: application/json\r\n"
             << "Accept: application/json\r\n"
-            << "User-Agent: Samplar/5.0.0\r\n";
+            << "User-Agent: SAMPLAR-sampl4r/5.0.0\r\n";
 
     ValidationResponse lastResponse;
     lastResponse.statusCode = 0;
@@ -212,6 +261,12 @@ LicenseServerClient::ValidationResponse LicenseServerClient::parseValidationResp
                 response.validationInfo = obj->getProperty(juce::Identifier("validation"));
             }
 
+            // SAMPL4R: signed offline-verifiable token from /api/licenses/validate-token
+            const auto tokenVar = obj->getProperty(juce::Identifier("signed_token"));
+            if (!tokenVar.isVoid()) {
+                response.signedToken = tokenVar.toString().toStdString();
+            }
+
             if (response.message.empty()) {
                 auto detail = obj->getProperty(juce::Identifier("detail"));
                 if (!detail.isVoid()) {
@@ -254,6 +309,82 @@ LicenseServerClient::ValidationResponse LicenseServerClient::activateWithCredent
 
     const juce::URL url(serverUrl_ + "/auth/login-with-hardware");
     return performPost(url, payload);
+}
+
+LicenseServerClient::LoginResponse LicenseServerClient::loginWithHardware(const std::string& email,
+                                                                          const std::string& password,
+                                                                          const std::string& hardwareId)
+{
+    // Truncated email for logging (per project convention — keep first 4 chars + "...").
+    const auto truncEmail = email.size() > 4 ? email.substr(0, 4) + "..." : email;
+    juce::Logger::writeToLog("[LicenseServerClient] loginWithHardware email=" +
+        juce::String(truncEmail) + " server=" + juce::String(serverUrl_));
+
+    juce::URL url(juce::String(serverUrl_) + "/auth/login-with-hardware");
+    auto* payloadObject = new juce::DynamicObject();
+    payloadObject->setProperty("email", juce::String(email));
+    payloadObject->setProperty("password", juce::String(password));
+    payloadObject->setProperty("hardware_id", juce::String(hardwareId));
+
+    ValidationResponse raw;
+    {
+        std::scoped_lock lock(networkMutex_);
+        raw = performPost(url, juce::var(payloadObject));
+    }
+
+    LoginResponse out;
+    out.statusCode = raw.statusCode;
+    out.message    = raw.message;
+
+    // Re-parse the body via licenseInfo/validationInfo + the raw envelope.
+    // performPost already extracted "license_info"/"validation_info" — the
+    // top-level "success" / "license_valid" / "email" / "license_type" /
+    // "signed_token" fields need fresh parsing from licenseInfo when present,
+    // OR from the raw stream. To avoid a second HTTP call, we rely on
+    // parseValidationResponse having stashed everything we need into the
+    // response object below.
+
+    // Robust extraction: look at the parsed top-level object via licenseInfo
+    // fallback (parseValidationResponse already promotes licenseInfo to the
+    // whole payload when it "looks like license info").
+    auto extractString = [](const juce::var& src, const char* key) -> std::string {
+        if (!src.isObject()) return {};
+        auto* obj = src.getDynamicObject();
+        if (!obj) return {};
+        const auto v = obj->getProperty(juce::Identifier(key));
+        return v.isVoid() ? std::string{} : v.toString().toStdString();
+    };
+    auto extractBool = [](const juce::var& src, const char* key, bool dflt) {
+        if (!src.isObject()) return dflt;
+        auto* obj = src.getDynamicObject();
+        if (!obj) return dflt;
+        const auto v = obj->getProperty(juce::Identifier(key));
+        return v.isVoid() ? dflt : static_cast<bool>(v);
+    };
+
+    // For login-with-hardware, the server returns a flat envelope:
+    //   { success, license_valid, message, email, license_type, signed_token, expires_at, ... }
+    // parseValidationResponse stores the full payload in licenseInfo when it
+    // contains license fields. We try both licenseInfo and validationInfo.
+    const juce::var& candidate = raw.licenseInfo.isObject() ? raw.licenseInfo : raw.validationInfo;
+
+    out.success      = extractBool(candidate, "success", raw.statusCode >= 200 && raw.statusCode < 300);
+    out.licenseValid = extractBool(candidate, "license_valid", raw.valid);
+    if (out.message.empty())
+        out.message  = extractString(candidate, "message");
+    out.email        = extractString(candidate, "email");
+    out.licenseType  = extractString(candidate, "license_type");
+    out.signedToken  = !raw.signedToken.empty() ? raw.signedToken : extractString(candidate, "signed_token");
+    out.expiresAt    = extractString(candidate, "expires_at");
+    out.raw          = candidate;
+
+    juce::Logger::writeToLog("[LicenseServerClient] loginWithHardware result: success=" +
+        juce::String(out.success ? "true" : "false") +
+        " licenseValid=" + juce::String(out.licenseValid ? "true" : "false") +
+        " status=" + juce::String(out.statusCode) +
+        " hasToken=" + juce::String(out.signedToken.empty() ? "no" : "yes"));
+
+    return out;
 }
 
 } // namespace samplar

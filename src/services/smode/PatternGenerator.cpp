@@ -290,57 +290,105 @@ void PatternGenerator::mutate(std::vector<PatternSlot>& slots,
 {
     if (slots.empty()) return;
 
-    std::mt19937 rng(static_cast<unsigned>(juce::Time::currentTimeMillis()));
+    // Use a static thread_local RNG so consecutive (spam-clicked) calls
+    // each produce a DIFFERENT result. Seeding from juce::Time per call
+    // collided within a millisecond — "spam mutate" then barely changed
+    // anything because the same seed yielded the same mutation choices.
+    static thread_local std::mt19937 rng{ std::random_device{}() };
     std::uniform_real_distribution<float> chance(0.0f, 1.0f);
     int mutations = 0;
+
+    // Build an index list of NON-EMPTY slots so the "swap two existing slots"
+    // mutation can pick partners from the current pattern.
+    std::vector<int> nonEmptyIdx;
+    nonEmptyIdx.reserve(slots.size());
+    for (int i = 0; i < static_cast<int>(slots.size()); ++i)
+        if (!slots[(size_t) i].empty)
+            nonEmptyIdx.push_back(i);
+
+    if (nonEmptyIdx.empty()) return;
 
     for (auto& slot : slots)
     {
         if (chance(rng) > intensity) continue;
         if (slot.empty) continue;
 
-        // Pick a random mutation type
+        // Mutate is an FX layer applied IN PLACE — it never rearranges
+        // the pattern, swaps slots, or changes which segment plays where.
+        // The arrangement is set by Shuffle or manual placement. Mutate
+        // only varies the PERFORMANCE of existing slots: reverse, pitch,
+        // velocity, speed, trim.
         std::uniform_int_distribution<int> mutType(0, 4);
         switch (mutType(rng))
         {
-            case 0: // Swap with a different segment
-            {
-                if (!availableSegments.empty())
-                {
-                    std::uniform_int_distribution<int> segDist(
-                        0, static_cast<int>(availableSegments.size()) - 1);
-                    const auto& alt = availableSegments[static_cast<size_t>(segDist(rng))];
-                    slot.stemIndex = alt.stemIndex;
-                    slot.segmentIndex = alt.segmentIndex;
-                }
-                break;
-            }
-            case 1: // Toggle reverse
+            case 0: // Toggle reverse
                 slot.reverse = !slot.reverse;
                 break;
-            case 2: // Random pitch shift ±3 semitones
+            case 1: // Random pitch shift ±3 semitones
             {
                 std::uniform_real_distribution<float> pitchDist(-3.0f, 3.0f);
                 slot.pitchSemitones = std::round(pitchDist(rng));
                 break;
             }
-            case 3: // Velocity variation
+            case 2: // Velocity variation
             {
                 std::uniform_real_distribution<float> velDist(0.4f, 1.0f);
                 slot.velocity = velDist(rng);
                 break;
             }
-            case 4: // Remove (make empty)
-                slot.empty = true;
-                slot.stemIndex = -1;
-                slot.segmentIndex = -1;
+            case 3: // Speed variation (0.5x – 2.0x, biased toward 1x)
+            {
+                static const float speeds[] = { 0.5f, 0.75f, 1.0f, 1.0f, 1.0f, 1.25f, 1.5f, 2.0f };
+                std::uniform_int_distribution<int> sd(0, 7);
+                slot.speed = speeds[sd(rng)];
                 break;
+            }
+            case 4: // Trim window — re-frame the segment without changing source
+            {
+                std::uniform_real_distribution<float> trimDist(0.0f, 0.3f);
+                slot.trimStart = trimDist(rng);
+                slot.trimEnd   = 1.0f - trimDist(rng);
+                if (slot.trimEnd <= slot.trimStart + 0.1f)
+                {
+                    slot.trimStart = 0.0f;
+                    slot.trimEnd   = 1.0f;
+                }
+                break;
+            }
+        }
+        ++mutations;
+    }
+
+    // Guarantee progress: if intensity-roulette skipped every slot, force
+    // ONE random non-empty slot to receive an FX mutation so spam-click
+    // always produces a visible change. Same in-place rules — never
+    // touches which segment is in which slot.
+    if (mutations == 0 && !nonEmptyIdx.empty())
+    {
+        std::uniform_int_distribution<int> idxDist(
+            0, static_cast<int>(nonEmptyIdx.size()) - 1);
+        auto& slot = slots[(size_t) nonEmptyIdx[(size_t) idxDist(rng)]];
+        std::uniform_int_distribution<int> mutType(0, 4);
+        switch (mutType(rng))
+        {
+            case 0: slot.reverse = !slot.reverse; break;
+            case 1: { std::uniform_real_distribution<float> p(-3.0f, 3.0f);
+                      slot.pitchSemitones = std::round(p(rng)); } break;
+            case 2: { std::uniform_real_distribution<float> v(0.4f, 1.0f);
+                      slot.velocity = v(rng); } break;
+            case 3: { static const float speeds[] = { 0.5f, 0.75f, 1.0f, 1.0f, 1.0f, 1.25f, 1.5f, 2.0f };
+                      std::uniform_int_distribution<int> sd(0, 7);
+                      slot.speed = speeds[sd(rng)]; } break;
+            case 4: { std::uniform_real_distribution<float> t(0.0f, 0.3f);
+                      slot.trimStart = t(rng); slot.trimEnd = 1.0f - t(rng);
+                      if (slot.trimEnd <= slot.trimStart + 0.1f)
+                      { slot.trimStart = 0.0f; slot.trimEnd = 1.0f; } } break;
         }
         ++mutations;
     }
 
     juce::Logger::writeToLog("[PatternGenerator] Mutated " + juce::String(mutations)
-                             + " of " + juce::String(static_cast<int>(slots.size())) + " slots"
+                             + " of " + juce::String(static_cast<int>(nonEmptyIdx.size())) + " non-empty slots"
                              + " (intensity=" + juce::String(intensity, 2) + ")");
 }
 
