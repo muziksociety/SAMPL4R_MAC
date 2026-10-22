@@ -4,13 +4,22 @@ This file provides guidance to Claude Code when working with code in this reposi
 
 ## Project Overview
 
-SAMPLAR is a **C++/JUCE audio application** for drum sample processing and variation generation. It follows the BIBLE architecture framework (see `docs/BIBLE_CPP_CONVERSION.md`) with services, event bus, and clear ownership patterns.
+SAMPLAR is a **C++/JUCE VST3 instrument** for sampling songs **by stem**. A song is
+split locally into 4 stems (Vocals / Bass / Drums / Melody) with ONNX Runtime
+(htdemucs). Each stem is shown as a waveform lane; chops (segments) on a lane act as
+MIDI pads, and per-stem sequencer lanes play them back inside the DAW. It follows the
+BIBLE architecture (services, event bus, clear ownership; see `docs/BIBLE_CPP_CONVERSION.md`).
+
+Forked from Sample Monsta 5 (`b:/SANTI/SAMPLE_MONSTA/sample_monsta4/Sample_monsta5`) in
+May 2026; SM5 keeps fixing the same separation/plugin files, so check it for ports.
+Status, audit and roadmap: `docs/revival/REVIVAL_REPORT.md` (+ `audit_A..F_*.md`).
 
 **Tech Stack:**
 - **Language**: C++17
-- **Framework**: JUCE 7.x
-- **Build System**: CMake
-- **Platform**: Windows (with potential for cross-platform)
+- **Framework**: JUCE (out-of-repo at `../JUCE`, i.e. `b:/SANTI/VST PROJECT/JUCE`)
+- **Build System**: CMake + Visual Studio 2022
+- **ML**: ONNX Runtime (stem separation `htdemucs`, tempo `beat_this`)
+- **Platform**: Windows x64 (VST3). `SamplarApp` standalone is a dev-only harness.
 
 ## Skills and Documentation
 
@@ -42,74 +51,51 @@ cmake --build build --config Debug
 cmake --build build --config Release --clean-first
 ```
 
-### Running
+### Running / testing without a DAW
 ```bash
-# Run the standalone application
-./build/SM5App_artefacts/Release/Sample\ Monsta\ 5.exe
+# Build the smoke host once (EXCLUDE_FROM_ALL)
+cmake --build build --config Release --target VST3SmokeHost --parallel
 
-# Or from build directory
-start "build/SM5App_artefacts/Release/SAMPLAR.exe"
+# Load the built VST3 like a DAW: instantiate, process audio+MIDI, open/close/reopen
+# the editor, save state, unload. Exit 0 = all steps passed.
+./build/VST3SmokeHost_artefacts/Release/VST3SmokeHost.exe --show-ms 3000
+./build/VST3SmokeHost_artefacts/Release/VST3SmokeHost.exe --two-instances
 ```
-
-### Testing
-```bash
-# Build and run tests (if available)
-cmake --build build --target tests
-```
+- Plugin log (dev build): `build/SamplarPlugin_artefacts/Release/VST3/SAMPLAR.vst3/Contents/x86_64-win/logs/SAMPLAR_console.log`
+  (installed under Program Files: `%APPDATA%/Samplar/logs/SAMPLAR_console.log`).
+- Git-bash: use `cmake --build ... --parallel`, NOT `-- /m` (the `/m` gets path-mangled).
+- Installer: `release_assets/build_installer.ps1` (version comes from `project(samplar VERSION x.y.z)` in CMakeLists.txt - the ONLY place to bump it).
 
 ## Architecture Overview (BIBLE Framework)
 
 ### Core Structure
 ```
-Sample_monsta5/
-├── CMakeLists.txt           ← Main build configuration
-├── src/
-│   ├── app/                 ← Core framework (EventBus, ServiceRegistry, Service interface)
-│   │   ├── EventBus.h/.cpp      ← Thread-aware pub/sub messaging
-│   │   ├── ServiceRegistry.h/.cpp ← Service lifecycle management
-│   │   ├── Service.h            ← IService interface
-│   │   └── AudioDeviceService.h ← Audio device management
-│   ├── services/            ← Business logic services
-│   │   ├── GeneratorService.*       ← Sample variation generation coordinator
-│   │   ├── VariationService.*       ← Variation processing
-│   │   ├── LicenseSystemService.*   ← License management
-│   │   ├── DrumSliceService.*       ← Drum slicing/separation
-│   │   ├── FullSongService.*        ← Full song processing
-│   │   ├── ProcessingCoordinatorService.* ← Processing coordination
-│   │   └── variation/               ← Variation engine implementations
-│   │       ├── IVariationEngine.h       ← Engine interface
-│   │       ├── engines/                 ← Engine implementations
-│   │       │   ├── SimpleVariationEngine.*
-│   │       │   ├── CreativeVariationEngine.*
-│   │       │   ├── ImpactVariationEngine.*
-│   │       │   ├── PowerSynthEngine.*
-│   │       │   ├── DDSPNoiseEngine.*
-│   │       │   ├── SpectralCloneEngine.*
-│   │       │   ├── DirectMorphEngine.*
-│   │       │   └── FastSimpleVariationEngine.*
-│   │       └── genome/                  ← Genetic variation algorithms
-│   ├── ui/                  ← JUCE Component UI layer
-│   │   ├── MainWindow.*         ← Top-level window
-│   │   ├── Pages/               ← Major UI pages
-│   │   ├── Components/          ← Reusable UI components
-│   │   ├── WaveEditor/          ← Waveform editing UI
-│   │   ├── Debug/               ← Debug console/flags
-│   │   ├── Style/               ← LookAndFeel implementations
-│   │   ├── Games/               ← Easter egg mini-games
-│   │   └── licensing/           ← License UI widgets
-│   ├── audio/               ← Audio processing
-│   │   └── Preview/             ← Audio preview (SoundTouch)
-│   ├── security/            ← License security
-│   ├── licensing/           ← Feature management
-│   ├── networking/          ← License server client
-│   └── utils/               ← Utility classes
-├── JUCE/                    ← JUCE framework (vendored)
-├── third_party/             ← Third-party dependencies
-│   ├── demucs.cpp/              ← Audio source separation
-│   └── vcpkg/                   ← Package manager
-├── python_bridge/           ← Python IPC bridge (for ML)
-└── docs/                    ← Documentation
-    └── BIBLE_CPP_CONVERSION.md  ← Architecture reference
+SAMPLAR/
++-- CMakeLists.txt              <- build; project(VERSION) is the single version source
++-- src/
+|   +-- plugin/                 <- SamplarAudioProcessor (owns EventBus + ServiceRegistry), Editor
+|   +-- app/                    <- EventBus, ServiceRegistry, ServiceLocator, AppState (DAW state)
+|   +-- services/
+|   |   +-- smode/              <- SModeService (model + worker pool), SModeSeparationService,
+|   |   |                          SModeSegmentModel (stems/segments/undo), PatternGenerator
+|   |   +-- separation/         <- OnnxSeparationProvider (htdemucs)
+|   |   +-- analysis/           <- HybridTempoDetector (BeatThis + DSP), DownbeatDetector, ...
+|   |   +-- FullSongService.*   <- separation engine wrapper (ONNX), despite the SM5 name
+|   |   +-- MidiMappingService.*<- MIDI -> voices (audio thread), CC learn, pitch (signalsmith)
+|   |   +-- LicenseSystemService.*, UpdateCheckService.*
+|   +-- ui/
+|   |   +-- MainWindow.cpp      <- RootComponent (plugin editor content) + dev standalone window
+|   |   +-- Pages/SModePage.*   <- the whole S-Mode UI (top bar, stem lanes, sequencer)
+|   |   +-- Components/smode/   <- StemWaveformComponent, SequencerLane/Slot, MIDI learn overlay
+|   |   +-- licensing/          <- sign-in overlay / dialog, status widget
+|   |   +-- Style/              <- SamplarLookAndFeel
+|   +-- security/, networking/  <- RSA-signed licences, OAuth (PKCE), hardware id
+|   +-- utils/                  <- DataPaths (resource/user dirs), OnnxDelayLoad, Tracing, ...
++-- third_party/                <- beat_this, signalsmith-stretch/-linear (onnxruntime via FetchContent)
++-- models/                     <- htdemucs*.onnx (git-ignored, staged into the bundle)
++-- tools/vst3_smoke_host/      <- DAW-less load/unload harness
++-- release_assets/             <- Inno installer + build script
++-- docs/revival/               <- 2026-10 audit + roadmap
 ```
 
 ### Core Components
@@ -151,31 +137,27 @@ struct IService {
 }
 ```
 
-### Variation Engine Architecture
-
-All variation engines implement `IVariationEngine`:
-```cpp
-class IVariationEngine {
-public:
-    virtual juce::AudioBuffer<float> generateVariation(
-        const juce::AudioBuffer<float>& source,
-        double sampleRate,
-        int variationIndex
-    ) = 0;
-
-    virtual void setEffectSettings(const samplar::EffectSettingsMap& settings) = 0;
-};
+### S-Mode data flow
+```
+Load song (SModePage / drag-drop)
+  -> SModeService::startWorkflow -> SModeSeparationService (joinable worker thread)
+     -> FullSongService -> OnnxSeparationProvider (htdemucs, 4 stems)
+  -> "smode.separation.complete" -> SModeService loads stems into SModeSegmentModel
+  -> "smode.workflow.ready" -> SModePage builds stem lanes, runs BPM/downbeat on the
+     SModeService worker pool
+MIDI note (audio thread) -> MidiMappingService -> segment voices (signalsmith pitch)
 ```
 
-**Available Engines:**
-1. **SimpleVariationEngine** - Basic pitch/time variations
-2. **CreativeVariationEngine** - Creative DSP effects
-3. **ImpactVariationEngine** - Impact/transient focused
-4. **PowerSynthEngine** - Synthesizer-style processing
-5. **DDSPNoiseEngine** - DDSP-inspired noise synthesis
-6. **SpectralCloneEngine** - Spectral cloning/morphing
-7. **DirectMorphEngine** - Direct morphing algorithms
-8. **FastSimpleVariationEngine** - Optimized simple engine
+### Threading rules learned the hard way (see docs/revival/audit_A_realtime.md)
+- No detached threads. Heavy UI-triggered jobs go through `SModeService::runBackground()`
+  (pool drained on shutdown); copy audio on the message thread first - never hold raw
+  pointers into `SModeSegmentModel` (a new song clears it).
+- Every `MessageManager::callAsync` / `Timer::callAfterDelay` lambda that touches `this`
+  needs a `Component::SafePointer` or a `shared_ptr<atomic<bool>>` alive token.
+- Results of async analysis must check `model.getContentGeneration()` before applying.
+- MSVC: do not write `[safe = SafePointer<X>(this)]` init-captures inside a nested lambda;
+  hoist the SafePointer to a local first.
+- Services are initialised in registration order and shut down in reverse.
 
 ## JUCE/C++ Coding Standards
 
@@ -259,14 +241,6 @@ juce::Logger::writeToLog("📁 [ServiceName] File: " + file.getFullPathName());
 
 ## Adding New Features
 
-### Adding a New Variation Engine
-1. Create header in `src/services/variation/engines/NewEngine.h`
-2. Create implementation in `src/services/variation/engines/NewEngine.cpp`
-3. Implement `IVariationEngine` interface
-4. Register in `GeneratorService` or engine factory
-5. Add to CMakeLists.txt `target_sources`
-6. Add to UI engine selection dropdown
-
 ### Adding a New Service
 1. Create class inheriting from `samplar::IService`
 2. Implement `initialise()` and `shutdown()`
@@ -281,23 +255,13 @@ juce::Logger::writeToLog("📁 [ServiceName] File: " + file.getFullPathName());
 
 ## Key Integration Points
 
-### Engine Registration Flow
-```
-CMakeLists.txt (source file)
-    ↓
-GeneratorService (engine factory)
-    ↓
-UI Engine Dropdown (user selection)
-    ↓
-VariationService (processing)
-```
-
-### Event Bus Topics
-Common event topics used:
-- `"ui.navigate"` - Page navigation
-- `"processing.start"` - Start processing
-- `"processing.complete"` - Processing finished
-- `"license.status"` - License status changes
+### Event Bus Topics (live)
+- `"smode.separation.progress" / ".complete" / ".error"` - separation worker
+- `"smode.workflow.ready" / ".error"` - stems loaded into the model
+- `"smode.segment.triggered" / ".stopped"`, `"smode.transport.stopped"` - playback -> UI
+- `"smode.downbeat.detected"`, `"host.tempo"` / `"host.tempo.request"` - tempo
+- `"state.restored"` - DAW project reload
+- `"update.available"`, `"license.status.reminder"`, `"license.status"` - account/updates
 
 ## Dependencies
 
@@ -306,18 +270,19 @@ Common event topics used:
 - **CMake 3.20+** - Build system
 - **C++17 compiler** - MSVC 2022 recommended
 
-### Optional
-- **SoundTouch** - Constant-pitch time-stretch (enabled by default)
-- **demucs.cpp** - Audio source separation (via CLI)
-- **OpenBLAS** - BLAS acceleration for demucs
+### Bundled
+- **ONNX Runtime** - stem separation + Beat This! tempo (delay-loaded, see `src/utils/OnnxDelayLoad.cpp`)
+- **signalsmith-stretch** - realtime per-stem / per-voice pitch shifting
 
 ## Build Configuration Options
 
 ```cmake
-WITH_SOUNDTOUCH=ON   # Enable SoundTouch (default ON)
-WITH_ZEROMQ=OFF      # Enable ZeroMQ IPC (default OFF)
-WITH_DEMUCS=OFF      # Enable Demucs library (default OFF - model loading issues)
-WITH_DEMUCS_CLI=ON   # Build demucs CLI (default ON)
+WITH_BEAT_THIS=ON               # Beat This! neural tempo (needs third_party/beat_this/models/beat_this.onnx)
+WITH_SIGNALSMITH_STRETCH=ON     # realtime pitch shifter
+SAMPLAR_BUILD_STANDALONE=OFF    # dev-only SamplarApp
+SAMPLAR_BUILD_TESTS=OFF         # SamplarTests console runner
+SAMPLAR_ENABLE_TRACING=OFF      # Chrome-trace profiler
+SAMPLAR_ENABLE_DEV_FALLBACK=OFF # never ON for release builds
 ```
 
 ## Important Notes
@@ -332,7 +297,7 @@ WITH_DEMUCS_CLI=ON   # Build demucs CLI (default ON)
 ### Code Quality
 - Keep changes minimal and surgical
 - Follow existing code patterns
-- Test all engines after changes (not just new ones)
+- After any lifecycle/threading change run VST3SmokeHost (single + `--two-instances`)
 - Verify CMakeLists.txt includes new source files before building
 
 ## Agent Workflow
@@ -514,3 +479,66 @@ All agents MUST read `mistakes.md` before starting work. It contains:
 - Success patterns to follow
 
 **Key Lesson**: NEVER implement features with UI components without frontend-design.json containing ASCII mockups.
+
+# context-mode — MANDATORY routing rules
+
+You have context-mode MCP tools available. These rules are NOT optional — they protect your context window from flooding. A single unrouted command can dump 56 KB into context and waste the entire session.
+
+## BLOCKED commands — do NOT attempt these
+
+### curl / wget — BLOCKED
+Any Bash command containing `curl` or `wget` is intercepted and replaced with an error message. Do NOT retry.
+Instead use:
+- `ctx_fetch_and_index(url, source)` to fetch and index web pages
+- `ctx_execute(language: "javascript", code: "const r = await fetch(...)")` to run HTTP calls in sandbox
+
+### Inline HTTP — BLOCKED
+Any Bash command containing `fetch('http`, `requests.get(`, `requests.post(`, `http.get(`, or `http.request(` is intercepted and replaced with an error message. Do NOT retry with Bash.
+Instead use:
+- `ctx_execute(language, code)` to run HTTP calls in sandbox — only stdout enters context
+
+### WebFetch — BLOCKED
+WebFetch calls are denied entirely. The URL is extracted and you are told to use `ctx_fetch_and_index` instead.
+Instead use:
+- `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` to query the indexed content
+
+## REDIRECTED tools — use sandbox equivalents
+
+### Bash (>20 lines output)
+Bash is ONLY for: `git`, `mkdir`, `rm`, `mv`, `cd`, `ls`, `npm install`, `pip install`, and other short-output commands.
+For everything else, use:
+- `ctx_batch_execute(commands, queries)` — run multiple commands + search in ONE call
+- `ctx_execute(language: "shell", code: "...")` — run in sandbox, only stdout enters context
+
+### Read (for analysis)
+If you are reading a file to **Edit** it → Read is correct (Edit needs content in context).
+If you are reading to **analyze, explore, or summarize** → use `ctx_execute_file(path, language, code)` instead. Only your printed summary enters context. The raw file content stays in the sandbox.
+
+### Grep (large results)
+Grep results can flood context. Use `ctx_execute(language: "shell", code: "grep ...")` to run searches in sandbox. Only your printed summary enters context.
+
+## Tool selection hierarchy
+
+1. **GATHER**: `ctx_batch_execute(commands, queries)` — Primary tool. Runs all commands, auto-indexes output, returns search results. ONE call replaces 30+ individual calls.
+2. **FOLLOW-UP**: `ctx_search(queries: ["q1", "q2", ...])` — Query indexed content. Pass ALL questions as array in ONE call.
+3. **PROCESSING**: `ctx_execute(language, code)` | `ctx_execute_file(path, language, code)` — Sandbox execution. Only stdout enters context.
+4. **WEB**: `ctx_fetch_and_index(url, source)` then `ctx_search(queries)` — Fetch, chunk, index, query. Raw HTML never enters context.
+5. **INDEX**: `ctx_index(content, source)` — Store content in FTS5 knowledge base for later search.
+
+## Subagent routing
+
+When spawning subagents (Agent/Task tool), the routing block is automatically injected into their prompt. Bash-type subagents are upgraded to general-purpose so they have access to MCP tools. You do NOT need to manually instruct subagents about context-mode.
+
+## Output constraints
+
+- Keep responses under 500 words.
+- Write artifacts (code, configs, PRDs) to FILES — never return them as inline text. Return only: file path + 1-line description.
+- When indexing content, use descriptive source labels so others can `ctx_search(source: "label")` later.
+
+## ctx commands
+
+| Command | Action |
+|---------|--------|
+| `ctx stats` | Call the `ctx_stats` MCP tool and display the full output verbatim |
+| `ctx doctor` | Call the `ctx_doctor` MCP tool, run the returned shell command, display as checklist |
+| `ctx upgrade` | Call the `ctx_upgrade` MCP tool, run the returned shell command, display as checklist |

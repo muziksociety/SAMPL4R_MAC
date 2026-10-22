@@ -1,11 +1,8 @@
 ﻿#include "UpdateCheckService.h"
 #include "../Version.h"
-#include "../app/App.h"
-#include "../app/ServiceRegistry.h"
-#include "../app/ServiceLocator.h"
-#include "LicenseSystemService.h"
+#include "../security/HardwareFingerprintGenerator.h"
+#include <juce_events/juce_events.h>
 
-#include <thread>
 
 namespace samplar {
 
@@ -56,7 +53,24 @@ void UpdateCheckService::initialise()
 void UpdateCheckService::shutdown()
 {
     juce::Logger::writeToLog("[UpdateCheckService] === shutdown START ===");
+    alive_->store(false);
     stopTimer();
+    {
+        // Abort an in-flight request so the join below returns immediately
+        // instead of waiting for the connection timeout.
+        std::scoped_lock lock(streamMutex_);
+        if (activeStream_ != nullptr)
+        {
+            juce::Logger::writeToLog("[UpdateCheckService]   cancelling in-flight HTTP request");
+            activeStream_->cancel();
+        }
+    }
+    if (checkThread_ && checkThread_->joinable())
+    {
+        juce::Logger::writeToLog("[UpdateCheckService]   joining in-flight check thread");
+        checkThread_->join();
+    }
+    checkThread_.reset();
     juce::Logger::writeToLog("[UpdateCheckService] === shutdown END ===");
 }
 
@@ -69,12 +83,21 @@ void UpdateCheckService::timerCallback()
     juce::Logger::writeToLog("[UpdateCheckService] === timerCallback START ===");
     stopTimer();  // one-shot
 
-    // Launch the network check on a detached background thread so we never
-    // block the message thread.
-    std::thread([this]() {
+    // Launch the network check on a background thread so we never block the
+    // message thread. Joinable (see shutdown) - never detached.
+    if (!alive_->load() || (checkThread_ && checkThread_->joinable()))
+    {
+        juce::Logger::writeToLog("[UpdateCheckService]   check skipped (shutting down or already running)");
+        return;
+    }
+    // N-16: the machine ID is resolved HERE, on the message thread, and handed
+    // to the worker by value. The worker never looks up a service (the global
+    // ServiceLocator can point at another, unloading plugin instance).
+    std::string hwId = getHardwareId();
+    checkThread_ = std::make_unique<std::thread>([this, hwId]() {
         juce::Logger::writeToLog("[UpdateCheckService]   Background thread started for performCheck()");
-        performCheck();
-    }).detach();
+        performCheck(hwId);
+    });
 
     juce::Logger::writeToLog("[UpdateCheckService] === timerCallback END ===");
 }
@@ -83,7 +106,7 @@ void UpdateCheckService::timerCallback()
 // Network check  (runs on background thread)
 // ---------------------------------------------------------------------------
 
-void UpdateCheckService::performCheck()
+void UpdateCheckService::performCheck(const std::string& hwId)
 {
     juce::Logger::writeToLog("[UpdateCheckService] === performCheck START ===");
 
@@ -92,10 +115,10 @@ void UpdateCheckService::performCheck()
     updateInfo_.currentVersion = currentVersion.toStdString();
     juce::Logger::writeToLog("[UpdateCheckService]   currentVersion: " + currentVersion);
 
-    // 2. Hardware ID (may be empty if license service unavailable)
-    std::string hwId = getHardwareId();
+    // 2. Hardware ID: resolved on the message thread by timerCallback (N-16).
+    // D13: never write the full hardware id to the (customer-visible) log.
     juce::Logger::writeToLog("[UpdateCheckService]   hardwareId: "
-                             + juce::String(hwId.empty() ? "(empty)" : hwId));
+                             + juce::String(hwId.empty() ? "(empty)" : hwId.substr(0, 8) + "..."));
 
     // 3. Build the URL
     juce::String baseUrl = "https://samplemonsta.com/api/update/check";
@@ -104,21 +127,48 @@ void UpdateCheckService::performCheck()
              .withParameter("product", "samplar")
              .withParameter("hardware_id", juce::String(hwId));
 
-    juce::Logger::writeToLog("[UpdateCheckService]   Request URL: " + url.toString(true));
+    juce::Logger::writeToLog("[UpdateCheckService]   Request: " + baseUrl
+                             + " current_version=" + currentVersion + " product=samplar");
 
-    // 4. Perform the HTTP GET
-    auto stream = url.createInputStream(
-        juce::URL::InputStreamOptions(juce::URL::ParameterHandling::inAddress)
-            .withConnectionTimeoutMs(8000));
-
-    if (stream == nullptr)
+    // 4. Perform the HTTP GET. WebInputStream (not URL::createInputStream) so
+    //    shutdown() can cancel() it from the message thread.
+    auto stream = std::make_unique<juce::WebInputStream>(url, false);
+    stream->withConnectionTimeout(8000);
     {
-        juce::Logger::writeToLog("[UpdateCheckService] ERROR: Failed to create input stream (network error or timeout)");
+        std::scoped_lock lock(streamMutex_);
+        if (!alive_->load())
+        {
+            juce::Logger::writeToLog("[UpdateCheckService] === performCheck END (shut down before connect) ===");
+            return;
+        }
+        activeStream_ = stream.get();
+    }
+
+    const bool connected = stream->connect(nullptr);
+    juce::String responseBody;
+    if (connected && !stream->isError())
+        responseBody = stream->readEntireStreamAsString();
+
+    {
+        std::scoped_lock lock(streamMutex_);
+        activeStream_ = nullptr;
+    }
+
+    if (!connected || stream->isError() || !alive_->load())
+    {
+        juce::Logger::writeToLog("[UpdateCheckService] ERROR: request failed, timed out or was cancelled"
+                                 " (status " + juce::String(stream->getStatusCode()) + ")");
         juce::Logger::writeToLog("[UpdateCheckService] === performCheck END (network failure) ===");
         return;
     }
-
-    juce::String responseBody = stream->readEntireStreamAsString();
+    const int statusCode = stream->getStatusCode();
+    if (statusCode != 200)
+    {
+        // 404 (unknown product), 5xx (outage), a proxy page: no update info.
+        juce::Logger::writeToLog("[UpdateCheckService] ERROR: HTTP " + juce::String(statusCode) + " - response ignored");
+        juce::Logger::writeToLog("[UpdateCheckService] === performCheck END (http error) ===");
+        return;
+    }
     juce::Logger::writeToLog("[UpdateCheckService]   Response length: " + juce::String(responseBody.length()));
     juce::Logger::writeToLog("[UpdateCheckService]   Response body (first 500 chars): "
                              + responseBody.substring(0, 500));
@@ -127,10 +177,17 @@ void UpdateCheckService::performCheck()
     parseResponse(responseBody);
 
     // 6. Publish events on the message thread
-    juce::MessageManager::callAsync([this]() {
+    juce::MessageManager::callAsync([this, alive = alive_]() {
+        if (!alive->load()) return;   // service shut down (plugin removed)
         juce::Logger::writeToLog("[UpdateCheckService] === Publishing events on message thread ===");
 
-        if (updateInfo_.updateAvailable)
+        // Contract: download_url is "" while SAMPLAR is unreleased - never
+        // offer an update the user can't download.
+        if (updateInfo_.updateAvailable && updateInfo_.downloadUrl.empty())
+        {
+            juce::Logger::writeToLog("[UpdateCheckService]   update_available but download_url is empty - not offered");
+        }
+        else if (updateInfo_.updateAvailable)
         {
             juce::Logger::writeToLog("[UpdateCheckService]   Publishing 'update.available'");
             juce::Logger::writeToLog("[UpdateCheckService]     latestVersion: "
@@ -213,6 +270,10 @@ void UpdateCheckService::parseResponse(const juce::String& responseBody)
     // --- Update info ---
     if (auto* updateObj = parsed.getDynamicObject())
     {
+        // Unknown product etc.: {"update_available": false, ..., "error": "..."}
+        if (updateObj->hasProperty("error"))
+            juce::Logger::writeToLog("[UpdateCheckService] WARNING: server error: " + parsed["error"].toString());
+
         if (updateObj->hasProperty("update_available"))
         {
             updateInfo_.updateAvailable = (bool)parsed["update_available"];
@@ -254,28 +315,35 @@ void UpdateCheckService::parseResponse(const juce::String& responseBody)
                 juce::Logger::writeToLog("[UpdateCheckService]   changes count: "
                                          + juce::String((int)updateInfo_.changes.size()));
             }
+            else if (changesVar.isString() && changesVar.toString().isNotEmpty())
+            {
+                updateInfo_.changes.push_back(changesVar.toString().toStdString());
+            }
         }
 
         // --- License reminder ---
-        if (updateObj->hasProperty("license_reminder"))
+        // Server field is "license_status" (the old client read "license_reminder"
+        // and never saw a reminder).
+        if (updateObj->hasProperty("license_status"))
         {
-            auto reminderVar = parsed["license_reminder"];
+            auto reminderVar = parsed["license_status"];
             if (auto* reminderObj = reminderVar.getDynamicObject())
             {
                 if (reminderObj->hasProperty("status"))
                     licenseReminder_.status = reminderVar["status"].toString().toStdString();
                 if (reminderObj->hasProperty("type"))
                     licenseReminder_.type = reminderVar["type"].toString().toStdString();
-                if (reminderObj->hasProperty("days_remaining"))
+                // days_remaining is null for a perpetual licence: keep -1 (unknown).
+                if (reminderObj->hasProperty("days_remaining") && ! reminderVar["days_remaining"].isVoid())
                     licenseReminder_.daysRemaining = (int)reminderVar["days_remaining"];
                 if (reminderObj->hasProperty("message"))
                     licenseReminder_.message = reminderVar["message"].toString().toStdString();
 
-                juce::Logger::writeToLog("[UpdateCheckService]   license_reminder.status: "
+                juce::Logger::writeToLog("[UpdateCheckService]   license_status.status: "
                                          + juce::String(licenseReminder_.status));
-                juce::Logger::writeToLog("[UpdateCheckService]   license_reminder.daysRemaining: "
+                juce::Logger::writeToLog("[UpdateCheckService]   license_status.daysRemaining: "
                                          + juce::String(licenseReminder_.daysRemaining));
-                juce::Logger::writeToLog("[UpdateCheckService]   license_reminder.message: "
+                juce::Logger::writeToLog("[UpdateCheckService]   license_status.message: "
                                          + juce::String(licenseReminder_.message));
             }
         }
@@ -294,27 +362,13 @@ void UpdateCheckService::parseResponse(const juce::String& responseBody)
 
 std::string UpdateCheckService::getHardwareId() const
 {
+    // MESSAGE THREAD (timerCallback). The licence machine ID is process-wide
+    // (HWID v2, computed once, thread-safe static) and is exactly what every
+    // LicenseSystemService instance reports, so no service lookup is needed:
+    // no global registry, no foreign instance, no lifetime hazard (N-16).
     juce::Logger::writeToLog("[UpdateCheckService] === getHardwareId START ===");
 
-    auto* registry = samplar::ServiceLocator::getRegistry();
-    if (registry == nullptr)
-    {
-        juce::Logger::writeToLog("[UpdateCheckService] WARNING: ServiceLocator registry is null");
-        juce::Logger::writeToLog("[UpdateCheckService] === getHardwareId END (no registry) ===");
-        return {};
-    }
-
-    auto* licenseSvc = dynamic_cast<samplar::LicenseSystemService*>(
-        registry->get("license"));
-
-    if (licenseSvc == nullptr)
-    {
-        juce::Logger::writeToLog("[UpdateCheckService] WARNING: LicenseSystemService not found");
-        juce::Logger::writeToLog("[UpdateCheckService] === getHardwareId END (no license svc) ===");
-        return {};
-    }
-
-    std::string hwId = licenseSvc->generateHardwareId();
+    std::string hwId = HardwareFingerprintGenerator::licenceMachineId();
     juce::Logger::writeToLog("[UpdateCheckService]   Hardware ID obtained (length "
                              + juce::String((int)hwId.size()) + ")");
     juce::Logger::writeToLog("[UpdateCheckService] === getHardwareId END ===");

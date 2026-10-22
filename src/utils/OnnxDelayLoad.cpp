@@ -15,13 +15,21 @@
 // Minimal raw-Win32 logger. Writes ASCII line to a HARDCODED path so we
 // don't depend on env var resolution or CRT.
 // -----------------------------------------------------------------------
-// Log is optional - only writes if path is writable. Set to a per-user
-// path so it works on any machine without admin and doesn't pollute the
-// repo root. Set SAMPLAR_DLL_LOAD_TRACE=0 in env to disable (no-op).
+// OPT-IN diagnostic only: nothing is written unless the environment variable
+// SAMPLAR_DLL_LOAD_TRACE=1 is set (support / dev machines). Customer machines
+// never get this file.
 static const wchar_t kLogPath[] = L"C:\\Users\\Public\\samplar_dll_load.log";
+
+static bool samplar_traceEnabled()
+{
+    wchar_t value[4] = {};
+    const DWORD n = GetEnvironmentVariableW(L"SAMPLAR_DLL_LOAD_TRACE", value, 4);
+    return n == 1 && value[0] == L'1';
+}
 
 static void samplar_writeLog(const char* msg)
 {
+    if (!samplar_traceEnabled()) return;
     HANDLE h = CreateFileW(kLogPath, FILE_APPEND_DATA,
                            FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
                            OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
@@ -121,6 +129,21 @@ static FARPROC WINAPI samplar_dliNotifyHook(unsigned dliNotify, PDelayLoadInfo p
 }
 
 // -----------------------------------------------------------------------
+// Safe-failure stub for OrtGetApiBase (audit S-H2). Returned by the failure
+// hook when no usable onnxruntime.dll exports it: the first ORT call then
+// gets a null API base and samplar::ensureOrtApi() reports "runtime
+// unavailable" instead of the delay-load helper raising 0xC06D007F.
+// A DLL that cannot be LOADED at all (dliFailLoadLib) cannot be faked with a
+// module handle; that exception is caught by the __try/__except in
+// src/services/separation/OrtRuntime.cpp, the ONLY place that triggers the
+// load (ORT_API_MANUAL_INIT: no static initialiser touches ORT any more).
+// -----------------------------------------------------------------------
+static const void* samplar_nullOrtGetApiBase(void)
+{
+    return nullptr;
+}
+
+// -----------------------------------------------------------------------
 // Delay-load FAILURE hook - fires when LoadLibrary or GetProcAddress fails.
 // Catches dliFailLoadLib AND dliFailGetProc (the System32 stub case).
 // -----------------------------------------------------------------------
@@ -136,6 +159,15 @@ static FARPROC WINAPI samplar_dliFailureHook(unsigned dliNotify, PDelayLoadInfo 
     }
     if (dliNotify == dliFailGetProc) {
         samplar_writeLog("failure: dliFailGetProc - System32 stub case");
+        if (pdli->dlp.fImportByName && pdli->dlp.szProcName != nullptr) {
+            char line[160] = "failure: missing proc ";
+            int n = 22;
+            for (int i = 0; pdli->dlp.szProcName[i] && n < 158; ++i) line[n++] = pdli->dlp.szProcName[i];
+            line[n] = 0;
+            samplar_writeLog(line);
+        } else {
+            samplar_writeLog("failure: missing proc imported by ordinal");
+        }
         // Load the real DLL and resolve the missing proc through it.
         HMODULE h = samplar_loadCoLocatedOnnx("failure-getproc:");
         if (h != nullptr && pdli->dlp.fImportByName) {
@@ -145,6 +177,16 @@ static FARPROC WINAPI samplar_dliFailureHook(unsigned dliNotify, PDelayLoadInfo 
                 return p;
             }
             samplar_writeLog("failure: GetProcAddress on real DLL still NULL");
+        }
+        // onnxruntime.lib imports OrtGetApiBase BY ORDINAL (1); with ORT_API_MANUAL_INIT it is
+        // the only onnxruntime.dll import of the module (verified with dumpbin /imports).
+        const bool isOrtGetApiBase = pdli->dlp.fImportByName
+            ? (pdli->dlp.szProcName != nullptr && samplar_streqi(pdli->dlp.szProcName, "OrtGetApiBase"))
+            : (pdli->dlp.dwOrdinal == 1);
+        if (isOrtGetApiBase)
+        {
+            samplar_writeLog("failure: returning null OrtGetApiBase stub (runtime unavailable)");
+            return reinterpret_cast<FARPROC>(&samplar_nullOrtGetApiBase);
         }
     }
     return nullptr;
@@ -169,7 +211,7 @@ static VOID NTAPI samplar_tls_callback(PVOID /*DllHandle*/, DWORD reason, PVOID 
     if (h != nullptr) {
         samplar_writeLog("TLS callback: ORT pre-loaded OK - SAMPLAR can now use ONNX safely");
     } else {
-        samplar_writeLog("TLS callback: ORT pre-load FAILED - SAMPLAR will likely fail to init");
+        samplar_writeLog("TLS callback: ORT pre-load FAILED - separation/BeatThis will report 'runtime unavailable'");
     }
 }
 

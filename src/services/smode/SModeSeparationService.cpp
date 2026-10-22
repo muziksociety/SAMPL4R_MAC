@@ -17,26 +17,37 @@ void SModeSeparationService::initialise()
 void SModeSeparationService::shutdown()
 {
     juce::Logger::writeToLog("🎵 [SModeSeparation] === shutdown ===");
-    cancelSeparation();
+    // Order matters: kill queued callbacks first, then stop + join the worker.
+    alive_->store(false);
+    cancelRequested_ = true;
+    joinWorker();
+    separating_ = false;
+    juce::Logger::writeToLog("🎵 [SModeSeparation] shutdown complete (worker joined)");
+}
+
+void SModeSeparationService::joinWorker()
+{
     if (separationThread_ && separationThread_->joinable())
+    {
+        juce::Logger::writeToLog("🎵 [SModeSeparation] joinWorker: waiting for worker thread");
         separationThread_->join();
+        juce::Logger::writeToLog("🎵 [SModeSeparation] joinWorker: worker joined");
+    }
+    separationThread_.reset();
 }
 
 juce::StringArray SModeSeparationService::getStemNames() const
 {
-    // 6-stem flow deprecated 2026-05-18 along with the UVR/Python backend.
-    // The native ONNX provider (htdemucs.onnx) is 4-stem only.
-    // The StemCount enum is retained for ABI/UI compatibility but ::Six is
-    // now a no-op alias for ::Four.
+    // The native ONNX provider (htdemucs) is 4-stem only.
     juce::ignoreUnused(stemCount_);
     return { "Vocals", "Bass", "Drums", "Melody" };
 }
 
 juce::String SModeSeparationService::getModelName() const
 {
-    // Log-only identifier; the actual model file (htdemucs.onnx) is resolved
-    // by FullSongService::locateOnnxModel via DataPaths.
-    return "htdemucs.onnx (4-stem ONNX)";
+    // Log-only identifier; the actual model file is resolved by
+    // FullSongService::resolveModelFile (body model first, full export as fallback).
+    return "htdemucs_body.onnx + host iSTFT (4-stem ONNX, GPU/CPU)";
 }
 
 void SModeSeparationService::startSeparation(const juce::File& sourceFile)
@@ -46,6 +57,16 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
         juce::Logger::writeToLog("❌ [SModeSeparation] Already separating, ignoring request");
         return;
     }
+
+    if (!alive_->load())
+    {
+        juce::Logger::writeToLog("❌ [SModeSeparation] startSeparation after shutdown, ignoring");
+        return;
+    }
+
+    // A previous worker may still be finishing its teardown after posting
+    // "complete"; assigning over a joinable std::thread would std::terminate.
+    joinWorker();
 
     sourceFile_ = sourceFile;
     separating_ = true;
@@ -57,9 +78,13 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
     juce::Logger::writeToLog("🎵 [SModeSeparation] Model: " + getModelName()
         + " (" + juce::String(static_cast<int>(stemCount_)) + " stems)");
 
+    progressPercent_ = 0;
     bus_.publish("smode.separation.progress", juce::var(0));
 
-    separationThread_ = std::make_unique<std::thread>([this]()
+    // `this` is safe inside the worker body itself: shutdown() joins the
+    // worker before the service dies. Only the callAsync lambdas (which can
+    // run AFTER shutdown) need the `alive` token.
+    separationThread_ = std::make_unique<std::thread>([this, alive = alive_]()
     {
         juce::Logger::writeToLog("🎵 [SModeSeparation] Background thread started");
 
@@ -72,23 +97,40 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
         FullSongService::Config cfg;
         cfg.drumsOnly = false;
 
+        // Wire cancellation: polled while waiting for the separation gate, between chunks,
+        // and by the provider's watcher thread, which aborts the running ONNX chunk.
+        fullSongSvc.shouldCancel = [this]() { return cancelRequested_.load(); };
+
         // Progress callback → publish S-Mode progress events
-        cfg.onProgress = [this](int pct, const juce::String& msg) {
-            juce::MessageManager::callAsync([this, pct, msg]() {
-                if (!separating_.load()) return;
+        cfg.onProgress = [this, alive](int pct, const juce::String& msg) {
+            juce::MessageManager::callAsync([this, alive, pct, msg]() {
+                if (!alive->load() || !separating_.load()) return;
+                progressPercent_ = juce::jlimit(0, 100, pct);
                 bus_.publish("smode.separation.progress", juce::var(pct));
                 juce::Logger::writeToLog("🎵 [SModeSeparation] Progress: " + juce::String(pct) + "% - " + msg);
             });
         };
 
-        juce::Logger::writeToLog("🎵 [SModeSeparation] Calling FullSongService::separateDrums (all stems mode)...");
-        auto result = fullSongSvc.separateDrums(sourceFile_, cfg, "smode_");
+        juce::Logger::writeToLog("[SModeSeparation] Calling FullSongService::separateDrums (all stems mode)...");
+        FullSongService::Result result;
+        try
+        {
+            result = fullSongSvc.separateDrums(sourceFile_, cfg, "smode_");
+        }
+        catch (...)
+        {
+            // Nothing may escape a std::thread (std::terminate would take the DAW down).
+            result = {};
+            result.error = "Stem separation failed (unexpected error)";
+            juce::Logger::writeToLog("[SModeSeparation] Decision: unexpected exception from separateDrums -> error");
+        }
 
         // Check for cancellation
-        if (cancelRequested_.load())
+        if (cancelRequested_.load() || result.cancelled)
         {
-            juce::Logger::writeToLog("🎵 [SModeSeparation] Cancelled during separation");
-            juce::MessageManager::callAsync([this]() {
+            juce::Logger::writeToLog("[SModeSeparation] Cancelled during separation");
+            juce::MessageManager::callAsync([this, alive]() {
+                if (!alive->load()) return;
                 separating_ = false;
                 bus_.publish("smode.separation.error", juce::var("Cancelled"));
             });
@@ -99,8 +141,9 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
         // Check for errors
         if (result.error.isNotEmpty())
         {
-            juce::Logger::writeToLog("❌ [SModeSeparation] Separation failed: " + result.error);
-            juce::MessageManager::callAsync([this, err = result.error]() {
+            juce::Logger::writeToLog("[SModeSeparation] Separation failed: " + result.error);
+            juce::MessageManager::callAsync([this, alive, err = result.error]() {
+                if (!alive->load()) return;
                 separating_ = false;
                 bus_.publish("smode.separation.error", juce::var(err));
             });
@@ -108,42 +151,17 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
             return;
         }
 
-        // Find all stem output files in the output directory
-        juce::Logger::writeToLog("🎵 [SModeSeparation] Separation done, scanning for stem files...");
-        juce::Logger::writeToLog("📁 [SModeSeparation] Output dir: " + result.outputDir.getFullPathName());
-
-        auto foundStems = findStemOutputFiles(result.outputDir);
-
-        if (foundStems.empty())
-        {
-            // Fallback: if only drums stem was returned (single file),
-            // check if it's the drum stem file
-            if (result.drumStemFile.existsAsFile())
-            {
-                juce::Logger::writeToLog("⚠️ [SModeSeparation] Only drums stem found, checking output dir more broadly...");
-
-                // Scan output dir recursively for any audio stem files (WAV or FLAC)
-                juce::Array<juce::File> allWavs;
-                result.outputDir.findChildFiles(allWavs, juce::File::findFiles, true, "*.wav");
-                result.outputDir.findChildFiles(allWavs, juce::File::findFiles, true, "*.flac");
-
-                juce::Logger::writeToLog("🎵 [SModeSeparation] Found " + juce::String(allWavs.size()) + " audio stem files total:");
-                for (const auto& f : allWavs)
-                    juce::Logger::writeToLog("  📁 " + f.getFileName());
-
-                if (allWavs.size() > 1)
-                {
-                    // Multiple files found — use them
-                    for (const auto& f : allWavs)
-                        foundStems.push_back(f);
-                }
-            }
-        }
+        // Exact stem paths from the separator (audit C14: no filename matching).
+        juce::Logger::writeToLog("[SModeSeparation] Separation done: backend=" + result.backend
+            + " fromCache=" + juce::String((int) result.fromCache)
+            + " dir=" + result.outputDir.getFullPathName());
+        auto foundStems = orderedStemFiles(result.stems);
 
         if (foundStems.empty())
         {
-            juce::Logger::writeToLog("❌ [SModeSeparation] No stem files found in output");
-            juce::MessageManager::callAsync([this]() {
+            juce::Logger::writeToLog("[SModeSeparation] Stem files missing after separation");
+            juce::MessageManager::callAsync([this, alive]() {
+                if (!alive->load()) return;
                 separating_ = false;
                 bus_.publish("smode.separation.error", juce::var("No stems produced"));
             });
@@ -151,16 +169,17 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
             return;
         }
 
-        stemFiles_ = foundStems;
-
-        juce::Logger::writeToLog("✅ [SModeSeparation] Found "
-            + juce::String(static_cast<int>(stemFiles_.size())) + " stems:");
-        for (const auto& f : stemFiles_)
-            juce::Logger::writeToLog("  📁 " + f.getFileName());
-
-        // Publish completion
-        juce::MessageManager::callAsync([this]() {
+        // Publish completion. stemFiles_ is assigned HERE, on the message
+        // thread, never on this worker (review S-M2: it is read by the state
+        // save and the UI on the message thread).
+        juce::MessageManager::callAsync([this, alive, foundStems]() {
+            if (!alive->load()) return;
+            stemFiles_ = foundStems;
             separating_ = false;
+            progressPercent_ = 100;
+            juce::Logger::writeToLog("[SModeSeparation] complete: " + juce::String(static_cast<int>(stemFiles_.size())) + " stems");
+            for (const auto& f : stemFiles_)
+                juce::Logger::writeToLog("  [SModeSeparation]   " + f.getFullPathName());
             bus_.publish("smode.separation.progress", juce::var(100));
 
             juce::var stemPaths;
@@ -171,9 +190,9 @@ void SModeSeparationService::startSeparation(const juce::File& sourceFile)
         });
 
         fullSongSvc.shutdown();
+        juce::Logger::writeToLog("🎵 [SModeSeparation] Worker thread exiting");
     });
-
-    separationThread_->detach();
+    // NOT detached - joined in joinWorker() (next start) or shutdown().
 }
 
 void SModeSeparationService::cancelSeparation()
@@ -185,67 +204,22 @@ void SModeSeparationService::cancelSeparation()
     }
 }
 
-std::vector<juce::File> SModeSeparationService::findStemOutputFiles(const juce::File& outputDir) const
+std::vector<juce::File> SModeSeparationService::orderedStemFiles(const FullSongService::StemFiles& stems) const
 {
-    juce::Logger::writeToLog("🎵 [SModeSeparation] Scanning for stems in: " + outputDir.getFullPathName());
-
-    std::vector<juce::File> result;
-    auto stemNames = getStemNames();
-
-    // audio-separator outputs files like:
-    //   trackname_(Vocals)_modelname.wav
-    //   trackname_(Bass)_modelname.wav
-    //   trackname_(Drums)_modelname.wav
-    //   trackname_(Other)_modelname.wav
-    // Scan for files containing stem names
-
-    juce::Array<juce::File> allWavs;
-    outputDir.findChildFiles(allWavs, juce::File::findFiles, true, "*.wav");
-    outputDir.findChildFiles(allWavs, juce::File::findFiles, true, "*.flac");
-
-    juce::Logger::writeToLog("🎵 [SModeSeparation] Total audio stem files found: " + juce::String(allWavs.size()));
-
-    for (const auto& stemName : stemNames)
+    // Same order as getStemNames(): Vocals, Bass, Drums, Melody (= Demucs "other").
+    // All four must exist - a missing stem must not shift the later lanes.
+    juce::Logger::writeToLog("[SModeSeparation] orderedStemFiles: mapping exact stem paths");
+    const std::vector<juce::File> ordered { stems.vocals, stems.bass, stems.drums, stems.other };
+    for (const auto& f : ordered)
     {
-        // Demucs outputs "Other" on disk, but we display "Melody" — check both
-        juce::StringArray searchNames;
-        searchNames.add(stemName);
-        if (stemName.equalsIgnoreCase("Melody"))
-            searchNames.add("Other");
-
-        bool found = false;
-        for (const auto& searchName : searchNames)
+        if (!f.existsAsFile())
         {
-            if (found) break;
-            for (const auto& wavFile : allWavs)
-            {
-                auto fileName = wavFile.getFileNameWithoutExtension();
-                // audio-separator uses (StemName) format in filenames
-                if (fileName.containsIgnoreCase("(" + searchName + ")") ||
-                    fileName.containsIgnoreCase("_" + searchName + "_") ||
-                    fileName.endsWithIgnoreCase("_" + searchName))
-                {
-                    result.push_back(wavFile);
-                    juce::Logger::writeToLog("  ✅ " + stemName + " → " + wavFile.getFileName());
-                    found = true;
-                    break;
-                }
-            }
+            juce::Logger::writeToLog("[SModeSeparation] orderedStemFiles: missing " + f.getFullPathName() + " -> none");
+            return {};
         }
-        if (!found)
-            juce::Logger::writeToLog("  ❌ " + stemName + " — not found");
     }
-
-    // If we couldn't match by name but have the right count, use all files
-    if (result.empty() && allWavs.size() >= stemNames.size())
-    {
-        juce::Logger::writeToLog("⚠️ [SModeSeparation] Name matching failed, using all "
-            + juce::String(allWavs.size()) + " files in order");
-        for (const auto& f : allWavs)
-            result.push_back(f);
-    }
-
-    return result;
+    juce::Logger::writeToLog("[SModeSeparation] orderedStemFiles: 4 stems OK");
+    return ordered;
 }
 
 } // namespace samplar

@@ -79,7 +79,8 @@ SampleMonsta5_Portable/
 *.VC.VC.opendb
 x64/
 x86/
-Debug/
+# Root-anchored: a bare "Debug/" also matched src/ui/Debug/ and hid DebugConsole from git (fresh clones failed to build).
+/Debug/
 Release/
 RelWithDebInfo/
 MinSizeRel/
@@ -396,3 +397,37 @@ models/
 third_party/beat_this/models/*.onnx
 third_party/beat_this/models/
 **/onnxruntime*.dll
+
+# Separate project, not part of SAMPLAR
+openclaw/
+
+# Per-workstream build dirs + vendored GPU runtime (fetched by tools/fetch_onnxruntime_directml.py)
+build_dml/
+build_layout/
+third_party/onnxruntime-directml/
+!tools/separation_probe/
+!tools/fetch_onnxruntime_directml.py
+!tools/separation/
+!tools/separation/*.py
+!tools/separation_probe/**
+!tools/vst3_smoke_host/
+!tools/vst3_smoke_host/**
+
+# QA workstream: test build dir, release-gate scripts (tracked), pluginval binary + logs (ignored)
+build_qa/
+build_analysis/
+build_engine/
+!tools/run_*.ps1
+tools/pluginval/
+tools/release_linter/reports/
+tools/release_linter/last_*.json
+tools/release_linter/last_*.dot
+!cmake/extra_*.cmake
+
+# Per-agent build dirs, graphify cache/backups, leftover vendored trees
+build_*/
+graphify-out/cache/
+graphify-out/20*/
+src/graphify-out/
+third_party/demucs.cpp/
+int_backup/

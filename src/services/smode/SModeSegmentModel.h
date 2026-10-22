@@ -7,6 +7,9 @@
 #include <map>
 #include <optional>
 #include <functional>
+#include <memory>
+#include <array>
+#include "../../audio/engine/EngineSnapshot.h"
 
 namespace samplar {
 
@@ -22,6 +25,9 @@ struct SegmentEffects
     bool filterIsHighPass { false }; // false = LP, true = HP
     bool reverse { false };
     bool loop { false };
+    float attackMs { 0.0f };        // fade-in at the chop start (ms)
+    float releaseMs { 0.0f };       // fade-out at the chop end / after note-off (ms)
+    int triggerMode { 0 };          // 0 = follow global, 1 = one-shot, 2 = gate
 };
 
 /**
@@ -50,7 +56,11 @@ struct Segment
 struct StemData
 {
     juce::String name;                          // "Vocals", "Bass", etc.
-    juce::AudioBuffer<float> audioBuffer;       // The stem audio
+    juce::AudioBuffer<float> audioBuffer;       // The stem audio (refers to audioStorage when set)
+    // Shared owner of the samples. The realtime engine's snapshots hold extra
+    // references, so clearing / replacing the model never frees audio the
+    // audio thread is still playing. Use SModeSegmentModel::setStemAudio().
+    std::shared_ptr<juce::AudioBuffer<float>> audioStorage;
     std::vector<Segment> segments;
     bool linked { false };                       // Link toggle for combined triggering
     bool solo { false };
@@ -76,8 +86,16 @@ public:
 
     // ── Stem Management ──────────────────────────────────────────────
     void clear();
+    /** Shutdown only: moves the stem audio + undo history out (so the owner can
+        free them off the message thread), then clear(). */
+    std::shared_ptr<void> takeContentForRelease();
     void setStemCount(int count);
     int getStemCount() const { return static_cast<int>(stems_.size()); }
+
+    /** Bumped by clear(). Background jobs capture it at launch and drop their
+     *  result if it changed (a new song was loaded / session ejected), so a
+     *  stale analysis never lands on the wrong stems. Message thread only. */
+    uint64_t getContentGeneration() const { return contentGeneration_; }
     StemData* getStem(int index);
     const StemData* getStem(int index) const;
 
@@ -161,11 +179,26 @@ public:
      *  to each snapshot without the model knowing about UI types. */
     using ExtraStateProvider = std::function<juce::var(void)>;
     using ExtraStateRestorer = std::function<void(const juce::var&)>;
-    void setExtraStateHooks(ExtraStateProvider get, ExtraStateRestorer set)
-    {
-        extraGet_ = std::move(get);
-        extraSet_ = std::move(set);
-    }
+    /** Installs the page's hooks. If a restored project left UI extra state
+     *  pending (setPendingExtraState), it is handed to `set` right here, so
+     *  the page gets it at the start of onStemsReady(), before it builds its
+     *  stem lanes (grid division, lanes, grid lock, loop, link-all). */
+    void setExtraStateHooks(ExtraStateProvider get, ExtraStateRestorer set);
+
+    // -- Project persistence (message thread) --------------------------------
+    bool hasExtraStateHooks() const { return static_cast<bool>(extraGet_); }
+    /** The page's live extra UI state (void when no page is attached). */
+    juce::var captureExtraState() const { return extraGet_ ? extraGet_() : juce::var(); }
+    /** UI extra state from a restored project, waiting for a page to attach. */
+    void setPendingExtraState(const juce::var& v) { pendingExtra_ = v; }
+    const juce::var& getPendingExtraState() const { return pendingExtra_; }
+    bool hasPendingExtraState() const { return ! pendingExtra_.isVoid() && ! pendingExtra_.isUndefined(); }
+
+    /** Fingerprint of everything the DAW project stores for this model
+     *  (segments incl. every per-segment field, link/solo/mute/volume, tempo,
+     *  grid offset, sample rate, stem lengths). Used to detect edits so the
+     *  host project can be marked dirty (A16). */
+    uint64_t computeSessionHash() const;
 
     // ── Tempo ────────────────────────────────────────────────────────
     void setDetectedTempo(double bpm) { detectedBpm_ = bpm; }
@@ -180,6 +213,26 @@ public:
      *  via grid-drag in the StemWaveformComponent UI. */
     void setGridOffsetSeconds(double offset) { gridOffsetSeconds_ = offset; }
     double getGridOffsetSeconds() const { return gridOffsetSeconds_; }
+
+    // ── Realtime engine snapshot (message thread) ────────────────────
+    /** Moves `audio` into shared storage and makes stem->audioBuffer refer to it. */
+    void setStemAudio(int stemIndex, juce::AudioBuffer<float>&& audio);
+
+    /** Shared, immutable view of a stem's samples. If audioBuffer was written
+     *  directly (not via setStemAudio) its data is adopted without a copy. */
+    std::shared_ptr<const juce::AudioBuffer<float>> getSharedStemAudio(int stemIndex);
+
+    /** Cheap fingerprint of everything playback depends on (segments, notes,
+     *  loop flags, mute/solo/volume, buffers, sample rate). Changes whenever
+     *  a rebuild of the playback snapshot is needed. */
+    uint64_t computePlaybackHash() const;
+
+    /** Builds an immutable playback snapshot for the realtime engine.
+     *  `overrides[s]` (optional) replaces stem s with a resampled copy; segment
+     *  positions are converted to that buffer's rate. Message thread. */
+    std::shared_ptr<engine::Snapshot> buildPlaybackSnapshot(
+        const std::vector<engine::LaneDesc>& lanes,
+        const std::array<engine::StemOverride, engine::kMaxStems>* overrides = nullptr);
 
     // ── Raw access (for serialization) ───────────────────────────────
     const std::vector<StemData>& getStems() const { return stems_; }
@@ -210,6 +263,8 @@ private:
         juce::String label;             // shown in tooltips / logs
     };
 
+    uint64_t contentGeneration_ { 0 };
+
     std::vector<SegmentSnapshot> undoStack_;
     std::vector<SegmentSnapshot> redoStack_;
     static constexpr int kMaxUndoLevels { 50 };
@@ -219,6 +274,7 @@ private:
 
     ExtraStateProvider extraGet_;
     ExtraStateRestorer extraSet_;
+    juce::var pendingExtra_;   // restored project UI state not yet handed to a page
 
     SegmentSnapshot captureSnapshot(const juce::String& label = {}) const;
     void restoreSnapshot(const SegmentSnapshot& snap);

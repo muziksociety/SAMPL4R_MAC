@@ -1,36 +1,8 @@
-# SAMPLAR Release Linter — Intentional Orphans Allowlist
+# SAMPLAR Release Linter - Intentional Orphans Allowlist (check_sources.py)
 #
-# Format: one repo-relative path per line. Lines starting with # are comments.
-# Any .cpp file listed here will be silenced in the orphan report.
+# One repo-relative path per line ('#' comments). A source file listed here is
+# on disk on purpose but not compiled by any CMake file. Always say WHY.
 #
-# Add an entry ONLY if the file is intentionally on disk but not compiled
-# (e.g., experimental code, disabled features, reference implementations).
-# Always include a comment explaining WHY.
-#
-# ---------------------------------------------------------------------------
-# Mini-games (easter eggs) — dead code as of 2026-04-10
-# Status: Nothing outside src/ui/Games/ references these. MiniGameHost is
-# never instantiated by any compiled file. Kept for potential future revival
-# as processing-screen easter eggs. Triaged via release_linter check #1.
-# ---------------------------------------------------------------------------
-src/ui/Games/BlockPuzzleGame.cpp
-src/ui/Games/BreakoutGame.cpp
-src/ui/Games/DummyGame.cpp
-src/ui/Games/FlappyGame.cpp
-src/ui/Games/Game2048.cpp
-src/ui/Games/MiniGameHost.cpp
-src/ui/Games/SnakeGame.cpp
-src/ui/Games/SpaceShooterGame.cpp
-
-# ---------------------------------------------------------------------------
-# Debug dialog — dead code as of 2026-04-10
-# Status: GrayDetectionDebugDialog has static toggle() but no compiled file
-# calls it. Likely an abandoned debug tool. Keep pending decision.
-# ---------------------------------------------------------------------------
-src/ui/Debug/GrayDetectionDebugDialog.cpp
-
-# ---------------------------------------------------------------------------
-# Deprecated chat module retained for one release cycle; see src/deprecated/README.md
-# ---------------------------------------------------------------------------
-src/deprecated/ChatPage.cpp
-src/deprecated/ChatService.cpp
+# Pruned 2026-10-21: the SM5 mini-games, GrayDetectionDebugDialog and the
+# deprecated chat module were deleted from the tree (dead-code removal).
+# (no entries)

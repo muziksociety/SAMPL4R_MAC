@@ -1,26 +1,9 @@
-# SAMPLAR Release Linter — Intentional Unshipped Resources Allowlist
+# SAMPLAR Release Linter - Binaries the code names but the installer does not ship
+# (check_installer.py). One lowercase file name per line, with a reason.
 #
-# Format: one token per line. Matched against directory names OR binary
-# basenames. Lines starting with # are comments.
+# Pruned 2026-10-21: the SM5 Python / audio-separator / TorchScript entries are gone.
 #
-# Add an entry ONLY if a resource is referenced in code but intentionally
-# not in installer_sm5.iss (because it's shipped via a wildcard, comes from
-# the OS, or is an optional/experimental feature). Always explain WHY.
-#
-# ---------------------------------------------------------------------------
-# Shipped via installer wildcards — the linter can't see inside wildcards.
-# Triaged 2026-04-10 via release_linter check #3.
-# ---------------------------------------------------------------------------
-# python\* and python\Scripts\* wildcards
-python.exe
-python3.dll
-python311.dll
-# audio-separator (UVR backend) is installed via pip into python/Scripts/
-# and ships with the portable Python environment via the wildcard.
-audio-separator.exe
-# models\* wildcard (LARS TorchScript drum separation models)
-my_scripted_module_kick.pt
-my_scripted_module_snare.pt
-my_scripted_module_hihat.pt
-my_scripted_module_cymbals.pt
-my_scripted_module_toms.pt
+# Legacy full separation model: FullSongService still accepts it as a fallback for
+# dev trees without models/htdemucs_body.onnx; the bundle ships only the body model
+# and the installer deletes an old htdemucs.onnx on upgrade.
+htdemucs.onnx

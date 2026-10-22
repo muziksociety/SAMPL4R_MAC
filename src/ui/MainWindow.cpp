@@ -2,30 +2,21 @@
 #include "../app/App.h"
 #include "../app/ServiceLocator.h"
 #include "../app/ServiceRegistry.h"
-#include "../services/ProcessingCoordinatorService.h"
-#include "../services/FullSongService.h"
-#include "../services/FullSongSeparationService.h"
-// SAMPLAR: removed - WaveEditorView deleted
-// SAMPLAR: removed - InitialPage deleted (SModePage is now main content)
-#include "Pages/ProcessingPage.h"
-// SAMPLAR: removed - WavePreviewPage, EngineLabPage, CommunityPage deleted
-// SAMPLAR: removed - MentorPage and MentorService deleted
 #include "Pages/SModePage.h"
-#include "Components/smode/StemCountDialog.h"
 #include "../services/smode/SModeService.h"
+#include "../services/smode/SModeSession.h"
+#include <type_traits>
 #include "../services/MidiMappingService.h"
+#include "../services/FullSongService.h"
 #include "licensing/LicenseStatusWidget.h"
 #include "Debug/DebugConsole.h"
 #include "../app/MultiLogger.h"
 #include "../utils/LogPaths.h"
-#include "Style/Sm5LookAndFeel.h"
 #include "Style/SamplarLookAndFeel.h"
-#include "Debug/DebugFlags.h"
 #include "Components/SettingsDialog.h"
 #include "Components/NotificationButton.h"
 #include "Components/UpdateDialog.h"
 #include "../services/UpdateCheckService.h"
-#include <thread>
 
 
 using namespace juce;
@@ -42,7 +33,7 @@ public:
         setMouseCursor(juce::MouseCursor::PointingHandCursor);
     }
     void clicked() override {
-        // Find MainWindow and call its closeButtonPressed (which handles batch processing check)
+        // Find MainWindow and call its closeButtonPressed
         if (auto* mainWindow = findParentComponentOfClass<juce::DocumentWindow>())
         {
             mainWindow->closeButtonPressed();
@@ -154,13 +145,6 @@ private:
     juce::ComponentDragger dragger_;
 };
 
-// NudgeTimer kept as stub (no longer used for mentor nudge, reserved for future use)
-class NudgeTimer : public juce::Timer {
-public:
-    std::function<void()> onTick;
-    void timerCallback() override { if (onTick) onTick(); }
-};
-
 class RootComponent : public Component, public DragAndDropContainer, public FileDragAndDropTarget, private Timer {
 public:
     RootComponent()
@@ -189,184 +173,12 @@ public:
             juce::Logger::writeToLog("???? [RootComponent] Setting up SModePage as main content");
             addAndMakeVisible(smodePage_);
 
-            // ProcessingPage: kept as hidden child (shown as overlay during separation)
-            addChildComponent(processing_);
-            juce::Logger::writeToLog("???? [RootComponent] ProcessingPage added as hidden overlay");
-
-            // SAMPLAR: InitialPage, CommunityPage, MentorPage removed entirely
-            juce::Logger::writeToLog("[RootComponent] Nav placeholder only (InitialPage/CommunityPage/MentorPage removed)");
-
-            // Subscribe to ui.navigate so MentorHelperButton (and others) can route to mentor page
-            if (auto* bus = samplar::ServiceLocator::getBus())
-            {
-                // SAMPLAR: ui.navigate mentor/back routing removed (no page stack)
-                juce::Logger::writeToLog("[RootComponent] EventBus: ui.navigate mentor routing removed");
-
-                // -- FullSong separation: live progress / completion / error --
-                // The service lives on the AudioProcessor's ServiceRegistry, so
-                // closing the VST3 wrapper window mid-separation does NOT lose
-                // the work. Reopening reconstructs MainWindow, re-subscribes,
-                // and (further down) resumes the UI by querying service state.
-                fullSongProgSub_ = bus->subscribe("fullSong.separation.progress",
-                    [this, alive = alive_](const juce::var& v) {
-                        if (!*alive) return;
-                        const int pct = (int) v;
-                        juce::MessageManager::callAsync([this, alive, pct]() {
-                            if (!*alive) return;
-                            processing_.setProgress(static_cast<double>(pct));
-                        });
-                    });
-                fullSongMsgSub_ = bus->subscribe("fullSong.separation.message",
-                    [this, alive = alive_](const juce::var& v) {
-                        if (!*alive) return;
-                        const juce::String msg = v.toString();
-                        juce::MessageManager::callAsync([this, alive, msg]() {
-                            if (!*alive) return;
-                            processing_.setStatusMessage(msg);
-                            // Refresh batch indicator while running
-                            if (fullSongSepService_ && fullSongSepService_->isBatch()) {
-                                const int idx   = fullSongSepService_->getBatchFileIndex();
-                                const int count = fullSongSepService_->getBatchFileCount();
-                                processing_.setBatchInfo(idx + 1, count);
-                            }
-                        });
-                    });
-                fullSongCompleteSub_ = bus->subscribe("fullSong.separation.complete",
-                    [this, alive = alive_](const juce::var& v) {
-                        if (!*alive) return;
-                        const juce::String stemPath = v.toString();
-                        juce::Logger::writeToLog("[MainWindow] FullSong separation COMPLETE: " + stemPath);
-                        juce::MessageManager::callAsync([this, alive, stemPath]() {
-                            if (!*alive) return;
-
-                            // Drain the result from the service
-                            samplar::FullSongSeparationService* svc = nullptr;
-                            if (auto* reg = samplar::ServiceLocator::getRegistry())
-                                svc = dynamic_cast<samplar::FullSongSeparationService*>(reg->get("fullSong.separation"));
-                            if (svc) (void) svc->consumeResult();
-
-                            separationInProgress_ = false;
-                            separationAlreadyDone_ = true;
-                            // Hide ProcessingPage overlay - SModePage is always the background
-                            processing_.setVisible(false);
-                        });
-                    });
-                fullSongBatchCompleteSub_ = bus->subscribe("fullSong.separation.batch.complete",
-                    [this, alive = alive_](const juce::var& v) {
-                        if (!*alive) return;
-                        std::vector<juce::File> stems;
-                        if (v.isArray())
-                            for (int i = 0; i < v.size(); ++i)
-                                stems.emplace_back(v[i].toString());
-                        juce::Logger::writeToLog("[MainWindow] FullSong BATCH COMPLETE: " + juce::String(static_cast<int>(stems.size())) + " stems");
-                        juce::MessageManager::callAsync([this, alive, stems]() {
-                            if (!*alive) return;
-                            samplar::FullSongSeparationService* svc = nullptr;
-                            if (auto* reg = samplar::ServiceLocator::getRegistry())
-                                svc = dynamic_cast<samplar::FullSongSeparationService*>(reg->get("fullSong.separation"));
-                            if (svc) (void) svc->consumeBatchResult();
-
-                            separationInProgress_     = false;
-                            batchSeparationActive_    = false;
-                            separationAlreadyDone_    = true;
-                            batchDrumStemFiles_       = stems;
-                            if (stems.empty())
-                            {
-                                juce::AlertWindow::showMessageBoxAsync(
-                                    juce::AlertWindow::WarningIcon,
-                                    "Batch Separation Failed",
-                                    "Could not extract drums from any of the songs.",
-                                    "OK");
-                                processing_.setVisible(false);
-                                return;
-                            }
-                            // SAMPLAR: preview_ removed - WavePreviewPage deleted
-                            processing_.setVisible(false); // hide overlay, SModePage is always visible
-                        });
-                    });
-                fullSongErrorSub_ = bus->subscribe("fullSong.separation.error",
-                    [this, alive = alive_](const juce::var& v) {
-                        if (!*alive) return;
-                        const juce::String err = v.toString();
-                        juce::Logger::writeToLog("[MainWindow] FullSong separation FAILED: " + err);
-                        juce::MessageManager::callAsync([this, alive, err]() {
-                            if (!*alive) return;
-                            separationInProgress_ = false;
-                            processing_.setVisible(false);
-                            juce::AlertWindow::showMessageBoxAsync(
-                                juce::AlertWindow::WarningIcon,
-                                "Separation Failed",
-                                "Could not extract drums from the song:\n" + err,
-                                "OK");
-                        });
-                    });
-            }
-
-            // -- FullSong separation: RESUME on editor reopen --
-            // If a separation is in flight (or finished while editor was closed),
-            // wire the UI to it directly so the producer sees live progress
-            // (or lands on WavePreviewPage with the drum stem already loaded).
-            if (auto* reg = samplar::ServiceLocator::getRegistry())
-            {
-                auto* svc = dynamic_cast<samplar::FullSongSeparationService*>(reg->get("fullSong.separation"));
-                if (svc)
-                {
-                    fullSongSepService_ = svc;
-                    if (svc->isSeparating())
-                    {
-                        const bool batch = svc->isBatch();
-                        juce::Logger::writeToLog(juce::String("[MainWindow] RESUME: FullSong separation in progress")
-                            + (batch ? " (batch)" : " (single)"));
-                        processing_.resetForNewJob();
-                        processing_.setInputFile(svc->getCurrentSourceFile());
-                        processing_.setProcessMode(2); // FullSong
-                        if (batch)
-                        {
-                            const int idx   = svc->getBatchFileIndex();
-                            const int count = svc->getBatchFileCount();
-                            processing_.setBatchInfo(idx + 1, count);
-                            batchSeparationActive_ = true;
-                            batchFilesToSeparate_   = svc->getCurrentBatchSources();
-                        }
-                        processing_.setProgress(static_cast<double>(svc->getCurrentProgress()));
-                        processing_.setStatusMessage(svc->getCurrentMessage());
-                        separationInProgress_ = true;
-                        juce::MessageManager::callAsync([this, alive = alive_]() {
-                            if (!*alive) return;
-                            // Show ProcessingPage as overlay during resumed separation
-                            processing_.setVisible(true);
-                            processing_.toFront(false);
-                        });
-                    }
-                    else if (svc->hasUnconsumedBatchResult())
-                    {
-                        juce::Logger::writeToLog("[MainWindow] RESUME: FullSong BATCH completed while editor closed - loading stems");
-                        auto stems = svc->consumeBatchResult();
-                        if (! stems.empty())
-                        {
-                            separationAlreadyDone_  = true;
-                            batchDrumStemFiles_     = stems;
-                            // Nothing to navigate - SModePage is always visible
-                        }
-                    }
-                    else if (svc->hasUnconsumedResult())
-                    {
-                        juce::Logger::writeToLog("[MainWindow] RESUME: FullSong separation completed while editor closed - loading drum stem");
-                        auto res = svc->consumeResult();
-                        if (res.isValid())
-                        {
-                            separationAlreadyDone_ = true;
-                            // Nothing to navigate - SModePage is always visible
-                        }
-                    }
-                }
-            }
 
             // SAMPLAR: SModePage is now the permanent main content (added in constructor above).
             // onBack callback kept for MIDI cleanup but no longer switches pages.
             smodePage_.onBack = [this]{
                 // Fully reset S-Mode: disconnect MIDI, clear model, reset service
-                if (auto* reg = samplar::ServiceLocator::getRegistry()) {
+                if (auto* reg = ctx_.getRegistry()) {
                     auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
                     if (midiSvc) {
                         midiSvc->stopAllVoices();
@@ -385,7 +197,7 @@ public:
 
             // Restore S-Mode if SModeService is already active AND has loaded audio (editor close/reopen)
             bool smodeRestored = false;
-            if (auto* reg = samplar::ServiceLocator::getRegistry())
+            if (auto* reg = ctx_.getRegistry())
             {
                 auto* smodeSvc = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
                 if (smodeSvc && smodeSvc->isActive() && smodeSvc->getModel().getStemCount() > 0)
@@ -401,9 +213,10 @@ public:
 
                     if (hasAudio)
                     {
-                        juce::Logger::writeToLog("[RootComponent] S-Mode already active with audio - restoring UI");
+                        // B11: shown ONCE, by the deferred reconnect below (a second
+                        // onStemsReady rebuilt every lane and wiped the undo history).
+                        juce::Logger::writeToLog("[RootComponent] S-Mode already active with audio - UI reconnect deferred");
                         smodeService_ = smodeSvc;
-                        smodePage_.onStemsReady(*smodeService_);
                         smodeRestored = true;
                     }
                 }
@@ -412,10 +225,10 @@ public:
             // SModePage is always visible — no page switch needed regardless of smodeRestored
             juce::Logger::writeToLog("[RootComponent] SModePage is permanent main content (smodeRestored=" + juce::String(smodeRestored ? "true" : "false") + ")");
 
-            if (auto* registry = samplar::ServiceLocator::getRegistry())
+            if (auto* registry = ctx_.getRegistry())
             {
                 auto* licenseSvc = dynamic_cast<LicenseSystemService*>(registry->get("license"));
-                licenseStatusWidget_ = std::make_unique<LicenseStatusWidget>(licenseSvc, samplar::ServiceLocator::getBus());
+                licenseStatusWidget_ = std::make_unique<LicenseStatusWidget>(licenseSvc, ctx_.getBus());
                 if (licenseStatusWidget_ != nullptr)
                 {
                     addAndMakeVisible(licenseStatusWidget_.get());
@@ -425,13 +238,15 @@ public:
             juce::Logger::writeToLog("[RootComponent] Constructor: SModePage visible, ready");
 
             juce::Logger::writeToLog("???? [RootComponent] Adding window control buttons");
-            bool isPlugin = (samplar::ServiceLocator::getUIState() != nullptr);
+            bool isPlugin = (ctx_.getUIState() != nullptr);
+            isPlugin_ = isPlugin;
             if (!isPlugin)
             {
                 addAndMakeVisible(exitBtn_);
                 addAndMakeVisible(pinBtn_);
                 addAndMakeVisible(dragBtn_);
             }
+            settingsBtn_.setContext(ctx_);   // the dialog uses THIS instance's services (A2)
             addAndMakeVisible(settingsBtn_);
 
             addAndMakeVisible(notifBtn_); // always visible for version info
@@ -443,157 +258,79 @@ public:
             };
 
             // Subscribe to update events from UpdateCheckService
-            if (auto* bus = samplar::ServiceLocator::getBus()) {
-                bus->subscribe("update.available", [this](const juce::var& payload) {
+            // B5: keep the handler ids and unsubscribe in the destructor - the
+            // bus is processor-lifetime and these events can fire (update check
+            // runs ~5 s after load) after the editor has been closed.
+            if (auto* bus = ctx_.getBus()) {
+                updateAvailableSub_ = bus->subscribe("update.available", [this, alive = alive_](const juce::var& payload) {
+                    if (!*alive) return;
                     juce::Logger::writeToLog("[RootComponent] Received update.available event");
                     handleUpdateAvailable(payload);
                 });
-                bus->subscribe("license.status.reminder", [this](const juce::var& payload) {
+                licenseReminderSub_ = bus->subscribe("license.status.reminder", [this, alive = alive_](const juce::var& payload) {
+                    if (!*alive) return;
                     juce::Logger::writeToLog("[RootComponent] Received license.status.reminder event");
                     handleLicenseReminder(payload);
                 });
             }
 
-            juce::Logger::writeToLog("???? [RootComponent] Setting up debug console and MultiLogger");
+            juce::Logger::writeToLog("???? [RootComponent] Setting up debug console");
             addChildComponent(debugConsole_);
             debugConsole_.setVisible(debugVisible_);
-            {
-                juce::File logsDir = samplar::getLogsDirectory();
-                juce::File logFile = logsDir.getChildFile("SAMPLAR_console.log");
-                // Use a mirrored logger that writes to file and UI console (MultiLogger ensures directory exists)
-                // Log dir is %APPDATA%\Samplar\logs for Program Files, or <exe>/logs for portable
-                multiLogger_ = std::make_unique<samplar::MultiLogger>(debugConsole_, logFile);
-                juce::Logger::setCurrentLogger(multiLogger_.get());
-                juce::Logger::writeToLog("[MainWindow] MultiLogger set. Log file: " + logFile.getFullPathName());
-                // SAMPLAR: browser_ removed - SampleBrowserPage deleted
-                // browser_.logMLStatus();
-            }
+            // A21: the editor no longer replaces the process-global logger. The
+            // processor (plugin) / App (standalone) FileLogger owns logging for
+            // the whole lifetime, so teardown after the first editor close is
+            // logged and two instances can't swap loggers under each other.
 
             juce::Logger::writeToLog("[RootComponent] Setting up SModePage separation callbacks");
 
             // === SMODE SEPARATION FLOW (triggered from SModePage via drag-drop or menu) ===
             // SModePage calls onRequestSeparation when the user drops a song file.
-            // Shows StemCountDialog, then runs SModeService workflow with ProcessingPage
-            // shown as an overlay while separation runs.
+            // Runs the SModeService workflow (htdemucs: always 4 stems); progress is
+            // shown as per-lane loading bars on SModePage.
             smodePage_.onRequestSeparation = [this, alive = alive_](const juce::File& f) {
                 if (!*alive) return;
                 juce::Logger::writeToLog("[MainWindow] SModePage requested separation for: " + f.getFullPathName());
 
-                // Guard: if separation is already running, show a toast and bail out.
-                if (smodeService_ && smodeService_->getSeparation().isSeparating())
-                {
-                    juce::Logger::writeToLog("[MainWindow] Ignoring Load Audio — separation already in progress");
-                    juce::AlertWindow::showAsync(
-                        juce::MessageBoxOptions()
-                            .withIconType(juce::MessageBoxIconType::InfoIcon)
-                            .withTitle("Separation in progress")
-                            .withMessage("A stem separation is already running.\nPlease wait for it to finish before loading a new file.")
-                            .withButton("OK"),
-                        nullptr);
-                    return;
-                }
-                // Also check via ServiceLocator in case smodeService_ hasn't been cached yet
+                if (!smodeService_)
+                    smodeService_ = smodeSvc();
                 if (!smodeService_) {
-                    auto* reg = samplar::ServiceLocator::getRegistry();
-                    if (reg) smodeService_ = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
-                }
-                if (smodeService_ && smodeService_->getSeparation().isSeparating())
-                {
-                    juce::Logger::writeToLog("[MainWindow] Ignoring Load Audio — separation already in progress (late check)");
-                    juce::AlertWindow::showAsync(
-                        juce::MessageBoxOptions()
-                            .withIconType(juce::MessageBoxIconType::InfoIcon)
-                            .withTitle("Separation in progress")
-                            .withMessage("A stem separation is already running.\nPlease wait for it to finish before loading a new file.")
-                            .withButton("OK"),
-                        nullptr);
+                    juce::Logger::writeToLog("[MainWindow] ERROR: SModeService not registered");
                     return;
                 }
 
-                samplar::StemCountDialog::show(this, [this, alive, f](int stemCount) {
-                    if (!*alive) return;
-                    juce::Logger::writeToLog("[MainWindow] S-Mode stem count selected: " + juce::String(stemCount));
+                // A song is still separating: cancel it and load the new one as
+                // soon as the "Cancelled" error arrives (C2 - the ONNX run now
+                // aborts mid-chunk, so this takes well under a second).
+                if (smodeService_->getSeparation().isSeparating())
+                {
+                    juce::Logger::writeToLog("[MainWindow] New song while separating - cancelling current, queued: "
+                                             + f.getFileName());
+                    pendingSeparationFile_ = f;
+                    smodeService_->getSeparation().cancelSeparation();
+                    return;
+                }
 
-                    if (!smodeService_) {
-                        auto* reg = samplar::ServiceLocator::getRegistry();
-                        if (reg)
-                            smodeService_ = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
-                    }
-                    if (!smodeService_) {
-                        juce::Logger::writeToLog("[MainWindow] ERROR: SModeService not registered");
-                        return;
-                    }
+                const int stemCount = 4;   // htdemucs.onnx is 4-stem only
+                juce::Logger::writeToLog("[MainWindow] S-Mode separation starting, stems: " + juce::String(stemCount));
 
-                    if (auto* bus = samplar::ServiceLocator::getBus()) {
-                        smodeWorkflowReadySub_ = bus->subscribe("smode.workflow.ready", [this, alive](const juce::var&) {
-                            if (!*alive) return;
-                            juce::Logger::writeToLog("[MainWindow] S-Mode workflow ready - loading bars off, stems loading");
-                            smodePage_.setStemLoadingState(false);
-                            smodePage_.onStemsReady(*smodeService_);
-                            processing_.setVisible(false);
-                            smodePage_.resized();
-                            smodePage_.repaint();
-                            juce::MessageManager::callAsync([this]() {
-                                smodePage_.resized();
-                                smodePage_.repaint();
-                            });
-                            if (auto* b = samplar::ServiceLocator::getBus())
-                                b->unsubscribe("smode.workflow.ready", smodeWorkflowReadySub_);
-                        });
+                // Progress / ready / error arrive through the permanent
+                // subscriptions made in the constructor (subscribeSModeEvents).
+                smodePage_.setStemLoadingProgress(0.0f);       // reset bars to 0% before starting
+                smodePage_.beginSeparationVisuals(stemCount);  // pre-create N placeholder lanes
+                smodePage_.setStemLoadingState(true);
 
-                        smodeWorkflowErrorSub_ = bus->subscribe("smode.workflow.error", [this, alive](const juce::var& err) {
-                            if (!*alive) return;
-                            juce::Logger::writeToLog("[MainWindow] S-Mode error: " + err.toString());
-                            smodePage_.setStemLoadingState(false);
-                            processing_.setVisible(false);
-                            juce::AlertWindow::showMessageBoxAsync(
-                                juce::AlertWindow::WarningIcon,
-                                "S-Mode Failed",
-                                "Could not separate stems:\n" + err.toString(), "OK");
-                            if (auto* b = samplar::ServiceLocator::getBus())
-                                b->unsubscribe("smode.workflow.error", smodeWorkflowErrorSub_);
-                        });
-
-                        bus->subscribe("smode.separation.progress", [this, alive](const juce::var& pct) {
-                            if (!*alive) return;
-                            const int pctInt = static_cast<int>(pct);
-                            processing_.setProgress(static_cast<double>(pctInt));
-                            // Forward real progress to per-lane loading bars (0..100 → 0.0..1.0)
-                            const float p01 = juce::jlimit(0.0f, 1.0f, static_cast<float>(pctInt) / 100.0f);
-                            juce::Logger::writeToLog("[MainWindow] smode.separation.progress → " + juce::String(pctInt) + "% → setStemLoadingProgress");
-                            smodePage_.setStemLoadingProgress(p01);
-                        });
-                    }
-
-                    // FIX3: Show per-lane loading bars instead of the full-screen ProcessingPage overlay.
-                    // ProcessingPage is suppressed (not shown) so SModePage stays fully visible.
-                    processing_.resetForNewJob();
-                    processing_.setInputFile(f);
-                    processing_.setProcessMode(2);
-                    // processing_.setVisible(true);  // suppressed — per-lane loading bars handle UX
-                    smodePage_.setStemLoadingProgress(0.0f);  // reset bars to 0% before starting
-                    smodePage_.beginSeparationVisuals(stemCount);  // pre-create N placeholder lanes
-                    smodePage_.setStemLoadingState(true);
-
-                    auto sc = (stemCount == 6)
-                        ? samplar::SModeSeparationService::StemCount::Six
-                        : samplar::SModeSeparationService::StemCount::Four;
-                    smodeService_->startWorkflow(f, sc);
-                });
+                smodeService_->startWorkflow(f, samplar::SModeSeparationService::StemCount::Four);
             };
 
-            // ProcessingPage back button: just hide overlay (SModePage always in background)
-            processing_.onBack = [this]{ processing_.setVisible(false); };
-
-                // Defer GIF preload so the editor window appears instantly.
-        // Decoding 6-12 MB of GIF on the message thread blocks the open animation.
-        // callAfterDelay runs on the message thread 300ms later � editor is visible by then.
-        juce::Timer::callAfterDelay(300, [this, alive = alive_]() {
-            if (!*alive) return;
-            juce::Logger::writeToLog("[RootComponent] Deferred: preloading ProcessingPage GIF...");
-            processing_.preloadResources();
-            juce::Logger::writeToLog("[RootComponent] Deferred: ProcessingPage GIF preloaded");
-        });
+            // Permanent S-Mode subscriptions + replay of an in-flight
+            // separation / restore when the editor is (re)opened (B10).
+            subscribeSModeEvents();
+            juce::MessageManager::callAsync([this, alive = alive_]()
+            {
+                if (!*alive) return;
+                replaySModeProgress();
+            });
 
         // -- Reconnect S-Mode UI if processor already has an active session --
         // This handles editor close/reopen (minimize, DAW hide/show) where the
@@ -605,15 +342,21 @@ public:
         juce::Timer::callAfterDelay(100, [this, alive = alive_]()
         {
             if (!*alive) return;
-            auto* reg = samplar::ServiceLocator::getRegistry();
+            auto* reg = ctx_.getRegistry();
             if (!reg) return;
             auto* smodeSvc = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
             if (smodeSvc && smodeSvc->isActive() && smodeSvc->getModel().getStemCount() > 0)
             {
+                if (shownGeneration_ == smodeSvc->getModel().getContentGeneration())
+                {
+                    juce::Logger::writeToLog("[RootComponent] Reconnect skipped: the page already shows this session");
+                    return;
+                }
                 juce::Logger::writeToLog("[RootComponent] Reconnecting S-Mode UI to existing session ("
                                          + juce::String(smodeSvc->getModel().getStemCount()) + " stems)");
                 smodeService_ = smodeSvc;
                 smodePage_.onStemsReady(*smodeSvc);
+                afterStemsReady();
                 switchTo(9);  // Navigate to S-Mode page so user sees their session
             }
         });
@@ -635,7 +378,7 @@ public:
         juce::Logger::writeToLog("[RootComponent] Destructor - saving UI state and unsubscribing bus handlers");
 
         // Save UI state so the next editor can restore it (VST3: editor is destroyed on close)
-        if (auto* uiState = samplar::ServiceLocator::getUIState())
+        if (auto* uiState = ctx_.getUIState())
         {
             uiState->currentPage = currentPage_;
             uiState->previousPage = previousPage_;
@@ -653,27 +396,16 @@ public:
         LookAndFeel::setDefaultLookAndFeel(nullptr);
         *alive_ = false;
         stopTimer();
-        if (auto* bus = samplar::ServiceLocator::getBus())
+        unsubscribeSModeEvents();
+        if (auto* bus = ctx_.getBus())
         {
-            if (mentorNavSub_ != 0) bus->unsubscribe("ui.navigate",         mentorNavSub_);
-            if (waveEditorId_ != 0) bus->unsubscribe("wave_editor.open",   waveEditorId_);
-            if (vizId_        != 0) bus->unsubscribe("processing.viz",      vizId_);
-            if (progId_       != 0) bus->unsubscribe("processing.progress", progId_);
-            if (resId_        != 0) bus->unsubscribe("processing.result",   resId_);
-            // FullSong separation subs (do NOT cancel the in-flight separation �
-            // it lives on the processor's service and continues across editor close).
-            if (fullSongProgSub_     != 0) bus->unsubscribe("fullSong.separation.progress", fullSongProgSub_);
-            if (fullSongMsgSub_      != 0) bus->unsubscribe("fullSong.separation.message",  fullSongMsgSub_);
-            if (fullSongCompleteSub_ != 0) bus->unsubscribe("fullSong.separation.complete", fullSongCompleteSub_);
-            if (fullSongErrorSub_    != 0) bus->unsubscribe("fullSong.separation.error",    fullSongErrorSub_);
-            if (fullSongBatchCompleteSub_ != 0) bus->unsubscribe("fullSong.separation.batch.complete", fullSongBatchCompleteSub_);
+            // Update / licence / S-Mode workflow / state-restore handlers (B5)
+            if (updateAvailableSub_    != 0) bus->unsubscribe("update.available",        updateAvailableSub_);
+            if (licenseReminderSub_    != 0) bus->unsubscribe("license.status.reminder", licenseReminderSub_);
+            if (stateRestoredSub_      != 0) bus->unsubscribe("state.restored",          stateRestoredSub_);
+            juce::Logger::writeToLog("[RootComponent] bus handlers unsubscribed");
         }
         juce::Logger::writeToLog("[RootComponent] Destructor complete");
-        // CRITICAL: Must clear before multiLogger_ member is auto-destroyed.
-        // multiLogger_ unique_ptr destructs after this body (reverse member order),
-        // but juce::Logger still holds the raw pointer. Any log call during member
-        // destruction (component children, timers, etc.) hits freed memory ? crash.
-        juce::Logger::setCurrentLogger(nullptr);
     }
 
     void resized() override
@@ -717,29 +449,33 @@ public:
             }
         }
 
-        // SModePage fills the main area directly (no pages_ container needed, kept for debug nav)
+        // SModePage fills the main area directly (no pages_ container needed, kept for debug nav).
+        // Window buttons sit in a "system zone" the page reserves at the right end of
+        // its top bar (B15: they used to float over the DAW toggle).
+        static constexpr int kWinBtn = 20, kWinGap = 4;
+        const int nBtns = isPlugin_ ? 2 : 5;   // settings + notification (+ pin, drag, exit)
+        smodePage_.setSystemZoneWidth(nBtns * kWinBtn + (nBtns - 1) * kWinGap);   // BEFORE setBounds
         smodePage_.setBounds(main.reduced(4));
-        // ProcessingPage overlay: same bounds as smodePage_ (shown on top during separation)
-        processing_.setBounds(smodePage_.getBounds());
-        // Window control buttons centered at top
-        // Order (centered): Pin - Settings - Drag - Exit | (right corner): [Notification]
-        auto top = smodePage_.getBounds().removeFromTop(28);
-        const int btnSize = 20;
-        const int btnGap = 6;
-        const int centerBtns = 4; // pin, settings, drag, exit
-        const int totalWidth = (btnSize * centerBtns) + (btnGap * (centerBtns - 1));
-        int startX = top.getCentreX() - totalWidth / 2;
-        int btnY = top.getCentreY() - btnSize / 2;
-        int idx = 0;
-        pinBtn_.setBounds(startX + (btnSize + btnGap) * idx, btnY, btnSize, btnSize); idx++;
-        settingsBtn_.setBounds(startX + (btnSize + btnGap) * idx, btnY, btnSize, btnSize); idx++;
-        dragBtn_.setBounds(startX + (btnSize + btnGap) * idx, btnY, btnSize, btnSize); idx++;
-        exitBtn_.setBounds(startX + (btnSize + btnGap) * idx, btnY, btnSize, btnSize);
-        // Notification button pinned to top-right corner
-        notifBtn_.setBounds(top.getRight() - btnSize - 8, btnY, btnSize, btnSize);
-        // SAMPLAR: initial_, community_, mentor_ removed - SModePage is the permanent content
-        // processing_ bounds already set above as overlay
-        juce::Logger::writeToLog("[RootComponent] resized: SModePage=" + smodePage_.getBounds().toString());
+        auto zone = smodePage_.getSystemZoneBounds().translated(smodePage_.getX(), smodePage_.getY());
+        auto placeRight = [&zone](juce::Component& c)
+        {
+            c.setBounds(zone.removeFromRight(kWinBtn).withSizeKeepingCentre(kWinBtn, kWinBtn));
+            zone.removeFromRight(kWinGap);
+        };
+        // Left-to-right result: pin, settings, drag, exit, notification
+        placeRight(notifBtn_);
+        if (! isPlugin_) { placeRight(exitBtn_); placeRight(dragBtn_); }
+        placeRight(settingsBtn_);
+        if (! isPlugin_) placeRight(pinBtn_);
+        if (updateDialog_ != nullptr)
+            updateDialog_->setCentrePosition(getWidth() / 2, getHeight() / 2);
+        const auto log = "[RootComponent] resized: SModePage=" + smodePage_.getBounds().toString()
+                       + " sysZone=" + smodePage_.getSystemZoneBounds().toString();
+        if (log != lastResizeLog_)
+        {
+            lastResizeLog_ = log;
+            juce::Logger::writeToLog(log);
+        }
         debugConsole_.setBounds(r);
     }
 
@@ -751,7 +487,6 @@ public:
                 f1Count_ = 0;
                 stopTimer();
                 debugVisible_ = !debugVisible_;
-                samplar::DebugFlags::enabled().store(debugVisible_);
                 nav_.setVisible(debugVisible_);
                 debugConsole_.setVisible(debugVisible_);
                 resized();
@@ -761,265 +496,212 @@ public:
         return Component::keyPressed(key);
     }
 
-public:
-    // Check if batch processing is active (prevents premature app closure)
-    bool isBatchProcessingActive() const
+    // -- S-Mode wiring (persistence workstream) --------------------------------
+    // Everything resolves through ctx_ (this editor's own processor), never the
+    // process-global claim, so two instances never cross-wire (review A2).
+    samplar::SModeService* smodeSvc() const
     {
-        return batchSeparationActive_.load() || batchFinalProcessingActive_.load();
+        auto* reg = ctx_.getRegistry();
+        return reg != nullptr ? dynamic_cast<samplar::SModeService*>(reg->get("smode")) : nullptr;
     }
 
+    void subscribeSModeEvents()
+    {
+        auto* bus = ctx_.getBus();
+        if (bus == nullptr)
+        {
+            juce::Logger::writeToLog("[RootComponent] subscribeSModeEvents: no bus");
+            return;
+        }
+        smodeSubsBus_ = bus;
+
+        smodeWorkflowReadySub_ = bus->subscribe("smode.workflow.ready", [this, alive = alive_](const juce::var& n) {
+            if (!*alive) return;
+            auto* svc = smodeSvc();
+            if (svc == nullptr) return;
+            juce::Logger::writeToLog("[RootComponent] smode.workflow.ready (" + n.toString() + " stems) -> page onStemsReady");
+            smodeService_ = svc;
+            smodePage_.setStemLoadingState(false);
+            smodePage_.onStemsReady(*svc);
+            afterStemsReady();
+            smodePage_.resized();
+            smodePage_.repaint();
+            juce::MessageManager::callAsync([this, alive]() {
+                if (!*alive) return;
+                smodePage_.resized();
+                smodePage_.repaint();
+            });
+        });
+
+        smodeWorkflowErrorSub_ = bus->subscribe("smode.workflow.error", [this, alive = alive_](const juce::var& err) {
+            if (!*alive) return;
+            juce::Logger::writeToLog("[MainWindow] S-Mode error: " + err.toString());
+            smodePage_.setStemLoadingState(false);
+            if (err.toString() == "Cancelled")
+            {
+                // User replaced the song mid-separation: start the queued one.
+                const auto next = pendingSeparationFile_;
+                pendingSeparationFile_ = juce::File();
+                if (next.existsAsFile() && smodePage_.onRequestSeparation)
+                {
+                    juce::Logger::writeToLog("[MainWindow] starting queued song: " + next.getFileName());
+                    smodePage_.onRequestSeparation(next);
+                }
+                return;
+            }
+            // Only an error that REPORTS a missing runtime / model (N-21): a cached
+            // song still loads without the runtime, and other errors while it is
+            // missing keep their own message.
+            if (samplar::FullSongService::isReinstallError(err.toString()))
+            {
+                // ONNX Runtime / model missing: in-page notice, not a modal alert.
+                smodePage_.showSeparationUnavailableNotice();
+                return;
+            }
+            juce::AlertWindow::showMessageBoxAsync(
+                juce::AlertWindow::WarningIcon,
+                "S-Mode Failed",
+                "Could not separate stems:\n" + err.toString(), "OK");
+        });
+
+        smodeProgressSub_ = bus->subscribe("smode.separation.progress", [this, alive = alive_](const juce::var& pct) {
+            if (!*alive) return;
+            const int pctInt = static_cast<int>(pct);
+            const float p01 = juce::jlimit(0.0f, 1.0f, static_cast<float>(pctInt) / 100.0f);
+            juce::Logger::writeToLog("[MainWindow] smode.separation.progress -> " + juce::String(pctInt) + "% -> setStemLoadingProgress");
+            smodePage_.setStemLoadingProgress(p01);
+        });
+
+        smodeRestoringSub_ = bus->subscribe("smode.session.restoring", [this, alive = alive_](const juce::var& n) {
+            if (!*alive) return;
+            juce::Logger::writeToLog("[RootComponent] smode.session.restoring (" + n.toString() + " stems) -> loading lanes");
+            showSModeLoadingVisuals(juce::jlimit(1, 8, static_cast<int>(n) > 0 ? static_cast<int>(n) : 4), 0.0f);
+        });
+
+        smodeMissingSub_ = bus->subscribe("smode.session.missing", [this, alive = alive_](const juce::var& msg) {
+            if (!*alive) return;
+            juce::Logger::writeToLog("[RootComponent] smode.session.missing: " + msg.toString());
+            smodePage_.setStemLoadingState(false);
+            showMissingAudio(msg.toString());
+        });
+        juce::Logger::writeToLog("[RootComponent] S-Mode events subscribed on this instance's bus");
+    }
+
+    void unsubscribeSModeEvents()
+    {
+        if (smodeSubsBus_ == nullptr) return;
+        auto* bus = smodeSubsBus_;
+        if (smodeWorkflowReadySub_ != 0) bus->unsubscribe("smode.workflow.ready",      smodeWorkflowReadySub_);
+        if (smodeWorkflowErrorSub_ != 0) bus->unsubscribe("smode.workflow.error",      smodeWorkflowErrorSub_);
+        if (smodeProgressSub_      != 0) bus->unsubscribe("smode.separation.progress", smodeProgressSub_);
+        if (smodeRestoringSub_     != 0) bus->unsubscribe("smode.session.restoring",   smodeRestoringSub_);
+        if (smodeMissingSub_       != 0) bus->unsubscribe("smode.session.missing",     smodeMissingSub_);
+        smodeWorkflowReadySub_ = smodeWorkflowErrorSub_ = smodeProgressSub_ = smodeRestoringSub_ = smodeMissingSub_ = 0;
+        smodeSubsBus_ = nullptr;
+    }
+
+    void showSModeLoadingVisuals(int stemCount, float progress01)
+    {
+        smodePage_.setStemLoadingProgress(progress01);
+        smodePage_.beginSeparationVisuals(stemCount);
+        smodePage_.setStemLoadingState(true);
+        smodePage_.setStemLoadingProgress(progress01);
+    }
+
+    // B10: the editor was (re)opened while a separation / project restore runs
+    // in the processor: show the loading lanes with the current progress. The
+    // permanent subscriptions deliver the rest (progress, ready, error).
+    void replaySModeProgress()
+    {
+        auto* svc = smodeSvc();
+        if (svc == nullptr) return;
+        const auto status = svc->getSessionStatus();
+        const bool separating = svc->getSeparation().isSeparating();
+        const bool restoring  = status == samplar::SModeService::SessionStatus::Restoring;
+        juce::Logger::writeToLog("[RootComponent] replaySModeProgress: separating=" + juce::String(separating ? 1 : 0)
+            + " loadingStems=" + juce::String(svc->isLoadingStems() ? 1 : 0)
+            + " status=" + juce::String(samplar::session::SessionState::toString(status))
+            + " progress=" + juce::String(svc->getSeparation().getProgressPercent()) + "%");
+        if (svc->isActive())
+            return;   // stems are loaded: the reconnect path shows them
+        if (separating || svc->isLoadingStems() || restoring)
+        {
+            smodeService_ = svc;
+            const float p01 = separating ? juce::jlimit(0.0f, 1.0f, svc->getSeparation().getProgressPercent() / 100.0f) : 0.0f;
+            showSModeLoadingVisuals(4, p01);
+        }
+        else if (status == samplar::SModeService::SessionStatus::MissingAudio)
+        {
+            showMissingAudio(svc->getSessionMessage());
+        }
+    }
+
+    // In-page notice with a "Locate song..." relink button (no modal alert).
+    void showMissingAudio(const juce::String& message)
+    {
+        smodePage_.showMissingAudioNotice(message);
+    }
+
+    // After every onStemsReady(): the page builds fresh stem lanes that do not
+    // read the model's grid offset, so replay it through the page's existing
+    // "smode.downbeat.detected" handler (restored projects / editor reopen).
+    void afterStemsReady()
+    {
+        auto* svc = smodeSvc();
+        if (svc == nullptr) return;
+        shownGeneration_ = svc->getModel().getContentGeneration();
+        const double offset = svc->getModel().getGridOffsetSeconds();
+        if (offset > 0.0)
+        {
+            if (auto* bus = ctx_.getBus())
+            {
+                auto* obj = new juce::DynamicObject();
+                obj->setProperty("beat1Sample", static_cast<juce::int64>(std::llround(offset * svc->getModel().getSampleRate())));
+                obj->setProperty("offsetSeconds", offset);
+                obj->setProperty("confidence", 1.0);
+                juce::Logger::writeToLog("[RootComponent] afterStemsReady: grid offset " + juce::String(offset, 4) + " s -> stem lanes");
+                bus->publish("smode.downbeat.detected", juce::var(obj));
+            }
+        }
+        writeEditorDebugAck(*svc);
+    }
+
+    // Smoke-host round-trip check (SAMPLAR_DEBUG_SESSION_ACK): what the editor sees.
+    void writeEditorDebugAck(samplar::SModeService& svc)
+    {
+        const auto dir = juce::SystemStats::getEnvironmentVariable("SAMPLAR_DEBUG_SESSION_ACK", {});
+        if (dir.isEmpty()) return;
+        const auto extra = svc.getModel().captureExtraState();
+        int lanes = -1, slots = 0, division = 0;
+        if (auto* o = extra.getDynamicObject())
+        {
+            division = (int) o->getProperty("gridDivision");
+            if (auto* arr = o->getProperty("lanes").getArray())
+            {
+                lanes = arr->size();
+                for (auto& l : *arr)
+                    if (auto* lo = l.getDynamicObject())
+                        if (auto* sl = lo->getProperty("slots").getArray())
+                            for (auto& sv : *sl)
+                                if (auto* so = sv.getDynamicObject())
+                                    if (! (bool) so->getProperty("empty")) ++slots;
+            }
+        }
+        juce::File(dir).createDirectory();
+        const auto f = juce::File(dir).getChildFile("editor_" + juce::String(++editorAckSeq_) + ".txt");
+        f.replaceWithText("pendingExtra=" + juce::String(svc.getModel().hasPendingExtraState() ? 1 : 0)
+                          + " lanes=" + juce::String(lanes) + " slots=" + juce::String(slots)
+                          + " division=" + juce::String(division) + "\n"
+                          + samplar::session::describeModel(svc.getModel()));
+        juce::Logger::writeToLog("[RootComponent] editor debug ack: " + f.getFullPathName());
+    }
+
+public:
     // Hook EventBus progress/result to UI
     void attachBus()
     {
-        if (auto* busPtr = samplar::ServiceLocator::getBus())
-        {
-            auto& bus = *busPtr;
-            // SAMPLAR: wave_editor.open handler removed - juceEditor_ (WaveEditorView) deleted
-            // waveEditorId_ stays 0 (unsubscribed)
-            vizId_ = bus.subscribe("processing.viz", [this, alive = alive_](const juce::var& v){
-                if (!*alive) return;
-                juce::MessageManager::callAsync([this, alive, v]{
-                    if (!*alive) return;
-                    if (! v.isObject()) return;
-                    auto* o = v.getDynamicObject();
-                    if (! o->hasProperty("type")) return;
-                    juce::String type = o->getProperty("type").toString();
-                    if (type == "fft_info") {
-                        juce::Logger::writeToLog("[UI] Viz FFT: win=" + juce::String((int) o->getProperty("win")) +
-                                                   " hop=" + juce::String((int) o->getProperty("hop")) +
-                                                   " frames=" + juce::String((int) o->getProperty("frames")));
-                    } else if (type == "phase_start") {
-                        juce::String phase = o->getProperty("phase").toString();
-                        juce::Logger::writeToLog("[UI] ???? Starting phase: " + phase);
-
-                        // Transition from monster animation to waveform when drum stem processing begins
-                        if (phase == "mel_spectrogram" && false /* SAMPLAR: FullSong mode removed with InitialPage */) {
-                            juce::Logger::writeToLog("???? [MainWindow] Drum stem processing starting (mel_spectrogram phase) - transitioning to waveform visualization");
-                            processing_.startDrumStemVisualization();
-                        }
-
-                        // Enable zoom window for all processing phases
-                        if (phase == "mel_spectrogram" || phase == "spectral_flux" || phase == "peak_detection" || phase == "supervision") {
-                            processing_.enableZoomWindow(true);
-                        }
-
-                        // Start pre-loading Sample Browser during supervision phase
-                        if (phase == "supervision") {
-                            juce::Logger::writeToLog("[UI] ???? Pre-loading Sample Browser during supervision...");
-                            // Trigger sample browser preparation in background
-                            juce::Timer::callAfterDelay(100, [this]() {
-                                // Pre-load sample browser - for now just trigger refresh
-                                juce::Logger::writeToLog("[UI] ???? Pre-loading Sample Browser components");
-                                // TODO: Add proper output directory access when available
-                            });
-                        }
-                    } else if (type == "phase_complete") {
-                        juce::String phase = o->getProperty("phase").toString();
-                        juce::Logger::writeToLog("[UI] ??? Completed phase: " + phase);
-                        // Clear temporary visualizations for next phase
-                        processing_.clearVisualizationForNewPhase();
-                        // Clear phase progress indicator
-                        processing_.setPhaseProgress("", 0.0f);
-
-                        // If all processing is complete, switch to Sample Browser
-                        if (phase == "supervision") {
-                            juce::Logger::writeToLog("[UI] ???? All processing complete - switching to Sample Browser");
-                            juce::Timer::callAfterDelay(1000, [this]() {
-                                processing_.enableZoomWindow(false); // Disable zoom window
-                                switchTo(3); // Switch to Sample Browser (index 3)
-                            });
-                        }
-                    } else if (type == "mel_progress") {
-                        int frame = (int) o->getProperty("frame");
-                        int total = (int) o->getProperty("total_frames");
-                        float progress = (float) o->getProperty("progress");
-                        juce::Logger::writeToLog("[UI] ???? Mel spectrogram: " + juce::String(frame) + "/" + juce::String(total) + " (" + juce::String(progress * 100, 1) + "%)");
-                        processing_.setPhaseProgress("Mel Spectrogram", progress);
-
-                        // Update zoom window position based on analysis progress
-                        if (o->hasProperty("current_time_seconds")) {
-                            double timeSeconds = (double) o->getProperty("current_time_seconds");
-                            processing_.setAnalysisPosition(timeSeconds);
-                        }
-                    } else if (type == "flux_progress") {
-                        int frame = (int) o->getProperty("frame");
-                        int total = (int) o->getProperty("total_frames");
-                        float progress = (float) o->getProperty("progress");
-                        juce::Logger::writeToLog("[UI] ???? Spectral flux: " + juce::String(frame) + "/" + juce::String(total) + " (" + juce::String(progress * 100, 1) + "%)");
-                        processing_.setPhaseProgress("Spectral Flux", progress);
-
-                        // Update zoom window position based on analysis progress
-                        if (o->hasProperty("current_time_seconds")) {
-                            double timeSeconds = (double) o->getProperty("current_time_seconds");
-                            processing_.setAnalysisPosition(timeSeconds);
-                        }
-                    } else if (type == "supervision_progress") {
-                        int onsetIndex = (int) o->getProperty("onset_index");
-                        int totalOnsets = (int) o->getProperty("total_onsets");
-                        float progress = (float) o->getProperty("progress");
-                        juce::Logger::writeToLog("[UI] ???? Supervision: " + juce::String(onsetIndex) + "/" + juce::String(totalOnsets) + " (" + juce::String(progress * 100, 1) + "%)");
-                        processing_.setPhaseProgress("Supervision", progress);
-
-                        // Update zoom window position based on supervision progress
-                        if (o->hasProperty("current_time_seconds")) {
-                            double timeSeconds = (double) o->getProperty("current_time_seconds");
-                            processing_.setAnalysisPosition(timeSeconds);
-                        }
-                    } else if (type == "peak_detected") {
-                        int samplePos = (int) o->getProperty("sample_position");
-                        int peakCount = (int) o->getProperty("peak_count");
-                        juce::Logger::writeToLog("[UI] ???? Peak #" + juce::String(peakCount) + " detected at sample " + juce::String(samplePos));
-                        processing_.addSlicePosition(samplePos);
-
-                        // Update zoom window to follow peak detection
-                        if (o->hasProperty("onset_time")) {
-                            double timeSeconds = (double) o->getProperty("onset_time");
-                            processing_.setAnalysisPosition(timeSeconds);
-                        }
-                        // Force immediate UI update for this peak
-                        repaint();
-                    } else if (type == "onset_supervised") {
-                        int samplePos = (int) o->getProperty("sample_position");
-                        int processed = (int) o->getProperty("processed_count");
-                        int total = (int) o->getProperty("total_input");
-                        juce::Logger::writeToLog("[UI] ???? Supervised onset " + juce::String(processed) + "/" + juce::String(total) + " at sample " + juce::String(samplePos));
-
-                        // Mark this slice as supervised (turn it green)
-                        processing_.markSliceSupervised(samplePos);
-
-                        // Update zoom window to follow supervision process
-                        if (o->hasProperty("onset_time")) {
-                            double timeSeconds = (double) o->getProperty("onset_time");
-                            processing_.setAnalysisPosition(timeSeconds);
-                        }
-                    } else if (type == "flux_chunk") {
-                        // Forward chunk to Processing page overlay
-                        juce::Array<juce::var> vals = *o->getProperty("values").getArray();
-                        std::vector<float> vvec(vals.size());
-                        for (int i = 0; i < vals.size(); ++i) vvec[i] = (float) vals[i];
-                        int offset = (int) o->getProperty("offset");
-                        processing_.appendFluxChunk(offset, vvec);
-                    } else if (type == "flux_stats") {
-                        float mn = (float) o->getProperty("min");
-                        float mx = (float) o->getProperty("max");
-                        float me = (float) o->getProperty("mean");
-                        processing_.setFluxStats(mn, mx, me);
-                    } else if (type == "slices") {
-                        juce::Logger::writeToLog("[UI] Received final slices event!");
-                        if (o->hasProperty("positions")) {
-                            juce::Array<juce::var> vals = *o->getProperty("positions").getArray();
-                            juce::Logger::writeToLog("[UI] Final slice positions count: " + juce::String(vals.size()));
-                        }
-                    }
-                });
-            });
-
-            progId_ = bus.subscribe("processing.progress", [this, alive = alive_](const juce::var& v){
-                if (!*alive) return;
-                juce::MessageManager::callAsync([this, alive, v]{
-                    if (!*alive) return;
-                    if (v.isObject())
-                    {
-                        auto* o = v.getDynamicObject();
-                        if (o->hasProperty("pct"))
-                        {
-                            double pct = (double) o->getProperty("pct");
-                            processing_.setProgress(pct);
-
-                            // Update status message for ALL modes
-                            if (o->hasProperty("msg"))
-                            {
-                                juce::String msg = o->getProperty("msg").toString();
-                                // Send status message to ProcessingPage for display
-                                processing_.setStatusMessage(msg);
-                            }
-
-                            // Update BPM display when detected (tempo-first pipeline)
-                            if (o->hasProperty("bpm"))
-                            {
-                                float bpm = static_cast<float>((double)o->getProperty("bpm"));
-                                processing_.setBPM(bpm);
-                            }
-
-                            // EPIC SAMPLAR Animation Control (Full Song mode specific)
-                            if (o->hasProperty("msg"))
-                            {
-                                juce::String msg = o->getProperty("msg").toString();
-
-                                // Start animation when Full Song processing begins (backup trigger)
-                                if (msg == "Queued" && false /* SAMPLAR: FullSong mode removed with InitialPage */)
-                                {
-                                    juce::Logger::writeToLog("???? [MainWindow] Backup trigger - ensuring SAMPLAR animation is running for Full Song processing!");
-                                    processing_.startFullSongAnimation();
-                                }
-                                // Transition to drum stem visualization ONLY when drum-stem phase truly begins
-                                else if ((msg.containsIgnoreCase("Detecting drum samples") || pct >= 80) && false /* SAMPLAR: FullSong mode removed with InitialPage */)
-                                {
-                                    juce::Logger::writeToLog("???? [MainWindow] Transitioning from monster animation to drum stem waveform visualization (confirmed)");
-                                    processing_.startDrumStemVisualization();
-                                }
-                            }
-                        }
-                    }
-                });
-            });
-            resId_ = bus.subscribe("processing.result", [this, alive = alive_](const juce::var& v){
-                if (!*alive) return;
-                juce::Logger::writeToLog("???? [TRACE] Processing result received - scheduling UI update");
-                // already subscribed to processing.viz above
-                juce::MessageManager::callAsync([this, alive, v]{
-                    if (!*alive) return;
-                    juce::Logger::writeToLog("???? [TRACE] Processing result UI update executing");
-
-                    // ???? Ensure SAMPLAR animation is stopped when processing completes
-                    if (false /* SAMPLAR: FullSong mode removed with InitialPage */)
-                    {
-                        juce::Logger::writeToLog("???? [MainWindow] Processing complete - ensuring SAMPLAR animation is stopped");
-                        processing_.stopFullSongAnimation();
-                    }
-
-                    juce::String outDir;
-                    double detectedBPM = 0.0;
-                    if (v.isObject())
-                    {
-                        auto* o = v.getDynamicObject();
-                        outDir = o->getProperty("outputDir").toString();
-                        juce::Logger::writeToLog("???? [TRACE] Extracted output directory: " + outDir);
-
-                        // Extract BPM from result if available
-                        if (o->hasProperty("bpm"))
-                        {
-                            detectedBPM = (double)o->getProperty("bpm");
-                        }
-                    } else {
-                        juce::Logger::writeToLog("???? [TRACE] ERROR: Processing result is not an object!");
-                    }
-                    if (outDir.isNotEmpty())
-                    {
-                        juce::Logger::writeToLog("[Processing] Job complete; outputs ready at: " + outDir);
-
-                        // Check if we're in batch final processing mode
-                        if (batchFinalProcessingActive_)
-                        {
-                            juce::Logger::writeToLog("[Processing] Batch mode - calling onBatchFileProcessed");
-                            onBatchFileProcessed(outDir);
-                            return;  // Don't load browser yet - wait for all files
-                        }
-
-                        // SAMPLAR: browser_ removed - SampleBrowserPage deleted
-                        // Single file processing complete; output at: outDir (no browser to load)
-                        juce::Logger::writeToLog("[MainWindow] Processing complete, output: " + outDir + " (browser_ removed)");
-                        processing_.enableZoomWindow(false);
-                        switchTo(0); // SAMPLAR: return to initial (no browser page)
-                    } else {
-                        juce::Logger::writeToLog("???? [TRACE] ERROR: Output directory is empty!");
-                    }
-                });
-            });
-        }
-
         // Restore UI state from previous editor session (VST3 close/reopen)
-        if (auto* uiState = samplar::ServiceLocator::getUIState())
+        if (auto* uiState = ctx_.getUIState())
         {
             if (uiState->hasSavedState)
             {
@@ -1052,12 +734,12 @@ public:
 
         // Subscribe to "state.restored" � fired by setStateInformation AFTER editor is built.
         // This handles the timing gap: DAW calls setStateInformation after createEditor.
-        if (auto* bus = samplar::ServiceLocator::getBus())
+        if (auto* bus = ctx_.getBus())
         {
             stateRestoredSub_ = bus->subscribe("state.restored", [this, alive = alive_](const juce::var&) {
                 if (!*alive) return;
 
-                auto* uiState = samplar::ServiceLocator::getUIState();
+                auto* uiState = ctx_.getUIState();
                 if (!uiState || !uiState->pendingDAWRestore) return;
 
                 juce::Logger::writeToLog("[RootComponent] state.restored: restoring page="
@@ -1065,79 +747,10 @@ public:
 
                 // SAMPLAR: browser_ removed - pendingLibraryMode/pendingFolder restore skipped
 
-                // -- Restore S-Mode session (fast path: reload stems from disk) --
-                if (uiState->pendingSModeRestore)
-                {
-                    uiState->pendingSModeRestore = false;
-                    juce::Logger::writeToLog("[RootComponent] Restoring S-Mode session...");
-
-                    auto* reg = samplar::ServiceLocator::getRegistry();
-                    if (!reg) return;
-
-                    auto* smodeSvc = dynamic_cast<samplar::SModeService*>(reg->get("smode"));
-                    if (!smodeSvc) return;
-
-                    smodeService_ = smodeSvc;
-
-                    // Check if cached stem files still exist on disk
-                    bool stemsValid = !uiState->smodeStemFiles.empty();
-                    for (const auto& f : uiState->smodeStemFiles)
-                    {
-                        if (!f.existsAsFile()) { stemsValid = false; break; }
-                    }
-
-                    if (stemsValid)
-                    {
-                        juce::Logger::writeToLog("[RootComponent] S-Mode fast restore: "
-                            + juce::String(uiState->smodeStemFiles.size()) + " stems on disk");
-
-                        if (auto* b = samplar::ServiceLocator::getBus())
-                        {
-                            smodeWorkflowReadySub_ = b->subscribe("smode.workflow.ready", [this, alive](const juce::var&) {
-                                if (!*alive) return;
-                                juce::Logger::writeToLog("[RootComponent] S-Mode restore ready � switching to page 9");
-                                smodePage_.onStemsReady(*smodeService_);
-                                switchTo(9);
-                                smodePage_.resized();
-                                smodePage_.repaint();
-                                if (auto* b2 = samplar::ServiceLocator::getBus())
-                                    b2->unsubscribe("smode.workflow.ready", smodeWorkflowReadySub_);
-                            });
-                        }
-
-                        smodeSvc->setSourceFile(uiState->smodeSourceFile);
-                        smodeSvc->loadStemAudio(uiState->smodeStemFiles);
-                    }
-                    else
-                    {
-                        juce::Logger::writeToLog("[RootComponent] S-Mode stems missing � re-separating");
-                        if (uiState->smodeSourceFile.existsAsFile())
-                        {
-                            auto sc = (uiState->smodeStemCount == 6)
-                                ? samplar::SModeSeparationService::StemCount::Six
-                                : samplar::SModeSeparationService::StemCount::Four;
-
-                            if (auto* b = samplar::ServiceLocator::getBus())
-                            {
-                                smodeWorkflowReadySub_ = b->subscribe("smode.workflow.ready", [this, alive](const juce::var&) {
-                                    if (!*alive) return;
-                                    smodePage_.onStemsReady(*smodeService_);
-                                    switchTo(9);
-                                    smodePage_.resized();
-                                    smodePage_.repaint();
-                                    if (auto* b2 = samplar::ServiceLocator::getBus())
-                                        b2->unsubscribe("smode.workflow.ready", smodeWorkflowReadySub_);
-                                });
-                            }
-                            smodeSvc->startWorkflow(uiState->smodeSourceFile, sc);
-                        }
-                    }
-                }
-                else
-                {
-                    // Non-S-Mode: switch to the saved page
-                    switchTo(uiState->pendingPage);
-                }
+                // S-Mode sessions are restored by the processor (SModeService,
+                // B9); this editor reacts to "smode.session.restoring" /
+                // "smode.workflow.ready" like any other load.
+                switchTo(uiState->pendingPage);
 
                 uiState->pendingDAWRestore = false;  // consumed
             });
@@ -1145,7 +758,6 @@ public:
     }
 
     // SAMPLAR: switchTo() is a no-op stub — SModePage is always the permanent main content.
-    // ProcessingPage visibility is controlled directly (setVisible true/false as overlay).
     // Kept as a function to avoid touching all the callsites (state-restore blocks, etc.)
     void switchTo(int index)
     {
@@ -1158,7 +770,7 @@ public:
         }
         if (uiStateWriteEnabled_)
         {
-            if (auto* uiState = samplar::ServiceLocator::getUIState())
+            if (auto* uiState = ctx_.getUIState())
             {
                 uiState->currentPage = currentPage_;
                 uiState->previousPage = previousPage_;
@@ -1232,7 +844,7 @@ public:
     void showUpdateDialog()
     {
         juce::Logger::writeToLog("[RootComponent] === showUpdateDialog START ===");
-        if (auto* registry = samplar::ServiceLocator::getRegistry()) {
+        if (auto* registry = ctx_.getRegistry()) {
             auto* updateSvc = dynamic_cast<samplar::UpdateCheckService*>(
                 registry->get("update_checker"));
 
@@ -1283,7 +895,7 @@ public:
     void handleUpdateAvailable(const juce::var& /*payload*/)
     {
         juce::Logger::writeToLog("[RootComponent] === handleUpdateAvailable ===");
-        if (auto* registry = samplar::ServiceLocator::getRegistry()) {
+        if (auto* registry = ctx_.getRegistry()) {
             auto* updateSvc = dynamic_cast<samplar::UpdateCheckService*>(
                 registry->get("update_checker"));
             if (!updateSvc) return;
@@ -1342,15 +954,24 @@ private:
     // nav_ kept as debug-only sidebar (hidden unless F1×10 pressed).
     ListBox nav_ { "Pages" };
     std::unique_ptr<LicenseStatusWidget> licenseStatusWidget_;
-    // SAMPLAR: InitialPage initial_, CommunityPage community_, mentor_ all removed.
-    // ProcessingPage shown as overlay during separation (setVisible true/false).
-    ProcessingPage processing_;
-    samplar::SModePage smodePage_ { *samplar::ServiceLocator::getBus() };
-    samplar::EventBus::HandlerId mentorNavSub_ { 0 }; // kept for bus cleanup in destructor
+    // This editor's own services, captured once: the editor claims the locator
+    // for its processor right before building the UI (review A2).
+    samplar::ServiceLocator::Context ctx_ { samplar::ServiceLocator::capture() };
+    template <typename Page>
+    static std::unique_ptr<Page> makeSModePage(const samplar::ServiceLocator::Context& ctx)
+    {
+        if constexpr (std::is_constructible_v<Page, samplar::EventBus&, const samplar::ServiceLocator::Context&>)
+            return std::make_unique<Page>(*ctx.getBus(), ctx);
+        else
+            return std::make_unique<Page>(*ctx.getBus());
+    }
+    std::unique_ptr<samplar::SModePage> smodePagePtr_ { makeSModePage<samplar::SModePage>(ctx_) };
+    samplar::SModePage& smodePage_ { *smodePagePtr_ };
     // Debug console
     DebugConsole debugConsole_;
-    std::unique_ptr<samplar::MultiLogger> multiLogger_;
     bool debugVisible_ { false };
+    bool isPlugin_ { false };          // plugin: settings + notification only
+    juce::String lastResizeLog_;
     int f1Count_ { 0 };
     const int resetMs_ { 4000 };
     samplar::SamplarLookAndFeel lnf_;
@@ -1363,12 +984,8 @@ private:
     PinButton pinBtn_;
     SettingsButton settingsBtn_;
     DragButton dragBtn_;
-    NudgeTimer nudgeTimer_; // reserved, not actively used
     samplar::NotificationButton notifBtn_;
     std::unique_ptr<samplar::UpdateDialog> updateDialog_;
-    samplar::EventBus::HandlerId progId_ { 0 }, resId_ { 0 };
-    samplar::EventBus::HandlerId vizId_ { 0 };
-    samplar::EventBus::HandlerId waveEditorId_ { 0 };
     std::shared_ptr<bool> alive_ = std::make_shared<bool>(true);
     // Gates whether switchTo() writes the current page/folder back to uiState.
     // Kept false during construction so the initial switchTo(0) doesn't clobber
@@ -1379,409 +996,20 @@ private:
     int previousPage_ { 0 };  // Track previous page for back navigation
     int currentPage_ { 0 };   // Track current page
 
-    // Full Song separation service (for extracting drums before WavePreviewPage)
-    std::unique_ptr<samplar::FullSongService> fullSongService_;
-
-    // S-Mode service (owned by SamplarAudioProcessor � raw pointer)
+    // S-Mode service (owned by SamplarAudioProcessor - raw pointer)
     samplar::SModeService* smodeService_ { nullptr };
     samplar::EventBus::HandlerId smodeWorkflowReadySub_ { 0 };
-
-    // FullSong drums-only separation (long-lived, lives on processor's ServiceRegistry)
-    samplar::FullSongSeparationService* fullSongSepService_ { nullptr };  // not owned
-    samplar::EventBus::HandlerId fullSongProgSub_     { 0 };
-    samplar::EventBus::HandlerId fullSongMsgSub_      { 0 };
-    samplar::EventBus::HandlerId fullSongCompleteSub_ { 0 };
-    samplar::EventBus::HandlerId fullSongErrorSub_    { 0 };
-    samplar::EventBus::HandlerId fullSongBatchCompleteSub_ { 0 };
     samplar::EventBus::HandlerId smodeWorkflowErrorSub_ { 0 };
+    samplar::EventBus::HandlerId smodeProgressSub_ { 0 };
+    samplar::EventBus::HandlerId smodeRestoringSub_ { 0 };
+    samplar::EventBus::HandlerId smodeMissingSub_ { 0 };
+    samplar::EventBus* smodeSubsBus_ { nullptr };
+    int editorAckSeq_ { 0 };
+    uint64_t shownGeneration_ { ~(uint64_t) 0 };   // model generation the page last showed (B11)
+    juce::File pendingSeparationFile_;   // song dropped while another was separating
     samplar::EventBus::HandlerId stateRestoredSub_ { 0 };
-    std::unique_ptr<std::thread> separationThread_;
-    std::atomic<bool> separationInProgress_ { false };
-    // Flag to track if demucs separation was already done (for Full Song workflow)
-    // After separation, subsequent processing should use mode 3/4, NOT mode 2
-    bool separationAlreadyDone_ { false };
-
-    // ========== BATCH SEPARATION STATE ==========
-    std::vector<juce::File> batchFilesToSeparate_;       // Original full song files
-    std::vector<juce::File> batchDrumStemFiles_;         // Extracted drum stem files
-    int batchSeparationIndex_ { 0 };                     // Current file being separated
-    std::atomic<bool> batchSeparationActive_ { false };  // True during batch separation
-
-    // ========== BATCH FINAL PROCESSING STATE ==========
-    // SAMPLAR: WavePreviewPage::BatchExportItem removed with WavePreviewPage
-    // batchExportItems_ replaced with empty stub vector (never populated since preview_.onBatchExport removed)
-    struct BatchExportItemStub { juce::File exportedFile; juce::String sourceSongName;
-        int processingMode{3}; std::vector<double> slicePoints; BeatGridInfo beatGrid; };
-    std::vector<BatchExportItemStub> batchExportItems_;  // SAMPLAR: always empty (preview_ removed)
-    int batchProcessingIndex_ { 0 };                     // Current file being processed
-    std::atomic<bool> batchFinalProcessingActive_ { false };  // True during batch final processing
-    std::vector<juce::String> batchOutputDirectories_;    // Output directories from each file
-    juce::File batchCombinedOutputDir_;                   // Combined directory for all samples
-
-    void startBatchSeparation(const std::vector<juce::File>& files)
-    {
-        if (files.empty())
-        {
-            juce::Logger::writeToLog("[BatchSeparation] Empty file list - ignoring");
-            return;
-        }
-
-        // Lazy-fetch the long-lived separation service
-        if (!fullSongSepService_)
-        {
-            if (auto* reg = samplar::ServiceLocator::getRegistry())
-                fullSongSepService_ = dynamic_cast<samplar::FullSongSeparationService*>(reg->get("fullSong.separation"));
-        }
-        if (!fullSongSepService_)
-        {
-            juce::Logger::writeToLog("[BatchSeparation] ERROR: FullSongSeparationService not registered");
-            return;
-        }
-        if (fullSongSepService_->isSeparating())
-        {
-            juce::Logger::writeToLog("[BatchSeparation] Service already running - ignored");
-            return;
-        }
-
-        juce::Logger::writeToLog("[BatchSeparation] === DISPATCHING BATCH OF " +
-                                 juce::String(files.size()) + " FILES TO FullSongSeparationService ===");
-
-        batchFilesToSeparate_ = files;
-        batchDrumStemFiles_.clear();
-        batchDrumStemFiles_.reserve(files.size());
-        batchSeparationIndex_ = 0;
-        batchSeparationActive_ = true;
-        separationInProgress_  = true;
-
-        processing_.resetForNewJob();
-        processing_.setInputFile(files[0]);
-        processing_.setProcessMode(2);  // FullSong mode
-        processing_.setBatchInfo(1, static_cast<int>(files.size()));
-        processing_.setStatusMessage("Starting drum separation...");
-        switchTo(2);
-
-        if (! fullSongSepService_->startBatchSeparation(files))
-            juce::Logger::writeToLog("[BatchSeparation] startBatchSeparation returned false (race)");
-    }
-
-    void separateNextBatchFile()
-    {
-        if (batchSeparationIndex_ >= static_cast<int>(batchFilesToSeparate_.size()))
-        {
-            // All files separated - proceed to WavePreviewPage
-            onBatchSeparationComplete();
-            return;
-        }
-
-        const auto& currentFile = batchFilesToSeparate_[batchSeparationIndex_];
-        juce::Logger::writeToLog("[BatchSeparation] Separating file " +
-                                 juce::String(batchSeparationIndex_ + 1) + "/" +
-                                 juce::String(batchFilesToSeparate_.size()) + ": " +
-                                 currentFile.getFileName());
-
-        // Update processing page with current file and batch info
-        processing_.setInputFile(currentFile);
-        processing_.setBatchInfo(batchSeparationIndex_ + 1, static_cast<int>(batchFilesToSeparate_.size()));
-        processing_.setStatusMessage("Preparing audio for separation...");
-
-        // Run separation in background thread
-        separationThread_ = std::make_unique<std::thread>([this, alive = alive_, currentFile]() {
-            samplar::FullSongService::Config cfg;
-            cfg.onProgress = [this, alive](int pct, const juce::String& msg) {
-                juce::MessageManager::callAsync([this, alive, pct, msg]() {
-                    if (!*alive) return;
-                    // Scale progress: each file contributes (100 / numFiles) percent
-                    int totalFiles = static_cast<int>(batchFilesToSeparate_.size());
-                    int baseProgress = (batchSeparationIndex_ * 100) / totalFiles;
-                    int fileProgress = (pct * 100 / totalFiles) / 100;
-                    int totalProgress = baseProgress + fileProgress;
-
-                    processing_.setProgress(static_cast<double>(totalProgress));
-
-                    // Create user-friendly status message based on progress
-                    juce::String statusMsg;
-                    if (pct < 10)
-                        statusMsg = "Loading and preparing audio...";
-                    else if (pct < 30)
-                        statusMsg = "Encoding audio features...";
-                    else if (pct < 70)
-                        statusMsg = "Separating drums with AI model...";
-                    else if (pct < 90)
-                        statusMsg = "Decoding separated sources...";
-                    else
-                        statusMsg = "Finalizing drum stem...";
-
-                    processing_.setStatusMessage(statusMsg + " (" + juce::String(pct) + "%)");
-
-                    juce::Logger::writeToLog("[BatchSeparation] File " +
-                                             juce::String(batchSeparationIndex_ + 1) + ": " +
-                                             juce::String(pct) + "% - " + msg +
-                                             " (Total: " + juce::String(totalProgress) + "%)");
-                });
-            };
-
-            auto result = fullSongService_->separateDrums(currentFile, cfg,
-                "batch_" + juce::String(batchSeparationIndex_) + "_");
-
-            juce::MessageManager::callAsync([this, alive, result, currentFile]() {
-                if (!*alive) return;
-                if (result.error.isNotEmpty())
-                {
-                    juce::Logger::writeToLog("[BatchSeparation] FAILED for " + currentFile.getFileName() +
-                                             ": " + result.error);
-                    processing_.setStatusMessage("Error: " + result.error);
-                    // Continue with next file even if one fails
-                }
-                else
-                {
-                    juce::Logger::writeToLog("[BatchSeparation] SUCCESS: " +
-                                             result.drumStemFile.getFileName());
-                    batchDrumStemFiles_.push_back(result.drumStemFile);
-                    processing_.setStatusMessage("Drum stem extracted successfully!");
-                }
-
-                // Move to next file
-                batchSeparationIndex_++;
-
-                // Update status for next file if there are more
-                if (batchSeparationIndex_ < static_cast<int>(batchFilesToSeparate_.size()))
-                {
-                    processing_.setStatusMessage("Moving to next file...");
-                }
-
-                separateNextBatchFile();
-            });
-        });
-        separationThread_->detach();
-    }
-
-    void onBatchSeparationComplete()
-    {
-        batchSeparationActive_ = false;
-        separationAlreadyDone_ = true;
-
-        juce::Logger::writeToLog("[BatchSeparation] === ALL SEPARATIONS COMPLETE ===");
-        juce::Logger::writeToLog("[BatchSeparation] " + juce::String(batchDrumStemFiles_.size()) +
-                                 " drum stems extracted from " +
-                                 juce::String(batchFilesToSeparate_.size()) + " files");
-
-        if (batchDrumStemFiles_.empty())
-        {
-            juce::Logger::writeToLog("[BatchSeparation] ERROR: No drum stems extracted!");
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Batch Separation Failed",
-                "Could not extract drums from any of the songs.",
-                "OK");
-            switchTo(0);  // Go back to initial page
-            return;
-        }
-
-        // SAMPLAR: preview_ removed - WavePreviewPage deleted
-        // Was: preview_.loadMultipleFiles(batchDrumStemFiles_); switchTo(1);
-        juce::Logger::writeToLog("[BatchSeparation] " + juce::String(batchDrumStemFiles_.size())
-            + " drum stems ready (preview_ removed)");
-        switchTo(0); // Return to initial page
-
-        // Clear batch state
-        batchFilesToSeparate_.clear();
-    }
-
-    // ========== BATCH FINAL PROCESSING FUNCTIONS ==========
-    void processNextBatchFile()
-    {
-        if (batchProcessingIndex_ >= static_cast<int>(batchExportItems_.size()))
-        {
-            // All files processed
-            onBatchFinalProcessingComplete();
-            return;
-        }
-
-        const auto& item = batchExportItems_[batchProcessingIndex_];
-
-        juce::Logger::writeToLog("[BatchFinalProcessing] Processing file " +
-                                 juce::String(batchProcessingIndex_ + 1) + "/" +
-                                 juce::String(batchExportItems_.size()) + ": " +
-                                 item.sourceSongName);
-
-        // Update processing page
-        processing_.setInputFile(item.exportedFile);
-        processing_.setBatchInfo(batchProcessingIndex_ + 1, static_cast<int>(batchExportItems_.size()));
-        processing_.setStatusMessage("Slicing " + item.sourceSongName + "...");
-        processing_.setProgress(0.0);
-
-        // Set beat grid info
-        processing_.setBeatGridInfo(item.beatGrid);
-
-        // Enqueue processing job
-        if (auto* registry = samplar::ServiceLocator::getRegistry())
-        {
-            if (auto* coordSvc = dynamic_cast<samplar::ProcessingCoordinatorService*>(
-                    registry->get("processing.coordinator")))
-            {
-                // Store beat grid selection offset for coordinate conversion
-                BeatGridInfo beatGrid = item.beatGrid;
-                beatGrid.selectionOffset = item.beatGrid.selectionOffset;
-
-                if (item.processingMode == 4 && !item.slicePoints.empty())
-                {
-                    // GridSlice mode with user-defined slice points
-                    juce::Logger::writeToLog("[BatchFinalProcessing] Using GridSlice mode with " +
-                                             juce::String(item.slicePoints.size()) + " slice points");
-                    coordSvc->enqueue(item.exportedFile, 4, beatGrid, item.slicePoints);
-                }
-                else
-                {
-                    // TempoFirst mode (auto slicing)
-                    juce::Logger::writeToLog("[BatchFinalProcessing] Using TempoFirst mode");
-                    coordSvc->enqueue(item.exportedFile, 3, beatGrid);
-                }
-            }
-        }
-    }
-
-    void onBatchFileProcessed(const juce::String& outputDir)
-    {
-        juce::Logger::writeToLog("[BatchFinalProcessing] File " +
-                                 juce::String(batchProcessingIndex_ + 1) + " complete, output: " + outputDir);
-
-        // Collect ALL output directories
-        if (outputDir.isNotEmpty())
-        {
-            batchOutputDirectories_.push_back(outputDir);
-        }
-
-        // Move to next file
-        batchProcessingIndex_++;
-
-        // Check if more files to process
-        if (batchProcessingIndex_ < static_cast<int>(batchExportItems_.size()))
-        {
-            // CRITICAL: Add delay before queueing next file to allow processing thread
-            // to fully exit and reset isProcessing_ flag. Without this delay, the next
-            // job gets rejected with "already processing a job".
-            juce::Timer::callAfterDelay(200, [this]() {
-                if (batchFinalProcessingActive_)  // Guard against shutdown
-                {
-                    processNextBatchFile();
-                }
-            });
-        }
-        else
-        {
-            onBatchFinalProcessingComplete();
-        }
-    }
-
-    void onBatchFinalProcessingComplete()
-    {
-        batchFinalProcessingActive_ = false;
-
-        juce::Logger::writeToLog("[BatchFinalProcessing] === ALL FILES PROCESSED ===");
-        juce::Logger::writeToLog("[BatchFinalProcessing] " + juce::String(batchExportItems_.size()) +
-                                 " files processed across " + juce::String(batchOutputDirectories_.size()) + " directories");
-
-        if (batchOutputDirectories_.empty())
-        {
-            juce::Logger::writeToLog("[BatchFinalProcessing] ERROR: No output directories!");
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Batch Processing Failed",
-                "Could not process any of the files.",
-                "OK");
-            switchTo(0);  // SAMPLAR: preview page removed, return to initial
-            return;
-        }
-
-        // Create a combined output directory for all samples
-        // Use temp directory with timestamp for uniqueness
-        auto timestamp = juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S");
-        batchCombinedOutputDir_ = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                                      .getChildFile("SAMPLAR_batch_" + timestamp);
-        batchCombinedOutputDir_.createDirectory();
-
-        juce::Logger::writeToLog("[BatchFinalProcessing] Combining samples into: " +
-                                 batchCombinedOutputDir_.getFullPathName());
-
-        // Build song->files mapping for direct metadata passing to browser
-        // This eliminates fragile filename parsing - we KNOW which files came from which song
-        std::map<juce::String, std::vector<juce::File>> songFiles;
-        int totalSamples = 0;
-
-        for (size_t i = 0; i < batchOutputDirectories_.size(); ++i)
-        {
-            juce::File srcDir(batchOutputDirectories_[i]);
-            if (!srcDir.isDirectory())
-            {
-                juce::Logger::writeToLog("[BatchFinalProcessing] WARNING: Source dir not found: " + srcDir.getFullPathName());
-                continue;
-            }
-
-            // Get the KNOWN song name for this batch item
-            juce::String songName;
-            if (i < batchExportItems_.size())
-            {
-                songName = batchExportItems_[i].sourceSongName;
-            }
-            else
-            {
-                songName = "Song " + juce::String(i + 1);
-            }
-
-            juce::Logger::writeToLog("[BatchFinalProcessing] Processing song: " + songName);
-
-            // Copy all WAV files and track which song they came from
-            auto wavFiles = srcDir.findChildFiles(juce::File::findFiles, false, "*.wav");
-            std::vector<juce::File> songFileList;
-
-            for (const auto& srcFile : wavFiles)
-            {
-                // Still prefix filenames to avoid collisions in combined folder
-                juce::String newName = songName + "_" + srcFile.getFileName();
-                juce::File destFile = batchCombinedOutputDir_.getChildFile(newName);
-
-                if (srcFile.copyFileTo(destFile))
-                {
-                    songFileList.push_back(destFile);  // Track the DESTINATION file
-                    totalSamples++;
-                }
-                else
-                {
-                    juce::Logger::writeToLog("[BatchFinalProcessing] WARNING: Failed to copy: " + srcFile.getFileName());
-                }
-            }
-
-            // Store the song->files mapping
-            songFiles[songName] = std::move(songFileList);
-
-            juce::Logger::writeToLog("[BatchFinalProcessing] Copied " + juce::String(wavFiles.size()) +
-                                     " samples from: " + songName);
-        }
-
-        juce::Logger::writeToLog("[BatchFinalProcessing] Total samples combined: " + juce::String(totalSamples));
-        juce::Logger::writeToLog("[BatchFinalProcessing] Songs tracked: " + juce::String(static_cast<int>(songFiles.size())));
-
-        if (totalSamples == 0)
-        {
-            juce::Logger::writeToLog("[BatchFinalProcessing] ERROR: No samples were copied!");
-            juce::AlertWindow::showMessageBoxAsync(
-                juce::AlertWindow::WarningIcon,
-                "Batch Processing Failed",
-                "No samples were generated from the files.",
-                "OK");
-            switchTo(1);
-            return;
-        }
-
-        // SAMPLAR: browser_ removed - batch results cannot be loaded into SampleBrowserPage
-        juce::Logger::writeToLog("[BatchFinalProcessing] Complete; combined output: "
-            + batchCombinedOutputDir_.getFullPathName() + " (browser_ removed)");
-        switchTo(0); // SAMPLAR: return to initial (no browser page)
-
-        // Clear batch state
-        batchExportItems_.clear();
-        batchOutputDirectories_.clear();
-    }
+    samplar::EventBus::HandlerId updateAvailableSub_ { 0 };
+    samplar::EventBus::HandlerId licenseReminderSub_ { 0 };
 };
 
 MainWindow::MainWindow(const String& name)
@@ -1801,7 +1029,8 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] Title bar height set to 0");
 
         setResizable(true, true);
-        juce::Logger::writeToLog("???? [MainWindow] Window set to resizable");
+        setResizeLimits(850, 500, 1810, 1130);   // same limits as the plugin editor
+        juce::Logger::writeToLog("???? [MainWindow] Window set to resizable (850x500 .. 1810x1130)");
 
         juce::Logger::writeToLog("???? [MainWindow] Creating RootComponent");
         auto* rc = new RootComponent();
@@ -1812,8 +1041,8 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] RootComponent set as content");
 
         juce::Logger::writeToLog("???? [MainWindow] About to set window size");
-        setSize(1500, 1024);
-        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1500x1024");
+        setSize(1060, 724);
+        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1060x724");
 
         juce::Logger::writeToLog("???? [MainWindow] About to attach EventBus");
         if (auto* root = dynamic_cast<RootComponent*>(getContentComponent()))
@@ -1821,7 +1050,7 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] EventBus attached");
 
         juce::Logger::writeToLog("???? [MainWindow] About to center window");
-        centreWithSize(1500, 1024);
+        centreWithSize(1060, 724);
         juce::Logger::writeToLog("???? [MainWindow] Window centered");
 
         juce::Logger::writeToLog("???? [MainWindow] About to make window visible");
@@ -1842,36 +1071,6 @@ MainWindow::MainWindow(const String& name)
 
 void MainWindow::closeButtonPressed()
 {
-    // Check if batch processing is active before allowing close
-    if (auto* root = dynamic_cast<RootComponent*>(getContentComponent()))
-    {
-        if (root->isBatchProcessingActive())
-        {
-            juce::Logger::writeToLog("[MainWindow] Close requested during batch processing - showing confirmation");
-
-            // Show async confirmation dialog
-            auto options = juce::MessageBoxOptions()
-                .withIconType(juce::MessageBoxIconType::WarningIcon)
-                .withTitle("Batch Processing In Progress")
-                .withMessage("Batch processing is still running.\n\nClosing now will cancel processing and samples may be incomplete.\n\nAre you sure you want to exit?")
-                .withButton("Exit Anyway")
-                .withButton("Continue Processing");
-
-            juce::AlertWindow::showAsync(options, [](int result) {
-                if (result == 1)  // User clicked "Exit Anyway"
-                {
-                    juce::Logger::writeToLog("[MainWindow] User confirmed exit during batch processing");
-                    samplar::ServiceLocator::requestQuit();
-                }
-                else
-                {
-                    juce::Logger::writeToLog("[MainWindow] User chose to continue batch processing");
-                }
-            });
-            return;  // Don't quit yet - wait for user decision
-        }
-    }
-
     samplar::ServiceLocator::requestQuit();
 }
 

@@ -43,6 +43,15 @@ public:
     void setPlayheadPosition(float pos) { playheadPos_ = pos; repaint(); }
     int getNumBars() const { return numBars_; }
 
+    /** Grid resolution (B18): x1 / x2 / x4 use one cell per beat, x8 two,
+     *  x16 four - so every generated slot fits on the lane. */
+    int getCellsPerBeat() const { return slotsPerBar_ >= 16 ? 4 : (slotsPerBar_ >= 8 ? 2 : 1); }
+    int getCellsPerBar() const  { return 4 * getCellsPerBeat(); }
+    int getTotalCells() const   { return juce::jmax(1, numBars_ * getCellsPerBar()); }
+
+    /** Registry of the plugin instance that owns this lane (slot audition). */
+    void setServiceRegistry(class ServiceRegistry* r) { registry_ = r; }
+
     /** Snapshot / restore — used by SModeSegmentModel's undo stack. */
     juce::var captureState() const;
     void restoreState(const juce::var& v);
@@ -75,6 +84,7 @@ public:
 
     // Callbacks
     std::function<void(int laneIndex)> onLaneChanged;  // Fired when slots are modified (for live playback update)
+    std::function<void(const juce::String& text)> onStatusMessage;   // short user-visible note (status line)
     std::function<void(int laneIndex)> onRemoveRequested;
     std::function<void(int laneIndex)> onPlayRequested;
     std::function<void(int laneIndex)> onStopRequested;
@@ -95,6 +105,12 @@ private:
     double bpm_ { 120.0 };
 
     std::vector<PatternSlot> slots_;
+    class ServiceRegistry* registry_ { nullptr };
+
+    /** Re-express slot positions when the cell size changes (fromCellsPerBar ->
+     *  current), see LaneGridRescale.h. Returns the number of filled slots that
+     *  had to be merged / were past the lane end (0 for any upscale). */
+    int rescaleSlotsToGrid(int fromCellsPerBar, const char* why);
     std::vector<std::unique_ptr<SequencerSlotComponent>> slotComponents_;
 
     // Controls
@@ -116,6 +132,10 @@ private:
     static constexpr int kDotGap = 3;
     static constexpr int kControlRowHeight = 22;
     static constexpr int kSlotHeight = 36;
+    static constexpr int kSeqLabelW = 34;   // painted "SEQ n" at the left of the control row
+
+    /** Painted stem dot i (control row). Single source for paint + mouse hit-tests. */
+    juce::Rectangle<int> getDotArea(int i) const;
 
     void buildSlotComponents();
     void collectAvailableSegments(std::vector<PatternGenerator::SegmentRef>& out) const;

@@ -4,7 +4,7 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(samplar VERSION 1.0.0 LANGUAGES CXX)
+project(samplar VERSION 1.0.1 LANGUAGES CXX)
 
 option(SAMPLAR_BUILD_TESTS "Build SAMPLAR unit tests" OFF)
 option(SAMPLAR_BUILD_STANDALONE "Build the SamplarApp standalone target (dev only)" OFF)
@@ -37,6 +37,14 @@ else()
   set(SAMPLAR_GIT_VERSION "0.0.0-dev")
   message(STATUS "SAMPLAR version: ${SAMPLAR_GIT_VERSION} (no git tag found)")
 endif()
+
+# Single source of truth for the product version: project(... VERSION x.y.z)
+# above. It flows into SamplarVersion.h (-> samplar::kAppVersion used by the
+# update check + OAuth), the JUCE plugin/app metadata below, and
+# release_assets/build_installer.ps1 (parses this file). The git tag above is
+# informational only.
+set(SAMPLAR_VERSION_STRING "${PROJECT_VERSION}")
+message(STATUS "SAMPLAR product version: ${SAMPLAR_VERSION_STRING}")
 
 configure_file(
   ${CMAKE_SOURCE_DIR}/src/app/SamplarVersion.h.in
@@ -77,38 +85,7 @@ endif()
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
-# nlohmann/json for MIDI pattern database
 include(FetchContent)
-FetchContent_Declare(
-  nlohmann_json
-  GIT_REPOSITORY https://github.com/nlohmann/json.git
-  GIT_TAG v3.11.3
-  GIT_SHALLOW TRUE
-)
-FetchContent_MakeAvailable(nlohmann_json)
-
-# Loop Tempo Estimator (STFT + ODF based tempo detection from Audacity)
-# Used as secondary tempo detector alongside DWT for consensus voting
-set(LTE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/loop-tempo-estimator")
-if(EXISTS "${LTE_DIR}/CMakeLists.txt")
-  message(STATUS "========================================")
-  message(STATUS "Loop Tempo Estimator: ENABLED")
-  message(STATUS "========================================")
-  # Disable tests and vamp plugin - we only need the library
-  set(BUILD_TESTS OFF CACHE BOOL "Disable LTE tests" FORCE)
-  set(BUILD_VAMP_PLUGIN OFF CACHE BOOL "Disable LTE vamp plugin" FORCE)
-  add_subdirectory(${LTE_DIR} loop-tempo-estimator)
-  set(LTE_FOUND TRUE)
-else()
-  message(STATUS "Loop Tempo Estimator not found at ${LTE_DIR}")
-  set(LTE_FOUND FALSE)
-endif()
-
-# Optional: SoundTouch for constant-pitch preview (offline path only — see
-# src/audio/Preview/SoundTouchSource.h). The realtime audio-path pitch
-# shifter is now signalsmith-stretch (vendored, see below).
-option(WITH_SOUNDTOUCH "Enable SoundTouch for constant-pitch time-stretch preview" ON)
-option(WITH_ZEROMQ "Enable ZeroMQ IPC clients (Python bridge)" OFF)
 
 # Beat This! neural beat tracker (Foscarin et al., ISMIR 2024) — adds a 4th
 # detector to the tempo pipeline that produces explicit beat timestamps via
@@ -142,31 +119,6 @@ option(SAMPLAR_ENABLE_DEV_FALLBACK "Bake dev-machine SAMPLAR_Portable path into 
 # B1 tracing: compile-in Chrome-Trace-format event profiler (opens in ui.perfetto.dev).
 # Default ON during active development; switch to OFF for commercial release builds.
 option(SAMPLAR_ENABLE_TRACING "Enable SAMPLAR Chrome-Trace event profiler" OFF)
-if(WITH_SOUNDTOUCH)
-  include(FetchContent)
-  # Try to fetch SoundTouch; if unavailable, continue without failing the build.
-  # SoundTouch moved to codeberg; use official repo
-  FetchContent_Declare(
-    soundtouch
-    GIT_REPOSITORY https://codeberg.org/soundtouch/soundtouch.git
-    GIT_TAG 2.3.2
-    GIT_SHALLOW TRUE
-  )
-  set(FETCHCONTENT_QUIET OFF)
-  # Manually populate and add library to avoid subproject policy issues
-  FetchContent_GetProperties(soundtouch)
-  if(NOT soundtouch_POPULATED)
-    FetchContent_Populate(soundtouch)
-  endif()
-  set(SOUNDTOUCH_INCLUDE_DIR "${soundtouch_SOURCE_DIR}/include")
-  file(GLOB SOUNDTOUCH_SRC
-    "${soundtouch_SOURCE_DIR}/source/SoundTouch/*.cpp")
-  add_library(soundtouch_local STATIC ${SOUNDTOUCH_SRC})
-  target_include_directories(soundtouch_local PUBLIC ${SOUNDTOUCH_INCLUDE_DIR})
-  target_compile_definitions(soundtouch_local PUBLIC ST_NO_EXCEPTION_HANDLING)
-  set(SOUNDTOUCH_TARGET soundtouch_local)
-endif()
-
 # -----------------------------------------------------------------------
 # Beat This! neural beat tracker (vendored at third_party/beat_this/)
 #   - ONNX Runtime fetched from GitHub releases (pre-built Windows x64)
@@ -181,13 +133,27 @@ if(WITH_BEAT_THIS)
   endif()
 endif()
 
-if(WITH_BEAT_THIS)
-  message(STATUS "========================================")
-  message(STATUS "Beat This! neural beat tracker: ENABLED")
-  message(STATUS "========================================")
-
-  include(FetchContent)
-  set(ORT_VERSION "1.20.1")
+# -----------------------------------------------------------------------
+# ONNX Runtime - ONE build for the whole module (stem separation + Beat This!).
+# Preferred: the DirectML build SM5 ships (Microsoft.ML.OnnxRuntime.DirectML 1.19.2 +
+# Microsoft.AI.DirectML 1.15.1), vendored at third_party/onnxruntime-directml (gitignored
+# binaries; fetch with `python tools/fetch_onnxruntime_directml.py` or copy from SM5).
+# Fallback: the CPU 1.19.2 zip (same API level - never mix ORT versions in one module).
+# -----------------------------------------------------------------------
+option(SAMPLAR_ORT_DIRECTML "Use the DirectML build of ONNX Runtime (GPU stem separation)" ON)
+set(SAMPLAR_ORT_DML_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/onnxruntime-directml")
+set(SAMPLAR_HAS_DIRECTML FALSE)
+set(ORT_VERSION "1.19.2")
+if(WIN32 AND SAMPLAR_ORT_DIRECTML
+   AND EXISTS "${SAMPLAR_ORT_DML_DIR}/include/dml_provider_factory.h"
+   AND EXISTS "${SAMPLAR_ORT_DML_DIR}/lib/DirectML.dll"
+   AND EXISTS "${SAMPLAR_ORT_DML_DIR}/lib/onnxruntime.dll")
+  set(ORT_ROOT "${SAMPLAR_ORT_DML_DIR}")
+  set(SAMPLAR_HAS_DIRECTML TRUE)
+else()
+  if(WIN32 AND SAMPLAR_ORT_DIRECTML)
+    message(WARNING "DirectML ONNX Runtime not found at ${SAMPLAR_ORT_DML_DIR} - stem separation will be CPU-only. Run: python tools/fetch_onnxruntime_directml.py")
+  endif()
   if(WIN32)
     set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip")
   elseif(APPLE)
@@ -195,29 +161,75 @@ if(WITH_BEAT_THIS)
   else()
     set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz")
   endif()
+  FetchContent_Declare(onnxruntime_cpu_prebuilt URL ${ORT_URL})
+  FetchContent_MakeAvailable(onnxruntime_cpu_prebuilt)
+  set(ORT_ROOT "${onnxruntime_cpu_prebuilt_SOURCE_DIR}")
+endif()
 
-  FetchContent_Declare(
-    onnxruntime_prebuilt
-    URL ${ORT_URL}
-  )
-  FetchContent_MakeAvailable(onnxruntime_prebuilt)
-  set(ORT_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}")
-  message(STATUS "ONNX Runtime ${ORT_VERSION} at: ${ORT_ROOT}")
+if(WIN32)
+  set(ORT_LIB "${ORT_ROOT}/lib/onnxruntime.lib")
+  set(ORT_DLL "${ORT_ROOT}/lib/onnxruntime.dll")
+elseif(APPLE)
+  set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib")
+  set(ORT_DLL "${ORT_LIB}")
+else()
+  set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.so.${ORT_VERSION}")
+  set(ORT_DLL "${ORT_LIB}")
+endif()
+if(NOT EXISTS "${ORT_LIB}")
+  message(FATAL_ERROR "ONNX Runtime lib not found at ${ORT_LIB}")
+endif()
 
-  if(WIN32)
-    set(ORT_LIB "${ORT_ROOT}/lib/onnxruntime.lib")
-    set(ORT_DLL "${ORT_ROOT}/lib/onnxruntime.dll")
-  elseif(APPLE)
-    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib")
-    set(ORT_DLL "${ORT_LIB}")
-  else()
-    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.so.${ORT_VERSION}")
-    set(ORT_DLL "${ORT_LIB}")
+add_library(onnxruntime SHARED IMPORTED GLOBAL)
+set_target_properties(onnxruntime PROPERTIES
+  IMPORTED_LOCATION "${ORT_DLL}"
+  IMPORTED_IMPLIB "${ORT_LIB}"
+  INTERFACE_INCLUDE_DIRECTORIES "${ORT_ROOT}/include")
+if(SAMPLAR_HAS_DIRECTML)
+  set_property(TARGET onnxruntime APPEND PROPERTY INTERFACE_COMPILE_DEFINITIONS SAMPLAR_HAS_DIRECTML=1)
+  # Same bits SM5 ships (guards against a stale/wrong copy).
+  file(SHA256 "${ORT_DLL}" _samplar_ort_sha)
+  if(NOT _samplar_ort_sha STREQUAL "410de3464172dae2945a4663f274e34c59965bc8233b0411de16baab56dda1a7")
+    message(WARNING "onnxruntime.dll is not SM5's ORT-DirectML 1.19.2 build (sha256 ${_samplar_ort_sha})")
   endif()
+endif()
+message(STATUS "ONNX Runtime ${ORT_VERSION}: ${ORT_ROOT} (DirectML: ${SAMPLAR_HAS_DIRECTML})")
 
-  if(NOT EXISTS "${ORT_LIB}")
-    message(FATAL_ERROR "ONNX Runtime archive extracted but lib not at ${ORT_LIB}")
-  endif()
+# Separation model shipped in the bundle: exactly ONE (body model when present).
+set(SAMPLAR_SEP_MODEL_NAME htdemucs.onnx)
+set(SAMPLAR_SEP_STALE_MODEL htdemucs_body.onnx)
+if(EXISTS "${CMAKE_CURRENT_LIST_DIR}/models/htdemucs_body.onnx")
+  set(SAMPLAR_SEP_MODEL_NAME htdemucs_body.onnx)
+  set(SAMPLAR_SEP_STALE_MODEL htdemucs.onnx)
+else()
+  message(WARNING "models/htdemucs_body.onnx missing - the bundle ships the full model (CPU only). Copy it from SM5 resources/models or run tools/separation/split_htdemucs.py")
+endif()
+message(STATUS "Separation model staged into the VST3 bundle: ${SAMPLAR_SEP_MODEL_NAME}")
+
+# --- PFFFT (vendored marton78 fork, BSD-style; LICENSE ships in the bundle) - SIMD FFT
+# behind samplar::Fft (src/utils/Fft.h), used by the host iSTFT of the body model. Every
+# exported symbol is renamed sm5_pffft_* via a force-included header (relative /FI: the
+# repo path contains a space). ---
+set(SAMPLAR_PFFFT_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/pffft")
+add_library(samplar_pffft STATIC "${SAMPLAR_PFFFT_DIR}/src/pffft.c" "${SAMPLAR_PFFFT_DIR}/src/pffft_common.c")
+target_include_directories(samplar_pffft PUBLIC "${SAMPLAR_PFFFT_DIR}/include" "${SAMPLAR_PFFFT_DIR}"
+                                         PRIVATE "${SAMPLAR_PFFFT_DIR}/include/pffft")
+set_target_properties(samplar_pffft PROPERTIES C_STANDARD 99 POSITION_INDEPENDENT_CODE ON)
+target_compile_definitions(samplar_pffft PUBLIC PFFFT_STATIC_DEFINE PRIVATE PFFFT_ENABLE_NEON)
+if(MSVC)
+  target_compile_definitions(samplar_pffft PRIVATE _USE_MATH_DEFINES)
+  # Same CRT as the plugin (/MD). C is enabled late (inside JUCE) and this target came out
+  # with an empty RuntimeLibrary (= /MT) -> LNK4098 LIBCMT conflict in the plugin link.
+  target_compile_options(samplar_pffft PRIVATE $<IF:$<CONFIG:Debug>,/MDd,/MD>)
+  target_compile_options(samplar_pffft PRIVATE /FIsm5_pffft_prefix.h)
+else()
+  target_compile_options(samplar_pffft PRIVATE -include sm5_pffft_prefix.h)
+endif()
+
+if(WITH_BEAT_THIS)
+  message(STATUS "========================================")
+  message(STATUS "Beat This! neural beat tracker: ENABLED")
+  message(STATUS "========================================")
 
   # Static library wrapping the vendored beat_this_cpp inference engine.
   set(BEAT_THIS_LIB_SOURCES
@@ -230,9 +242,8 @@ if(WITH_BEAT_THIS)
   target_include_directories(beat_this_engine PUBLIC
     ${BEAT_THIS_DIR}/src
     ${BEAT_THIS_DIR}/third_party/pocketfft
-    ${ORT_ROOT}/include
   )
-  target_link_libraries(beat_this_engine PUBLIC ${ORT_LIB})
+  target_link_libraries(beat_this_engine PUBLIC onnxruntime)
   target_compile_features(beat_this_engine PUBLIC cxx_std_17)
   if(MSVC)
     target_compile_options(beat_this_engine PRIVATE /wd4244 /wd4267 /wd4996)
@@ -241,24 +252,17 @@ endif()
 
 # Sources
 set(SAMPLAR_SOURCES
-  src/app/App.cpp
   src/app/AudioDeviceService.cpp
-  src/audio/Preview/SoundTouchSource.cpp
-  src/audio/SamplePreviewCache.cpp
-  src/audio/SequencerAudioSource.h
-  src/audio/SequencerAudioSource.cpp
-  # Spectral separation engine (FFT-based 5-band frequency separation)
-  src/audio/SpectralSeparator.h
-  src/audio/SpectralSeparator.cpp
-  src/audio/BandProcessor.h
-  src/audio/BandProcessor.cpp
-  src/services/ProcessingCoordinatorService.cpp
   src/services/FullSongService.cpp
-  src/services/FullSongSeparationService.h
-  src/services/FullSongSeparationService.cpp
   # Native ONNX 4-stem separation (ported from SM5) — replaces Python/UVR path
   src/services/separation/OnnxSeparationProvider.h
   src/services/separation/OnnxSeparationProvider.cpp
+  # GPU (DirectML) separation: adapter probe + host iSTFT for htdemucs_body.onnx (SM5 453e7733)
+  src/services/separation/GpuAdapterProbe.h
+  src/services/separation/GpuAdapterProbe.cpp
+  src/services/separation/HtdemucsIstft.h
+  src/services/separation/HtdemucsIstft.cpp
+  src/utils/Fft.h
   # S-Mode services
   src/services/smode/SModeService.h
   src/services/smode/SModeService.cpp
@@ -270,8 +274,6 @@ set(SAMPLAR_SOURCES
   src/services/smode/PatternGenerator.cpp
   src/services/smode/SpectralFluxDetector.h
   src/services/smode/SpectralFluxDetector.cpp
-  src/services/DrumLibraryService.h
-  src/services/DrumLibraryService.cpp
   # Sample Analysis Pipeline
   src/services/analysis/TempoAnalyzer.h
   src/services/analysis/TempoAnalyzer.cpp
@@ -285,12 +287,6 @@ set(SAMPLAR_SOURCES
   src/services/analysis/OctaveCorrection.cpp
   src/services/analysis/TempoRefiner.h
   src/services/analysis/TempoRefiner.cpp
-  src/services/analysis/TempoCache.h
-  src/services/analysis/TempoCache.cpp
-  src/services/analysis/LoopDivider.h
-  src/services/analysis/LoopDivider.cpp
-  src/services/analysis/BeatAlignedSlicer.h
-  src/services/analysis/BeatAlignedSlicer.cpp
   src/services/analysis/DownbeatDetector.h
   src/services/analysis/DownbeatDetector.cpp
   src/services/LicenseSystemService.h
@@ -307,9 +303,10 @@ set(SAMPLAR_SOURCES
   src/security/LicenseCleanerUtility.cpp
   src/security/SecureSessionManager.h
   src/security/SecureSessionManager.cpp
-  src/security/SamplarVerificationKey.h
-  src/security/SignedTokenVerifier.h
-  src/security/SignedTokenVerifier.cpp
+  src/security/LicenseSignature.h
+  src/security/LicenseSignature.cpp
+  src/security/LicenseSigningKey.h
+  src/security/ClockGuard.h
   src/networking/LicenseServerClient.h
   src/networking/LicenseServerClient.cpp
   src/networking/OAuthBrowserAuthenticator.h
@@ -321,50 +318,29 @@ set(SAMPLAR_SOURCES
   src/ui/licensing/LicenseActivationDialog.cpp
   src/ui/licensing/LicenseStatusWidget.h
   src/ui/licensing/LicenseStatusWidget.cpp
-  tests/licensing/LicenseSystemTests.cpp
-  src/ui/Pages/ProcessingPage.cpp
+  src/ui/licensing/LicenseGateOverlay.h
+  src/ui/licensing/LicenseGateOverlay.cpp
   src/ui/Debug/DebugConsole.cpp
-  src/ui/Debug/DebugFlags.cpp
-  src/ui/Style/Sm5LookAndFeel.cpp
   src/ui/Style/SamplarLookAndFeel.cpp
-  src/ui/Style/DropZoneLookAndFeel.cpp
-  src/ui/Style/TransparentHoverButtonLookAndFeel.cpp
   src/app/ServiceRegistry.cpp
   src/app/EventBus.cpp
   src/app/AppState.h
   src/app/AppState.cpp
   src/utils/Tracing.h
   src/utils/Tracing.cpp
-  src/ui/Theme/EngineColorManager.h
-  src/ui/Components/SamplarAnimation.h
-  src/ui/Components/SamplarAnimation.cpp
-  src/ui/Components/MidiDragArea.h
-  src/ui/Components/MidiDragArea.cpp
+  src/utils/DeferredRelease.h
+  src/utils/DeferredRelease.cpp
   src/ui/Components/WaveDragArea.h
   src/ui/Components/WaveDragArea.cpp
-  src/ui/Components/CollapsibleSection.h
-  src/ui/Components/CollapsibleSection.cpp
   src/ui/Components/SettingsDialog.h
   src/ui/Components/SettingsDialog.cpp
-  src/ui/Components/LoadingAnimation.h
-  src/ui/Components/LoadingAnimation.cpp
-  src/ui/Components/GifAnimatedBackground.h
-  src/ui/Components/GifAnimatedBackground.cpp
   src/ui/Components/UpdateDialog.h
   src/ui/Components/UpdateDialog.cpp
   src/ui/Components/NotificationButton.h
   src/ui/Components/NotificationButton.cpp
-  # Utilities
-  src/utils/MidiFileGenerator.h
-  src/utils/MidiFileGenerator.cpp
-  # Onset detection utility (spectral flux - shared by BeatAlignedSlicer)
-  src/utils/OnsetDetector.h
-  src/utils/OnsetDetector.cpp
   # S-Mode page and components
   src/ui/Pages/SModePage.h
   src/ui/Pages/SModePage.cpp
-  src/ui/Components/smode/StemCountDialog.h
-  src/ui/Components/smode/StemCountDialog.cpp
   src/ui/Components/smode/StemWaveformComponent.h
   src/ui/Components/smode/StemWaveformComponent.cpp
   src/ui/Components/smode/SequencerSlotComponent.h
@@ -373,12 +349,6 @@ set(SAMPLAR_SOURCES
   src/ui/Components/smode/SequencerLaneComponent.cpp
   src/ui/Components/smode/SModeMidiLearnOverlay.h
   src/ui/Components/smode/SModeMidiLearnOverlay.cpp
-  # MiniBPM - BPM detection library
-  third_party/minibpm/MiniBpm.cpp
-  # Loop detection with autocorrelation
-  src/services/analysis/LoopDetector.cpp
-  # Beat Grid and Loop Boundary UI Feature
-  src/services/BeatAnalysisTypes.h
 )
 
 
@@ -397,14 +367,14 @@ juce_add_gui_app(SamplarApp
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "com.muziksociety.samplar"
-    VERSION "1.0.0"
+    VERSION "${SAMPLAR_VERSION_STRING}"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
 
 target_compile_definitions(SamplarApp PRIVATE JUCE_MODAL_LOOPS_PERMITTED=1)
 
-target_sources(SamplarApp PRIVATE ${SAMPLAR_SOURCES})
+target_sources(SamplarApp PRIVATE ${SAMPLAR_SOURCES} src/app/App.cpp)
 
 target_compile_definitions(SamplarApp
   PRIVATE
@@ -414,38 +384,22 @@ target_compile_definitions(SamplarApp
 
 # Performance optimizations: Enable SIMD (always) and fast math (Release only)
 if(MSVC)
-  # MSVC: Enable AVX2 always, optimization only in Release
-  target_compile_options(SamplarApp PRIVATE /arch:AVX2)
+  # MSVC: AVX baseline (NOT AVX2) - AVX2 emits instructions that crash with
+  # STATUS_ILLEGAL_INSTRUCTION on pre-Haswell CPUs (SM5 fix 5de0dee8).
+  target_compile_options(SamplarApp PRIVATE /arch:AVX)
   target_compile_options(SamplarApp PRIVATE $<$<CONFIG:Release>:/fp:fast>)
-  target_compile_definitions(SamplarApp PRIVATE __AVX__=1 __AVX2__=1)
-  message(STATUS "Enabled MSVC AVX2 optimizations")
+  target_compile_definitions(SamplarApp PRIVATE __AVX__=1)
+  message(STATUS "Enabled MSVC AVX optimizations")
 elseif(CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
   # GCC/Clang: Enable AVX2 always, fast math only in Release
-  target_compile_options(SamplarApp PRIVATE -mavx2 -mfma)
+  target_compile_options(SamplarApp PRIVATE -mavx)
   target_compile_options(SamplarApp PRIVATE $<$<CONFIG:Release>:-ffast-math>)
-  target_compile_definitions(SamplarApp PRIVATE __AVX__=1 __AVX2__=1)
-  message(STATUS "Enabled GCC/Clang AVX2 optimizations")
-endif()
-
-# Check for Intel IPP availability (placeholder for future)
-find_path(INTEL_IPP_INCLUDE_DIR NAMES ipp.h PATHS
-  "C:/Program Files (x86)/Intel/oneAPI/ipp/latest/include"
-  "/opt/intel/ipp/include"
-)
-if(INTEL_IPP_INCLUDE_DIR)
-  target_compile_definitions(SamplarApp PRIVATE INTEL_IPP_AVAILABLE=1)
-  target_include_directories(SamplarApp PRIVATE ${INTEL_IPP_INCLUDE_DIR})
-  message(STATUS "Intel IPP found at: ${INTEL_IPP_INCLUDE_DIR}")
-else()
-  message(STATUS "Intel IPP not found - using JUCE FFT")
+  target_compile_definitions(SamplarApp PRIVATE __AVX__=1)
+  message(STATUS "Enabled GCC/Clang AVX optimizations")
 endif()
 
 target_include_directories(SamplarApp PRIVATE src)
 target_include_directories(SamplarApp PRIVATE ${CMAKE_BINARY_DIR}/generated)
-
-if(WITH_SOUNDTOUCH AND SOUNDTOUCH_INCLUDE_DIR)
-  target_include_directories(SamplarApp PRIVATE ${SOUNDTOUCH_INCLUDE_DIR})
-endif()
 
 if(WITH_SIGNALSMITH_STRETCH)
   target_include_directories(SamplarApp PRIVATE
@@ -468,29 +422,17 @@ target_link_libraries(SamplarApp
     juce::juce_audio_devices
     juce::juce_audio_basics
     juce::juce_dsp
-    juce::juce_opengl
-    nlohmann_json::nlohmann_json
+    onnxruntime
+    samplar_pffft
 )
-
-# If Loop Tempo Estimator was made available, link it and expose a feature define
-if(LTE_FOUND)
-  target_link_libraries(SamplarApp PRIVATE loop-tempo-estimator)
-  target_include_directories(SamplarApp PRIVATE ${LTE_DIR}/include)
-  target_compile_definitions(SamplarApp PRIVATE WITH_LTE=1)
-  message(STATUS "Linked loop-tempo-estimator to SamplarApp")
-endif()
-
-# If SoundTouch was made available, link it and expose a feature define
-if(WITH_SOUNDTOUCH AND SOUNDTOUCH_TARGET)
-  target_link_libraries(SamplarApp PRIVATE ${SOUNDTOUCH_TARGET})
-  target_compile_definitions(SamplarApp PRIVATE WITH_SOUNDTOUCH=1)
-endif()
 
 # Beat This! integration on SamplarApp
 if(WITH_BEAT_THIS)
   target_link_libraries(SamplarApp PRIVATE beat_this_engine)
   target_compile_definitions(SamplarApp PRIVATE WITH_BEAT_THIS=1)
-  target_include_directories(SamplarApp PRIVATE ${BEAT_THIS_DIR}/src ${ORT_ROOT}/include)
+  target_include_directories(SamplarApp PRIVATE ${BEAT_THIS_DIR}/src)
+endif()
+if(ORT_DLL)  # ONNX Runtime (+ DirectML) runtime next to the exe - separation needs it too
 
   # Copy onnxruntime.dll next to the exe so ONNX session creation succeeds.
   add_custom_command(TARGET SamplarApp POST_BUILD
@@ -506,7 +448,9 @@ if(WITH_BEAT_THIS)
       COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_dll}" "$<TARGET_FILE_DIR:SamplarApp>/"
     )
   endforeach()
+endif()
 
+if(WITH_BEAT_THIS)
   # Copy beat_this.onnx into <exe-dir>/third_party/beat_this/models/ so
   # BeatThisDetector::resolveModelPath() finds it next to the binary.
   add_custom_command(TARGET SamplarApp POST_BUILD
@@ -519,36 +463,7 @@ if(WITH_BEAT_THIS)
   )
 endif()
 
-# Optional ZeroMQ (user-provided system install)
-if(WITH_ZEROMQ)
-  find_path(CPPZMQ_INCLUDE_DIRS NAMES zmq.hpp)
-  find_library(ZMQ_LIB NAMES libzmq zmq)
-  if(CPPZMQ_INCLUDE_DIRS AND ZMQ_LIB)
-    target_include_directories(SamplarApp PRIVATE ${CPPZMQ_INCLUDE_DIRS})
-    target_link_libraries(SamplarApp PRIVATE ${ZMQ_LIB})
-    target_compile_definitions(SamplarApp PRIVATE WITH_ZEROMQ=1)
-  else()
-    message(WARNING "WITH_ZEROMQ=ON but cppzmq/libzmq not found; IPC will be disabled.")
-  endif()
-endif()
-
-# Copy Python bridge to output directory for runtime access
-if(WIN32)
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND powershell -NoLogo -NoProfile -Command "try { Copy-Item -Recurse -Force -LiteralPath \"${CMAKE_CURRENT_SOURCE_DIR}/python_bridge\" -Destination \"$<TARGET_FILE_DIR:SamplarApp>/python_bridge\" } catch { exit 0 }"
-    COMMENT "Copying Python bridge to output directory [non-fatal]"
-  )
-else()
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      ${CMAKE_CURRENT_SOURCE_DIR}/python_bridge
-      $<TARGET_FILE_DIR:SamplarApp>/python_bridge
-    COMMENT "Copying Python bridge to output directory"
-  )
-endif()
-
-# Copy data folder (pattern databases) to output directory
-# Contains: patterns_with_rolls.json (main DB), latin_patterns.json (Latin genres), etc.
+# Copy data/ (install-location marker for DataPaths) to output directory
 if(WIN32)
   add_custom_command(TARGET SamplarApp POST_BUILD
     COMMAND powershell -NoLogo -NoProfile -Command "try { Copy-Item -Recurse -Force -LiteralPath \"${CMAKE_CURRENT_SOURCE_DIR}/data\" -Destination \"$<TARGET_FILE_DIR:SamplarApp>/data\" } catch { exit 0 }"
@@ -563,72 +478,18 @@ else()
   )
 endif()
 
-# Copy BACKGROUNDS folder (GIF animations + TILESET.png for ProcessingPage)
-# These are loaded from the filesystem at runtime � too large to embed in BinaryData.
-if(WIN32)
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND powershell -NoLogo -NoProfile -Command "try { Copy-Item -Recurse -Force -LiteralPath \"${CMAKE_CURRENT_SOURCE_DIR}/BACKGROUNDS\" -Destination \"$<TARGET_FILE_DIR:SamplarApp>/BACKGROUNDS\" } catch { exit 0 }"
-    COMMENT "Copying BACKGROUNDS to output directory [non-fatal]"
-  )
-else()
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      ${CMAKE_CURRENT_SOURCE_DIR}/BACKGROUNDS
-      $<TARGET_FILE_DIR:SamplarApp>/BACKGROUNDS
-    COMMENT "Copying BACKGROUNDS to output directory"
-  )
-endif()
-
-# Copy REF.png to output directory (app icon / branding, loaded from filesystem)
-if(WIN32)
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND powershell -NoLogo -NoProfile -Command "try { Copy-Item -Force -LiteralPath \"${CMAKE_CURRENT_SOURCE_DIR}/plugins/REF.png\" -Destination \"$<TARGET_FILE_DIR:SamplarApp>/REF.png\" } catch { exit 0 }"
-    COMMENT "Copying REF.png to output directory [non-fatal]"
-  )
-endif()
-
-# Copy Samples/ folder (includes 808 preview kit + GM drum samples)
-if(WIN32)
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND powershell -NoLogo -NoProfile -Command "try { Copy-Item -Recurse -Force -LiteralPath \"${CMAKE_CURRENT_SOURCE_DIR}/Samples\" -Destination \"$<TARGET_FILE_DIR:SamplarApp>/Samples\" } catch { exit 0 }"
-    COMMENT "Copying Samples (808 kit + GM) to output directory [non-fatal]"
-  )
-else()
-  add_custom_command(TARGET SamplarApp POST_BUILD
-    COMMAND ${CMAKE_COMMAND} -E copy_directory
-      ${CMAKE_CURRENT_SOURCE_DIR}/Samples
-      $<TARGET_FILE_DIR:SamplarApp>/Samples
-    COMMENT "Copying Samples to output directory"
-  )
-endif()
-
 endif() # SAMPLAR_BUILD_STANDALONE — end of SamplarApp standalone target block
 
 # -----------------------------------------------------------------------
 # SamplarResources — shared juce_add_binary_data target (used by both
 # SamplarApp [when enabled] and SamplarPlugin VST3). Always built.
 # -----------------------------------------------------------------------
-# Embed static resources (e.g., backdrop.png) so images are always available
+# Embedded static resources
 juce_add_binary_data(SamplarResources SOURCES
-  ${CMAKE_CURRENT_LIST_DIR}/backdrop.png
-  # REF.png removed from BinaryData � 2.4 MB pushes MSVC over heap limit.
-  # InitialPage loads it from AppData (DataPaths::getAppDataDirectory) at runtime.
-
-  # Loading animation sprite sheet (11x11 grid of 400x172 frames, 121 frames total)
-  ${CMAKE_CURRENT_LIST_DIR}/loading_spritesheet.png
-
   # In-app SAMPLAR logo (top bar). 800x525 PNG (~200 KB), generated from
   # logo.png at the repo root via assets/generate_icon.py.
   ${CMAKE_CURRENT_LIST_DIR}/assets/samplar_logo.png
 
-  # NOTE: Snake/Flappy/Shooter game assets removed (Games feature stripped from SAMPLAR)
-  # NOTE: All BACKGROUNDS/ files are NOT embedded here:
-  #   TILESET.png        22 MB  ? ~132 MB C++ source
-  #   LAVA_optimized.gif 12 MB  ? ~72 MB C++ source
-  #   CAMPO_optimized.gif 6 MB  ? ~36 MB C++ source
-  # Embedding them overflows MSVC's compiler heap (error C1060).
-  # ProcessingPage.cpp and GifAnimatedBackground.cpp load them from the
-  # BACKGROUNDS/ folder on the filesystem at runtime.
 )
 
 if (SAMPLAR_BUILD_STANDALONE)
@@ -645,7 +506,7 @@ juce_add_plugin(SamplarPlugin
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "com.muziksociety.samplar.vst3"
-    VERSION "1.0.0"
+    VERSION "${SAMPLAR_VERSION_STRING}"
     PLUGIN_MANUFACTURER_CODE Mzks
     PLUGIN_CODE Smpl
     IS_SYNTH TRUE
@@ -659,33 +520,27 @@ juce_add_plugin(SamplarPlugin
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
 
-# Plugin sources: shared SAMPLAR_SOURCES minus App.cpp, plus plugin entry points
+# Plugin sources: shared SAMPLAR_SOURCES plus plugin entry points (App.cpp is SamplarApp-only)
 target_sources(SamplarPlugin PRIVATE
     ${SAMPLAR_SOURCES}
     src/plugin/SamplarAudioProcessor.cpp
     src/plugin/SamplarAudioProcessorEditor.cpp
-)
-# Remove App.cpp from the plugin build (it has START_JUCE_APPLICATION)
-set_property(
-    SOURCE src/app/App.cpp
-    APPEND PROPERTY COMPILE_DEFINITIONS "SAMPLAR_SKIP_APP_MAIN=1"
+    src/plugin/GpuTeardownOffload.cpp
+    src/plugin/AsyncFileLogger.cpp
 )
 
+# No modal loops in the plugin: a modal loop inside a DAW can freeze the host
+# (the licence sign-in is an in-window overlay now, SM5 b0526074).
 target_compile_definitions(SamplarPlugin PRIVATE
-    JUCE_WEB_BROWSER=1
+    JUCE_WEB_BROWSER=0
     JUCE_USE_CURL=0
     JUCE_VST3_CAN_REPLACE_VST2=0
-    JUCE_MODAL_LOOPS_PERMITTED=1
 )
 
 target_include_directories(SamplarPlugin PRIVATE
     src
     ${CMAKE_BINARY_DIR}/generated
 )
-
-if(WITH_SOUNDTOUCH AND SOUNDTOUCH_INCLUDE_DIR)
-    target_include_directories(SamplarPlugin PRIVATE ${SOUNDTOUCH_INCLUDE_DIR})
-endif()
 
 if(WITH_SIGNALSMITH_STRETCH)
     target_include_directories(SamplarPlugin PRIVATE
@@ -709,25 +564,14 @@ target_link_libraries(SamplarPlugin
         juce::juce_audio_basics
         juce::juce_audio_processors
         juce::juce_dsp
-        juce::juce_opengl
-        nlohmann_json::nlohmann_json
+        onnxruntime
+        samplar_pffft
 )
-
-if(LTE_FOUND)
-    target_link_libraries(SamplarPlugin PRIVATE loop-tempo-estimator)
-    target_include_directories(SamplarPlugin PRIVATE ${LTE_DIR}/include)
-    target_compile_definitions(SamplarPlugin PRIVATE WITH_LTE=1)
-endif()
-
-if(WITH_SOUNDTOUCH AND SOUNDTOUCH_TARGET)
-    target_link_libraries(SamplarPlugin PRIVATE ${SOUNDTOUCH_TARGET})
-    target_compile_definitions(SamplarPlugin PRIVATE WITH_SOUNDTOUCH=1)
-endif()
 
 if(WITH_BEAT_THIS)
     target_link_libraries(SamplarPlugin PRIVATE beat_this_engine)
     target_compile_definitions(SamplarPlugin PRIVATE WITH_BEAT_THIS=1)
-    target_include_directories(SamplarPlugin PRIVATE ${BEAT_THIS_DIR}/src ${ORT_ROOT}/include)
+    target_include_directories(SamplarPlugin PRIVATE ${BEAT_THIS_DIR}/src)
 endif()
 
 if (SAMPLAR_ENABLE_DEV_FALLBACK)
@@ -746,9 +590,11 @@ if (SAMPLAR_ENABLE_TRACING)
 endif()
 
 if(MSVC)
-    target_compile_options(SamplarPlugin PRIVATE /arch:AVX2)
+    # AVX baseline, not AVX2: the plugin runs inside the host process, so an
+    # AVX2 instruction on an older CPU takes the whole DAW down.
+    target_compile_options(SamplarPlugin PRIVATE /arch:AVX)
     target_compile_options(SamplarPlugin PRIVATE $<$<CONFIG:Release>:/fp:fast>)
-    target_compile_definitions(SamplarPlugin PRIVATE __AVX__=1 __AVX2__=1)
+    target_compile_definitions(SamplarPlugin PRIVATE __AVX__=1)
     # Emit PDB symbols for Release builds so DAW crash dumps resolve to
     # function names. /Z7 embeds debug info inside each .obj (avoids the PDB
     # write-race that /Zi triggers with parallel compilation in JUCE plugins).
@@ -777,9 +623,15 @@ target_link_libraries(SamplarPlugin PRIVATE SamplarResources)
 # ----------------------------------------------------------------------
 if(WIN32 AND MSVC)
     target_sources(SamplarPlugin PRIVATE src/utils/OnnxDelayLoad.cpp)
+    if(TARGET SamplarApp)
+        target_sources(SamplarApp PRIVATE src/utils/OnnxDelayLoad.cpp)
+    endif()
     if(TARGET SamplarPlugin_VST3)
         target_link_options(SamplarPlugin_VST3 PRIVATE
             /DELAYLOAD:onnxruntime.dll
+            # d3d12.dll is only needed by the GPU adapter probe (GpuAdapterProbe.cpp):
+            # keep it off the DAW plugin-scan path.
+            /DELAYLOAD:d3d12.dll
             # Force-include the TLS callback, delay-load hooks, and beacon
             # at the FINAL link step. Per-TU pragmas don't propagate from
             # the static lib to the final binary, so we have to repeat them
@@ -793,6 +645,7 @@ if(WIN32 AND MSVC)
     if(TARGET SamplarApp)
         target_link_options(SamplarApp PRIVATE
             /DELAYLOAD:onnxruntime.dll
+            /DELAYLOAD:d3d12.dll
             /INCLUDE:_tls_used
             /INCLUDE:samplar_tls_callback_ptr
             /INCLUDE:__pfnDliNotifyHook2
@@ -808,13 +661,12 @@ endif()
 # Bundle layout produced:
 #   Samplar.vst3/Contents/x86_64-win/
 #     SAMPLAR.vst3        (binary - JUCE places this)
-#     SAMPLAR.map         (debug map)
-#     onnxruntime.dll     (delay-loaded by TLS callback)
-#     models/             (htdemucs.onnx + beat_this.onnx)
-#     data/               (pattern JSONs)
-#     BACKGROUNDS/        (UI animations + tilesets)
-#     Samples/            (808 + GM kit)
-#     tools/ffmpeg.exe    (audio decode for non-WAV input)
+#     SAMPLAR.map         (debug map - dev only, excluded by the installer)
+#     onnxruntime.dll     (ORT 1.19.2 DirectML build; delay-loaded, TLS preload)
+#     DirectML.dll        (1.15.1; loaded by full path before the first GPU session)
+#     models/             (htdemucs_body.onnx + beat_this.onnx)
+#   Samplar.vst3/Contents/Resources/licenses/  (ORT, DirectML, PFFFT notices)
+#     data/               (samplar_bundle.marker - install-location marker)
 #
 # Failures are non-fatal so locked files (DAW holding the VST3) don't kill
 # the build. The Inno installer is the canonical distribution path.
@@ -824,26 +676,42 @@ file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$ErrorActionPreference = 'SilentlyC
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function MakeDir([string]$d) { if (-not (Test-Path -LiteralPath $d)) { New-Item -ItemType Directory -Force -Path $d | Out-Null } }\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function CopyFile([string]$src, [string]$dst) { if (Test-Path -LiteralPath $src) { try { MakeDir (Split-Path -Parent $dst); Copy-Item -Force -LiteralPath $src -Destination $dst } catch { Write-Host \"[stage] file skip: $src\" } } }\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "function CopyTree([string]$src, [string]$dst) { if (Test-Path -LiteralPath $src) { try { MakeDir $dst; Get-ChildItem -LiteralPath $src | ForEach-Object { Copy-Item -Force -Recurse -LiteralPath $_.FullName -Destination $dst } } catch { Write-Host \"[stage] tree skip: $src\" } } }\n")
-# 1) onnxruntime.dll alongside the .vst3 binary (required for TLS preload)
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$ortHit = Get-ChildItem -Path (Join-Path $RepoRoot 'build/_deps') -Recurse -Filter 'onnxruntime.dll' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -match 'onnxruntime_prebuilt-src' } | Select-Object -First 1\n")
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "if ($ortHit) { CopyFile $ortHit.FullName (Join-Path $VstDir 'onnxruntime.dll') }\n")
-# 2) models/ - htdemucs.onnx + beat_this.onnx
+# 1) ONNX Runtime alongside the .vst3 binary (required for TLS preload). Paths are baked
+#    at configure time from the imported target - never globbed from build/_deps (a stale
+#    CPU-only DLL left there would silently disable the GPU).
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_DLL}' (Join-Path $VstDir 'onnxruntime.dll')\n")
+if(SAMPLAR_HAS_DIRECTML)
+  file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_ROOT}/lib/DirectML.dll' (Join-Path $VstDir 'DirectML.dll')\n")
+else()
+  file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$p = Join-Path $VstDir 'DirectML.dll'; if (Test-Path -LiteralPath $p) { Remove-Item -Force -LiteralPath $p }\n")
+endif()
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$p = Join-Path $VstDir 'onnxruntime_providers_shared.dll'; if (Test-Path -LiteralPath $p) { Remove-Item -Force -LiteralPath $p }\n")
+# 2) models/ - exactly ONE separation model + beat_this.onnx (the other model is removed so
+#    a stale 290 MB htdemucs.onnx never ships next to htdemucs_body.onnx)
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$modelsDst = Join-Path $VstDir 'models'\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $modelsDst\n")
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile (Join-Path $RepoRoot 'models/htdemucs.onnx')          (Join-Path $modelsDst 'htdemucs.onnx')\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile (Join-Path $RepoRoot 'models/${SAMPLAR_SEP_MODEL_NAME}') (Join-Path $modelsDst '${SAMPLAR_SEP_MODEL_NAME}')\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$p = Join-Path $modelsDst '${SAMPLAR_SEP_STALE_MODEL}'; if (Test-Path -LiteralPath $p) { Remove-Item -Force -LiteralPath $p }\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile (Join-Path $RepoRoot 'third_party/beat_this/models/beat_this.onnx') (Join-Path $modelsDst 'beat_this.onnx')\n")
-# 3) data/ - pattern JSONs (multiple candidate source locations)
+# 3) data/ - install-location marker only. SamplarAudioProcessor / DataPaths
+#    detect the resource root by the presence of data/; the old pattern JSONs
+#    (56 MB), tools/ffmpeg.exe (148 MB), BACKGROUNDS/ (148 MB) and Samples/
+#    (6 MB) had zero runtime references and are no longer staged. Remove any
+#    copies left in the bundle by older builds.
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$dataDst = Join-Path $VstDir 'data'\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $dataDst\n")
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($p in @('data/patterns_with_rolls.json','SM5_Portable_2026-02-18/data/patterns_with_rolls.json','data/latin_patterns.json','SM5_Portable_2026-02-18/data/latin_patterns.json')) { $src = Join-Path $RepoRoot $p; if (Test-Path -LiteralPath $src) { try { Copy-Item -Force -LiteralPath $src -Destination $dataDst } catch { } } }\n")
-# 4) BACKGROUNDS/
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyTree (Join-Path $RepoRoot 'BACKGROUNDS') (Join-Path $VstDir 'BACKGROUNDS')\n")
-# 5) Samples/
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyTree (Join-Path $RepoRoot 'Samples') (Join-Path $VstDir 'Samples')\n")
-# 6) tools/ffmpeg.exe (try multiple candidate locations)
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$toolsDst = Join-Path $VstDir 'tools'\n")
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $toolsDst\n")
-file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($p in @('portable_cache/ffmpeg/ffmpeg.exe','SAMPLAR_Portable/python/Scripts/ffmpeg.exe')) { $src = Join-Path $RepoRoot $p; if (Test-Path -LiteralPath $src) { CopyFile $src (Join-Path $toolsDst 'ffmpeg.exe'); break } }\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "Set-Content -LiteralPath (Join-Path $dataDst 'samplar_bundle.marker') -Value 'SAMPLAR resource root marker' -Encoding ascii\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($stale in @('data/patterns_with_rolls.json','data/latin_patterns.json','tools','BACKGROUNDS','Samples','logs')) { $p = Join-Path $VstDir $stale; if (Test-Path -LiteralPath $p) { Remove-Item -Recurse -Force -LiteralPath $p } }\n")
+# 4) third-party licenses (the DirectML redistributable license must ship with DirectML.dll)
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "$licDst = Join-Path (Split-Path -Parent $VstDir) 'Resources/licenses'\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $licDst\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_ROOT}/LICENSE' (Join-Path $licDst 'onnxruntime-LICENSE.txt')\n")
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_ROOT}/ThirdPartyNotices.txt' (Join-Path $licDst 'onnxruntime-ThirdPartyNotices.txt')\n")
+if(SAMPLAR_HAS_DIRECTML)
+  file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_ROOT}/DirectML-LICENSE.txt' (Join-Path $licDst 'DirectML-LICENSE.txt')\n")
+  file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${ORT_ROOT}/DirectML-ThirdPartyNotices.txt' (Join-Path $licDst 'DirectML-ThirdPartyNotices.txt')\n")
+endif()
+file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${SAMPLAR_PFFFT_DIR}/LICENSE.txt' (Join-Path $licDst 'pffft-LICENSE.txt')\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "exit 0\n")
 
 add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
@@ -851,6 +719,70 @@ add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
   COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
 )
 # -----------------------------------------------------------------------
+
+# -----------------------------------------------------------------------
+# VST3SmokeHost - loads the built SAMPLAR VST3 like a DAW (no DAW needed):
+# instantiate, process audio + MIDI, open/close/reopen the editor, save/restore
+# state, unload; every step timed, exit 0 = all pass. --two-instances checks
+# that one instance can be unloaded while another keeps running.
+# NOT part of ALL: build on demand with --target VST3SmokeHost.
+# (Ported from Sample Monsta 5.)
+# -----------------------------------------------------------------------
+juce_add_console_app(VST3SmokeHost PRODUCT_NAME "VST3SmokeHost")
+set_target_properties(VST3SmokeHost PROPERTIES EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_sources(VST3SmokeHost PRIVATE tools/vst3_smoke_host/VST3SmokeHost.cpp)
+target_compile_definitions(VST3SmokeHost PRIVATE
+  JUCE_PLUGINHOST_VST3=1
+  JUCE_MODAL_LOOPS_PERMITTED=1
+  JUCE_USE_CURL=0
+  JUCE_WEB_BROWSER=0
+  VST3_SMOKE_DEFAULT_PLUGIN="${CMAKE_BINARY_DIR}/SamplarPlugin_artefacts/Release/VST3/SAMPLAR.vst3")
+target_link_libraries(VST3SmokeHost PRIVATE
+  juce::juce_audio_processors
+  juce::juce_audio_utils
+  juce::juce_gui_extra
+  juce::juce_recommended_config_flags
+  juce::juce_recommended_warning_flags)
+
+# -----------------------------------------------------------------------
+# SeparationProbe - headless check of FullSongService / OnnxSeparationProvider:
+# CPU vs GPU (DirectML) timing, per-stem RMS, CPU/GPU/legacy SNR, mid-chunk cancel
+# latency, peak working set, stem cache miss/hit. NOT part of ALL:
+#   cmake --build build_dml --config Release --target SeparationProbe
+#   build_dml/SeparationProbe_artefacts/Release/SeparationProbe.exe [song.wav] [--legacy]
+# -----------------------------------------------------------------------
+juce_add_console_app(SeparationProbe PRODUCT_NAME "SeparationProbe")
+set_target_properties(SeparationProbe PROPERTIES EXCLUDE_FROM_ALL TRUE EXCLUDE_FROM_DEFAULT_BUILD TRUE)
+target_sources(SeparationProbe PRIVATE
+  tools/separation_probe/SeparationProbe.cpp
+  src/services/FullSongService.cpp
+  src/services/separation/OnnxSeparationProvider.cpp
+  src/services/separation/HtdemucsIstft.cpp
+  src/services/separation/GpuAdapterProbe.cpp
+  src/app/EventBus.cpp)
+target_include_directories(SeparationProbe PRIVATE src)
+target_compile_definitions(SeparationProbe PRIVATE
+  JUCE_USE_CURL=0
+  JUCE_WEB_BROWSER=0
+  SAMPLAR_REPO_ROOT="${CMAKE_CURRENT_SOURCE_DIR}")
+target_link_libraries(SeparationProbe PRIVATE
+  juce::juce_core
+  juce::juce_events
+  juce::juce_data_structures
+  juce::juce_audio_basics
+  juce::juce_audio_formats
+  juce::juce_dsp
+  onnxruntime
+  samplar_pffft
+  juce::juce_recommended_config_flags)
+add_custom_command(TARGET SeparationProbe POST_BUILD
+  COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_DLL}" "$<TARGET_FILE_DIR:SeparationProbe>/"
+  COMMENT "Copying ONNX Runtime next to SeparationProbe")
+if(SAMPLAR_HAS_DIRECTML)
+  add_custom_command(TARGET SeparationProbe POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different "${ORT_ROOT}/lib/DirectML.dll" "$<TARGET_FILE_DIR:SeparationProbe>/"
+    COMMENT "Copying DirectML next to SeparationProbe")
+endif()
 
 juce_add_console_app(SamplarLicenseCleaner PRODUCT_NAME "SAMPLAR License Cleaner")
 target_sources(SamplarLicenseCleaner PRIVATE
@@ -861,22 +793,18 @@ target_link_libraries(SamplarLicenseCleaner PRIVATE juce::juce_core)
 target_include_directories(SamplarLicenseCleaner PRIVATE src)
 
 # -----------------------------------------------------------------------
-# SamplarTests � Optional unit test runner (enable with -DSAMPLAR_BUILD_TESTS=ON)
+# SamplarTests - unit test runner (-DSAMPLAR_BUILD_TESTS=ON). Defined in
+# cmake/extra_qa.cmake (included at the end of this file); the tests are
+# NOT compiled into the shipping plugin.
 # -----------------------------------------------------------------------
-if (SAMPLAR_BUILD_TESTS)
-    juce_add_console_app(SamplarTests PRODUCT_NAME "SAMPLAR Tests")
-    target_sources(SamplarTests PRIVATE
-        tests/main.cpp
-        src/app/EventBus.cpp
-    )
-    target_link_libraries(SamplarTests PRIVATE
-        juce::juce_core
-        juce::juce_events
-        juce::juce_data_structures
-    )
-    target_include_directories(SamplarTests PRIVATE src)
-    target_compile_features(SamplarTests PRIVATE cxx_std_17)
-endif()
 
 
 
+
+# -----------------------------------------------------------------------
+# Per-workstream extra targets (tests / probes / tools). Each file is owned by
+# one workstream so parallel work never edits this file at the same time.
+# -----------------------------------------------------------------------
+foreach(_samplar_extra engine analysis qa persistence ui licensing)
+  include("${CMAKE_CURRENT_LIST_DIR}/cmake/extra_${_samplar_extra}.cmake" OPTIONAL)
+endforeach()

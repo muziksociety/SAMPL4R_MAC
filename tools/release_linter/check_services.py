@@ -1,168 +1,135 @@
 #!/usr/bin/env python3
 """
-SM5 Release Linter — Check #5: IService registration sync.
+SAMPLAR Release Linter - Check #5: IService registration sync.
 
-Detects classes that inherit from sm5::IService but are never registered
-with the ServiceRegistry. An IService subclass that isn't registered is
-dead code — its initialise()/shutdown() hooks never fire and the rest of
-the app can't find it via services.get("name").
+Every class deriving from samplar::IService must be either
+  - registered with the plugin's ServiceRegistry (src/plugin/SamplarAudioProcessor.cpp
+    is the shipping registration site; src/app/App.cpp is the dev-only standalone), or
+  - owned/constructed by another compiled source (e.g. SModeService owns
+    SModeSeparationService, which constructs a FullSongService per separation), or
+  - allowlisted in intentional_unregistered_services.txt.
+An IService that is registered ONLY in the standalone app is drift too: the
+VST3 (the only shipped product) would run without it.
 
-Strategy:
-  - Scan src/**/*.h for classes inheriting IService. Extract class names.
-  - Scan src/app/App.cpp AND src/plugin/SM5AudioProcessor.cpp for
-    registerService("...", std::make_unique<ClassName>(...)) patterns.
-  - A service is considered registered if it appears in EITHER
-    registration site (standalone OR plugin).
-  - Report IService subclasses with no registration site.
-
-Usage:
-    python tools/release_linter/check_services.py
-    python tools/release_linter/check_services.py --json report.json
-
-Exit codes:
-    0 = clean
-    1 = drift detected
-    2 = tool error
+Exit codes: 0 clean, 1 drift, 2 tool error.
 """
 from __future__ import annotations
+
 import argparse
 import json
 import re
 import sys
-from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
+from linter_common import REPO_ROOT, common_args, load_allowlist
+
 CODE_ROOT = REPO_ROOT / "src"
-ALLOWLIST_FILE = Path(__file__).resolve().parent / "intentional_unregistered_services.txt"
-
-# Both registration sites. A service registered in EITHER counts as wired.
-REGISTRATION_SITES = [
-    REPO_ROOT / "src" / "app" / "App.cpp",
-    REPO_ROOT / "src" / "plugin" / "SM5AudioProcessor.cpp",
-]
-
-# Also skim these for indirect wiring (service-of-services pattern).
-# Any IService subclass mentioned here by name is considered "owned by another
-# service" and therefore not strictly required to be registered standalone.
-OWNER_SITES = [
-    REPO_ROOT / "src" / "services" / "ProcessingCoordinatorService.cpp",
-    REPO_ROOT / "src" / "services" / "GeneratorService.cpp",
-    REPO_ROOT / "src" / "services" / "smode" / "SModeService.cpp",
-    REPO_ROOT / "src" / "services" / "DrumSliceService.cpp",
-]
-
-SERVICE_DECL_RE = re.compile(
-    r"class\s+(\w+)\s*:\s*public\s+IService", re.MULTILINE
-)
+PLUGIN_SITE = REPO_ROOT / "src" / "plugin" / "SamplarAudioProcessor.cpp"
+STANDALONE_SITE = REPO_ROOT / "src" / "app" / "App.cpp"
+DECL_RE = re.compile(r"class\s+(\w+)\s*(?:final\s*)?:\s*(?:public\s+\w+\s*,\s*)*public\s+IService\b")
+REGISTER_RE = re.compile(r'registerService\s*\(\s*"([^"]+)"\s*,\s*(?:std::make_unique\s*<\s*(?:samplar::)?(\w+)|std::move\s*\(\s*(\w+))')
 
 
-def discover_services() -> list[str]:
-    names: set[str] = set()
+def discover() -> dict[str, str]:
+    out: dict[str, str] = {}
     for path in CODE_ROOT.rglob("*.h"):
-        try:
-            text = path.read_text(encoding="utf-8", errors="replace")
-        except OSError:
-            continue
-        for m in SERVICE_DECL_RE.finditer(text):
-            names.add(m.group(1))
-    return sorted(names)
-
-
-def file_mentions(path: Path, name: str) -> bool:
-    if not path.exists():
-        return False
-    text = path.read_text(encoding="utf-8", errors="replace")
-    return re.search(rf"\b{re.escape(name)}\b", text) is not None
-
-
-def load_allowlist() -> set[str]:
-    if not ALLOWLIST_FILE.exists():
-        return set()
-    out: set[str] = set()
-    for line in ALLOWLIST_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            out.add(line)
+        for m in DECL_RE.finditer(path.read_text(encoding="utf-8", errors="replace")):
+            out[m.group(1)] = path.relative_to(REPO_ROOT).as_posix()
     return out
 
 
+def registrations(site) -> dict[str, str]:
+    """class -> registry name, from registerService("name", make_unique<Class>) or
+    registerService("name", std::move(var)) with `auto var = std::make_unique<Class>`."""
+    if not site.exists():
+        return {}
+    text = site.read_text(encoding="utf-8", errors="replace")
+    out: dict[str, str] = {}
+    for m in REGISTER_RE.finditer(text):
+        name, cls, var = m.group(1), m.group(2), m.group(3)
+        if var and not cls:
+            vm = re.search(rf"\b{re.escape(var)}\s*=\s*std::make_unique\s*<\s*(?:samplar::)?(\w+)", text)
+            cls = vm.group(1) if vm else None
+        if cls:
+            out[cls] = name
+    return out
+
+
+def owners(name: str, decl_header: str) -> list[str]:
+    own_stem = decl_header.rsplit("/", 1)[-1].rsplit(".", 1)[0]
+    found = []
+    for path in CODE_ROOT.rglob("*"):
+        if path.suffix not in (".cpp", ".h"):
+            continue
+        if path.stem == own_stem or path == PLUGIN_SITE or path == STANDALONE_SITE:
+            continue
+        text = path.read_text(encoding="utf-8", errors="replace")
+        if re.search(rf"\b{re.escape(name)}\s+\w+\s*[({{]|make_unique\s*<\s*(?:samplar::)?{re.escape(name)}\b|\b{re.escape(name)}\s+\w+\s*;", text):
+            found.append(path.relative_to(REPO_ROOT).as_posix())
+    return found
+
+
 def analyze() -> dict:
-    services = discover_services()
-    allow = load_allowlist()
-
-    results = []
-    missing: list[str] = []
-
-    for name in services:
-        standalone = any(file_mentions(p, name) for p in REGISTRATION_SITES[:1])
-        plugin = any(file_mentions(p, name) for p in REGISTRATION_SITES[1:])
-        owned_by = [p.name for p in OWNER_SITES if file_mentions(p, name)]
-
-        if standalone or plugin:
+    services = discover()
+    plugin = registrations(PLUGIN_SITE)
+    standalone = registrations(STANDALONE_SITE)
+    allow = load_allowlist("intentional_unregistered_services.txt")
+    results, missing = [], []
+    for name, header in sorted(services.items()):
+        own = owners(name, header)
+        if name in plugin:
             status = "OK"
-        elif owned_by:
-            status = "OWNED"  # registered indirectly via another service
+        elif own:
+            status = "OWNED"
         elif name in allow:
             status = "ALLOWED"
+        elif name in standalone:
+            status = "STANDALONE-ONLY"
+            missing.append(name)
         else:
             status = "DRIFT"
             missing.append(name)
-
-        results.append({
-            "name": name,
-            "standalone": standalone,
-            "plugin": plugin,
-            "owned_by": owned_by,
-            "status": status,
-        })
-
+        results.append({"name": name, "header": header, "plugin": plugin.get(name, ""),
+                        "standalone": standalone.get(name, ""), "owned_by": own, "status": status})
     return {
         "services_found": len(services),
         "results": results,
         "missing": missing,
+        "stale_allowlist": sorted(a for a in allow if a not in services or a in plugin),
+        "plugin_registry_names": sorted(plugin.values()),
     }
 
 
-def print_report(report: dict) -> None:
+def print_report(r: dict) -> None:
     print("=" * 70)
-    print("SM5 RELEASE LINTER — IService Registration Sync")
+    print("SAMPLAR RELEASE LINTER - IService Registration Sync")
     print("=" * 70)
-    print(f"IService subclasses discovered: {report['services_found']}")
-    print()
-    print(f"{'SERVICE':<34} {'APP':<5} {'VST':<5} STATUS")
+    print(f"{'SERVICE':<28}{'VST3 name':<16}{'standalone':<16}STATUS")
     print("-" * 70)
-    for r in report["results"]:
-        app = "yes" if r["standalone"] else "NO"
-        vst = "yes" if r["plugin"] else "NO"
-        status = r["status"]
-        if r["owned_by"]:
-            status += f" (by {r['owned_by'][0]})"
-        print(f"{r['name']:<34} {app:<5} {vst:<5} {status}")
+    for s in r["results"]:
+        extra = f" (by {', '.join(x.rsplit('/', 1)[-1] for x in s['owned_by'])})" if s["status"] == "OWNED" else ""
+        print(f"{s['name']:<28}{s['plugin'] or '-':<16}{s['standalone'] or '-':<16}{s['status']}{extra}")
     print()
-
-    if report["missing"]:
-        print(f"[MISSING] {len(report['missing'])} service(s) not registered anywhere:")
-        for n in report["missing"]:
-            print(f"  - {n}")
-        print()
-    else:
-        print("OK: every IService subclass is registered (or owned, or allowlisted).")
+    if r["missing"]:
+        print(f"[MISSING] {len(r['missing'])} service(s) not wired into the VST3: {', '.join(r['missing'])}")
+    if r["stale_allowlist"]:
+        print(f"[INFO] stale allowlist entries (prune): {', '.join(r['stale_allowlist'])}")
+    if not r["missing"]:
+        print("OK: every IService is registered in the plugin or owned by a compiled service.")
     print("=" * 70)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SM5 IService registration linter")
-    ap.add_argument("--json", type=Path)
-    ap.add_argument("--quiet", action="store_true")
+    ap = common_args(argparse.ArgumentParser(description="SAMPLAR IService registration linter"))
     args = ap.parse_args()
-
-    report = analyze()
+    try:
+        report = analyze()
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     if not args.quiet:
         print_report(report)
     if args.json:
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"Wrote JSON: {args.json}")
-
     return 1 if report["missing"] else 0
 
 

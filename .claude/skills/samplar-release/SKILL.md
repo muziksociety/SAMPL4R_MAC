@@ -1,29 +1,35 @@
 ---
 name: samplar-release
-description: Build the SAMPLAR commercial Inno Setup installer. Mandatory preflight verifies the two ONNX models (htdemucs.onnx + beat_this.onnx) are present so they can NEVER be silently omitted from a release.
+description: Build the SAMPLAR commercial Inno Setup installer. Mandatory preflight verifies the ONNX models (htdemucs_body.onnx + beat_this.onnx) and the GPU runtime (ONNX Runtime 1.19.2 DirectML build + DirectML.dll) are present with the right bits so they can NEVER be silently omitted from a release.
 ---
 
 # SAMPLAR Release Skill
 
 > **Invoke this skill any time you build the commercial installer.**
-> It enforces the contract: the installer MUST ship with both ONNX models or the build is aborted.
+> It enforces the contract: the installer MUST ship with both ONNX models and the DirectML ONNX Runtime or the build is aborted.
 
 ## The non-negotiable preflight
 
-Two model files MUST be present in the repo before producing an installer. If either is missing, **stop and fail loudly**. These are the only two things that have caused silent-broken releases in the past.
+These files MUST be present in the repo before producing an installer. If any is missing, **stop and fail loudly**. Missing models / runtimes are what caused silent-broken releases in the past.
 
-| Model | Required path (repo-relative) | Approx size |
+| File | Required path (repo-relative) | Size / sha256 |
 |---|---|---|
-| **Demucs 4-stem (audio separation)** | `models/htdemucs.onnx` | ~290 MB |
-| **Beat This! (tempo detection)** | `third_party/beat_this/models/beat_this.onnx` | ~85 MB |
+| **Demucs 4-stem body model (separation, GPU + CPU)** | `models/htdemucs_body.onnx` | 235,747,319 B, `236be9938a4ef30dd388817b87d6144a5fd7f197b3f6961a9092f9b6d0c6f2c5` |
+| **Beat This! (tempo detection)** | `third_party/beat_this/models/beat_this.onnx` | ~83 MB |
+| **ONNX Runtime 1.19.2 (DirectML build)** | `third_party/onnxruntime-directml/lib/onnxruntime.dll` | 14,321,184 B, `410de3464172dae2945a4663f274e34c59965bc8233b0411de16baab56dda1a7` |
+| **DirectML 1.15.1** | `third_party/onnxruntime-directml/lib/DirectML.dll` | 18,521,008 B, `f3b672b9fe6d8228ae978e74217a9bb1d6605643550be166eab15f1c09eddb86` |
+
+`models/htdemucs.onnx` (the old 290 MB full export) is a dev fallback only and must NOT ship: CMake stages only the body model and deletes the other one from the bundle, `samplar.iss` refuses to compile if it is in the bundle, and the installer deletes it on upgrade.
 
 ### Preflight check (run this FIRST, every time)
 
 ```powershell
 $repo = (Resolve-Path 'b:\SANTI\VST PROJECT\SAMPLAR').Path
 $required = @{
-    'Demucs htdemucs.onnx' = "$repo\models\htdemucs.onnx"
-    'Beat This! ONNX'      = "$repo\third_party\beat_this\models\beat_this.onnx"
+    'Demucs htdemucs_body.onnx' = "$repo\models\htdemucs_body.onnx"
+    'Beat This! ONNX'           = "$repo\third_party\beat_this\models\beat_this.onnx"
+    'ONNX Runtime (DirectML)'   = "$repo\third_party\onnxruntime-directml\lib\onnxruntime.dll"
+    'DirectML.dll'              = "$repo\third_party\onnxruntime-directml\lib\DirectML.dll"
 }
 $fail = $false
 foreach ($name in $required.Keys) {
@@ -47,8 +53,9 @@ if ($fail) {
 }
 ```
 
-If the preflight fails, **DO NOT** proceed. Source the missing model:
-- `htdemucs.onnx` — copy from `b:\SANTI\SAMPLE_MONSTA\sample_monsta4\Sample_monsta5\resources\models\htdemucs.onnx` (the SM5 ONNX port) OR re-export from `smank/htdemucs-onnx` on HuggingFace.
+If the preflight fails, **DO NOT** proceed. Source the missing file:
+- `htdemucs_body.onnx` — copy from `b:\SANTI\SAMPLE_MONSTA\sample_monsta4\Sample_monsta5\resources\models\htdemucs_body.onnx` OR rebuild it: `python tools/separation/split_htdemucs.py models/htdemucs.onnx models/htdemucs_body.onnx` (full export from `smank/htdemucs-onnx`).
+- `third_party/onnxruntime-directml/` — `python tools/fetch_onnxruntime_directml.py` (NuGet) OR copy the folder from `b:\SANTI\SAMPLE_MONSTA\sample_monsta4\sm5-library-p0\third_party\onnxruntime-directml`. Re-run CMake configure afterwards: it must print `ONNX Runtime 1.19.2: ...onnxruntime-directml (DirectML: TRUE)`.
 - `beat_this.onnx` — copy from `b:\SANTI\SAMPLE_MONSTA\sample_monsta4\Sample_monsta5\third_party\beat_this\models\beat_this.onnx` OR re-export from the Beat This! repo.
 
 ## Release workflow
@@ -85,7 +92,8 @@ This:
 4. Downloads `vc_redist.x64.exe` to `portable_cache\` if not already cached.
 5. Locates `ISCC.exe` (Inno Setup 6).
 6. Compiles `release_assets\installer\samplar.iss`.
-7. Output: `release_assets\installer\output\SAMPLAR-Setup-X.Y.Z.exe` (~459 MB at the time of writing).
+7. `build_installer.ps1` runs a bundle preflight (hard fail): onnxruntime.dll / DirectML.dll / htdemucs_body.onnx sha256, beat_this.onnx, data marker, licenses present; htdemucs.onnx, onnxruntime_providers_shared.dll, tools/, BACKGROUNDS/, Samples/ absent. `samplar.iss` repeats the key checks with ISPP `#error`.
+8. Output: `release_assets\installer\output\SAMPLAR-Setup-X.Y.Z.exe`.
 
 ### Step 4 — Verify the installer contains both models
 
@@ -93,7 +101,7 @@ After build, the bundle at `build\SamplarPlugin_artefacts\Release\VST3\Samplar.v
 
 ```powershell
 $bundle = 'b:\SANTI\VST PROJECT\SAMPLAR\build\SamplarPlugin_artefacts\Release\VST3\Samplar.vst3\Contents\x86_64-win\models'
-foreach ($m in 'htdemucs.onnx','beat_this.onnx') {
+foreach ($m in 'htdemucs_body.onnx','beat_this.onnx') {
     if (Test-Path "$bundle\$m") {
         $mb = [math]::Round((Get-Item "$bundle\$m").Length/1MB,1)
         Write-Host "[OK]   bundled: $m ($mb MB)"
@@ -103,7 +111,7 @@ foreach ($m in 'htdemucs.onnx','beat_this.onnx') {
 }
 ```
 
-If either is missing the installer is broken even if it compiled. Re-check the POST_BUILD step in `CMakeLists.txt` around `_SAMPLAR_VST3_STAGE_SCRIPT`.
+If either is missing the installer is broken even if it compiled. `models\htdemucs.onnx` must NOT be there, and `Contents\x86_64-win\DirectML.dll` + `onnxruntime.dll` must be. Re-check the POST_BUILD step in `CMakeLists.txt` around `_SAMPLAR_VST3_STAGE_SCRIPT`.
 
 ### Step 5 — Commit + tag
 
@@ -122,12 +130,12 @@ On a clean machine (or after uninstalling the dev VST3):
 1. Run `SAMPLAR-Setup-X.Y.Z.exe` — accepts UAC, completes silently.
 2. Confirm `C:\Program Files\Common Files\VST3\Samplar.vst3\Contents\x86_64-win\` contains:
    - `SAMPLAR.vst3` (binary)
-   - `onnxruntime.dll`
-   - `models\htdemucs.onnx`
+   - `onnxruntime.dll` + `DirectML.dll`
+   - `models\htdemucs_body.onnx` (and NO `models\htdemucs.onnx`)
    - `models\beat_this.onnx`
-   - `BACKGROUNDS\`, `Samples\`, `data\`, `tools\ffmpeg.exe`
+   - `data\` (install marker); `Contents\Resources\licenses\` (ORT, DirectML, PFFFT)
 3. Open a DAW, rescan VST3 plugins, load SAMPLAR.
-4. Drop a song in, run S-Mode separation, confirm all 4 stems produced (Vocals/Bass/Drums/Melody).
+4. Drop a song in, run S-Mode separation, confirm all 4 stems produced (Vocals/Bass/Drums/Melody). The log (`%APPDATA%\Samplar\logs`) must show `provider=DirectML (<gpu>)` on a machine with a discrete GPU (2 GB+), and `GPU: skipped (...)` + CPU elsewhere or with Settings > Audio > "Use GPU (DirectML) for stem separation" OFF. Dropping the same song again must log `stem cache HIT`.
 5. Confirm tempo detection works (Beat This! ONNX model loads + reports BPM).
 
 ## Red flags / things that have gone wrong before

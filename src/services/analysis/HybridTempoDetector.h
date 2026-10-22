@@ -6,20 +6,18 @@
 #include "TempoAnalyzer.h"
 #include "DWTTempoDetector.h"
 #include "BeatThisDetector.h"
+#include "AnalysisCancel.h"
 
 namespace samplar {
 
 /**
  * Hybrid Tempo Detector
  *
- * Combines FFT Spectral Flux and DWT-based detection methods.
- * Uses confidence-weighted merge for robust BPM estimation.
- *
- * Merge Strategy:
- * 1. Run both detectors independently
- * 2. Check if results are harmonically related (half/double time)
- * 3. If results agree (within 3%), weighted average
- * 4. If results disagree, use higher confidence or resolve harmonics
+ * 1. Beat This! neural tracker FIRST (beats, downbeats, IBI-fit tempo).
+ *    Accepted when confidence >= beatThisConfidenceFloor; DSP is skipped.
+ * 2. Fallback only (BeatThis missing / not confident): FFT spectral flux +
+ *    DWT detectors on a mono downmix, confidence-weighted / harmonic merge,
+ *    octave correction, narrow-band refinement.
  */
 class HybridTempoDetector
 {
@@ -50,6 +48,15 @@ public:
         float  correctedBPM      = 0.0f;
         float  preCorrectionBPM  = 0.0f;
         float  onsetDensityHz    = 0.0f;
+
+        // C10/C12: BeatThis beat + downbeat timestamps (empty when BeatThis is
+        // unavailable). Feed downbeats to DownbeatDetector::detectFromDownbeats.
+        std::vector<double> beatTimesSec;
+        std::vector<double> downbeatTimesSec;
+        int    beatsPerBar       = 0;     // 0 = unknown
+        bool   dspFallbackUsed   = false; // true when FFT/DWT decided the tempo
+        bool   cancelled         = false; // cancel token fired: bpm == 0, do not apply
+        float  elapsedMs         = 0.0f;
 
         juce::String getSourceName() const
         {
@@ -92,6 +99,10 @@ public:
         // No effect unless WITH_BEAT_THIS is compiled in.
         bool  useBeatThis              = true;
         float beatThisConfidenceFloor  = 0.5f; // accept neural result if conf >= this
+
+        // Diagnostics: also run the DSP detectors when BeatThis is accepted
+        // (result still BeatThis). Default off - C12: DSP is fallback only.
+        bool  alwaysRunDsp             = false;
     };
 
     HybridTempoDetector() = default;
@@ -101,15 +112,19 @@ public:
      */
     Result detect(const juce::AudioBuffer<float>& buffer,
                   double sampleRate,
-                  const Config& config = Config());
+                  const Config& config = Config(),
+                  AnalysisCancel cancel = {});
 
     /**
      * Detect BPM from file.
      */
     Result detect(const juce::File& audioFile,
-                  const Config& config = Config());
+                  const Config& config = Config(),
+                  AnalysisCancel cancel = {});
 
 private:
+    static constexpr int kMinInliersForFit = 16;
+
     TempoAnalyzer fftDetector_;
     DWTTempoDetector dwtDetector_;
     BeatThisDetector beatThisDetector_;

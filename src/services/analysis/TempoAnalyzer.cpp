@@ -1,4 +1,5 @@
 ﻿#include "TempoAnalyzer.h"
+#include "AnalysisDsp.h"
 #include <cmath>
 #include <algorithm>
 #include <numeric>
@@ -282,32 +283,13 @@ std::vector<int> TempoAnalyzer::pickOnsetPeaks(const std::vector<float>& envelop
 
 std::vector<float> TempoAnalyzer::computeAutocorrelation(const std::vector<float>& envelope)
 {
+    // C12: FFT autocorrelation (O(n log n)) instead of the O(n^2) loop.
+    // Same normalisation as before: unbiased (sum / (n - lag)), then / r[0].
     const int n = static_cast<int>(envelope.size());
-    std::vector<float> autocorr(n, 0.0f);
-
-    // Compute mean
-    const float mean = std::accumulate(envelope.begin(), envelope.end(), 0.0f) /
-                       static_cast<float>(n);
-
-    // Compute autocorrelation (normalized)
+    if (n <= 0) return {};
+    std::vector<float> autocorr = analysis::autocorrelationFFT(envelope, n - 1); // biased, r[0] = 1
     for (int lag = 0; lag < n; ++lag)
-    {
-        float sum = 0.0f;
-        for (int i = 0; i < n - lag; ++i)
-        {
-            sum += (envelope[i] - mean) * (envelope[i + lag] - mean);
-        }
-        autocorr[lag] = sum / static_cast<float>(n - lag);
-    }
-
-    // Normalize by zero-lag value
-    if (autocorr[0] > 0.0f)
-    {
-        const float norm = autocorr[0];
-        for (auto& val : autocorr)
-            val /= norm;
-    }
-
+        autocorr[static_cast<size_t>(lag)] *= static_cast<float>(n) / static_cast<float>(n - lag);
     return autocorr;
 }
 

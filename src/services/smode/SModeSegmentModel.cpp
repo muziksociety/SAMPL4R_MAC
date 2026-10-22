@@ -1,4 +1,5 @@
 ﻿#include "SModeSegmentModel.h"
+#include <cstring>
 
 namespace samplar {
 
@@ -6,13 +7,87 @@ namespace samplar {
 
 void SModeSegmentModel::clear()
 {
-    juce::Logger::writeToLog("🎵 [SModeSegmentModel] === clear ===");
+    ++contentGeneration_;
+    juce::Logger::writeToLog("🎵 [SModeSegmentModel] === clear === generation="
+                             + juce::String(static_cast<juce::int64>(contentGeneration_)));
     stems_.clear();
     undoStack_.clear();
     redoStack_.clear();
     detectedBpm_ = 0.0;
     gridOffsetSeconds_ = 0.0;
+    pendingExtra_ = juce::var();
     notifyUndoStackChanged();
+}
+
+std::shared_ptr<void> SModeSegmentModel::takeContentForRelease()
+{
+    struct Content
+    {
+        std::vector<StemData> stems;
+        std::vector<SegmentSnapshot> undo, redo;
+    };
+    auto c = std::make_shared<Content>();
+    c->stems = std::move(stems_);
+    c->undo  = std::move(undoStack_);
+    c->redo  = std::move(redoStack_);
+    clear();
+    return c;
+}
+
+void SModeSegmentModel::setExtraStateHooks(ExtraStateProvider get, ExtraStateRestorer set)
+{
+    extraGet_ = std::move(get);
+    extraSet_ = std::move(set);
+    if (extraSet_ && hasPendingExtraState())
+    {
+        const auto v = pendingExtra_;
+        pendingExtra_ = juce::var();
+        juce::Logger::writeToLog("[SModeSegmentModel] setExtraStateHooks: handing restored project UI state to the page");
+        const bool wasRestoring = restoringSnapshot_;
+        restoringSnapshot_ = true;   // the page's restore must not push undo entries
+        extraSet_(v);
+        restoringSnapshot_ = wasRestoring;
+    }
+}
+
+uint64_t SModeSegmentModel::computeSessionHash() const
+{
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](uint64_t v)
+    {
+        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFFu; h *= 1099511628211ULL; }
+    };
+    auto mixD = [&mix](double d) { uint64_t u; std::memcpy(&u, &d, sizeof(u)); mix(u); };
+    auto mixF = [&mix](float f) { uint32_t u; std::memcpy(&u, &f, sizeof(u)); mix(u); };
+
+    mix(contentGeneration_);
+    mixD(sampleRate_);
+    mixD(detectedBpm_);
+    mixD(gridOffsetSeconds_);
+    mix((uint64_t) stems_.size());
+    for (const auto& st : stems_)
+    {
+        mix((uint64_t) st.audioBuffer.getNumSamples());
+        mix((uint64_t) (st.linked ? 1 : 0) | (uint64_t) (st.solo ? 2 : 0) | (uint64_t) (st.mute ? 4 : 0));
+        mixF(st.volume);
+        mix((uint64_t) st.segments.size());
+        for (const auto& seg : st.segments)
+        {
+            mix((uint64_t) seg.startSample);
+            mix((uint64_t) seg.endSample);
+            mix((uint64_t) (int64_t) seg.midiNote);
+            const auto& fx = seg.effects;
+            mix((uint64_t) (int64_t) fx.pitchSemitones);
+            mixF(fx.volume);
+            mixF(fx.pan);
+            mixF(fx.filterCutoff);
+            mix((uint64_t) (fx.filterIsHighPass ? 1 : 0) | (uint64_t) (fx.reverse ? 2 : 0) | (uint64_t) (fx.loop ? 4 : 0));
+            mixF(fx.attackMs);
+            mixF(fx.releaseMs);
+            mix((uint64_t) (int64_t) fx.triggerMode);
+        }
+    }
+    return h;
 }
 
 void SModeSegmentModel::setStemCount(int count)
@@ -355,6 +430,200 @@ void SModeSegmentModel::restoreSnapshot(const SegmentSnapshot& snap)
     sampleRate_  = snap.sampleRate;
     if (extraSet_ && !snap.extra.isVoid())
         extraSet_(snap.extra);
+}
+
+// ── Realtime engine snapshot ─────────────────────────────────────────
+
+void SModeSegmentModel::setStemAudio(int stemIndex, juce::AudioBuffer<float>&& audio)
+{
+    auto* stem = getStem(stemIndex);
+    if (stem == nullptr) return;
+
+    auto storage = std::make_shared<juce::AudioBuffer<float>>(std::move(audio));
+    stem->audioStorage = storage;
+    stem->audioBuffer.setDataToReferTo(storage->getArrayOfWritePointers(),
+                                       storage->getNumChannels(), storage->getNumSamples());
+    juce::Logger::writeToLog("[SModeSegmentModel] setStemAudio stem=" + juce::String(stemIndex)
+        + " samples=" + juce::String(storage->getNumSamples())
+        + " ch=" + juce::String(storage->getNumChannels()) + " (shared storage)");
+}
+
+std::shared_ptr<const juce::AudioBuffer<float>> SModeSegmentModel::getSharedStemAudio(int stemIndex)
+{
+    auto* stem = getStem(stemIndex);
+    if (stem == nullptr) return nullptr;
+    auto& ab = stem->audioBuffer;
+    if (ab.getNumChannels() <= 0 || ab.getNumSamples() <= 0) return nullptr;
+
+    const auto& st = stem->audioStorage;
+    if (st != nullptr && st->getNumChannels() == ab.getNumChannels()
+        && st->getNumSamples() == ab.getNumSamples()
+        && st->getReadPointer(0) == ab.getReadPointer(0))
+        return st;
+
+    std::shared_ptr<juce::AudioBuffer<float>> storage;
+    if (st == nullptr)
+    {
+        // audioBuffer owns its samples (written directly): adopt them, no copy.
+        storage = std::make_shared<juce::AudioBuffer<float>>(std::move(ab));
+        juce::Logger::writeToLog("[SModeSegmentModel] getSharedStemAudio stem=" + juce::String(stemIndex)
+                                 + ": adopted directly-written buffer");
+    }
+    else
+    {
+        // audioBuffer no longer refers to the shared storage (replaced or copied): copy once.
+        storage = std::make_shared<juce::AudioBuffer<float>>(ab);
+        juce::Logger::writeToLog("[SModeSegmentModel] getSharedStemAudio stem=" + juce::String(stemIndex)
+                                 + ": buffer diverged from storage, copied once");
+    }
+    stem->audioStorage = storage;
+    ab.setDataToReferTo(storage->getArrayOfWritePointers(), storage->getNumChannels(), storage->getNumSamples());
+    return storage;
+}
+
+uint64_t SModeSegmentModel::computePlaybackHash() const
+{
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](uint64_t v)
+    {
+        for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFFu; h *= 1099511628211ULL; }
+    };
+    auto mixD = [&mix](double d) { uint64_t u; std::memcpy(&u, &d, sizeof(u)); mix(u); };
+    auto mixF = [&mix](float f) { uint32_t u; std::memcpy(&u, &f, sizeof(u)); mix(u); };
+
+    mix(contentGeneration_);
+    mixD(sampleRate_);
+    mix((uint64_t) stems_.size());
+    for (const auto& st : stems_)
+    {
+        const auto& ab = st.audioBuffer;
+        mix((uint64_t) (uintptr_t) (ab.getNumChannels() > 0 ? ab.getReadPointer(0) : nullptr));
+        mix((uint64_t) ab.getNumSamples());
+        mix((uint64_t) ab.getNumChannels());
+        mix((uint64_t) (st.mute ? 1 : 0) | (uint64_t) (st.solo ? 2 : 0));
+        mixF(st.volume);
+        mix((uint64_t) st.segments.size());
+        for (const auto& seg : st.segments)
+        {
+            mix((uint64_t) seg.startSample);
+            mix((uint64_t) seg.endSample);
+            mix((uint64_t) (int64_t) seg.midiNote);
+            mix((uint64_t) (seg.effects.loop ? 1 : 0));
+        }
+    }
+    return h;
+}
+
+std::shared_ptr<engine::Snapshot> SModeSegmentModel::buildPlaybackSnapshot(
+    const std::vector<engine::LaneDesc>& lanes,
+    const std::array<engine::StemOverride, engine::kMaxStems>* overrides)
+{
+    auto snap = std::make_shared<engine::Snapshot>();
+    snap->modelRate = sampleRate_ > 0.0 ? sampleRate_ : 44100.0;
+    snap->stemCount = juce::jmin((int) stems_.size(), engine::kMaxStems);
+
+    for (int s = 0; s < snap->stemCount; ++s)
+    {
+        auto& stem = stems_[(size_t) s];
+        auto& out  = snap->stems[(size_t) s];
+
+        std::shared_ptr<const juce::AudioBuffer<float>> audio = getSharedStemAudio(s);
+        // N-11: identity of the SOURCE (song generation + model buffer), kept
+        // when a host-rate resampled override replaces the read pointers.
+        out.sourceId = ((contentGeneration_ * 0x9E3779B97F4A7C15ULL)
+                        ^ (uint64_t) (uintptr_t) audio.get()) | 1u;
+        double rate = snap->modelRate;
+        if (overrides != nullptr)
+        {
+            const auto& ov = (*overrides)[(size_t) s];
+            if (ov.audio != nullptr && ov.rate > 0.0) { audio = ov.audio; rate = ov.rate; }
+        }
+
+        out.audio   = audio;
+        out.rate    = rate;
+        out.volume  = stem.volume;
+        out.audible = isStemAudible(s);
+        if (audio != nullptr && audio->getNumChannels() > 0 && audio->getNumSamples() > 0)
+        {
+            out.ch[0] = audio->getReadPointer(0);
+            out.ch[1] = audio->getNumChannels() > 1 ? audio->getReadPointer(1) : out.ch[0];
+            out.numSamples = audio->getNumSamples();
+        }
+        snap->transportLengthModel = juce::jmax(snap->transportLengthModel,
+                                                (int64_t) stem.audioBuffer.getNumSamples());
+
+        const double scale = rate / snap->modelRate;
+        snap->stemSegBase[(size_t) s] = (int) snap->segs.size();
+        for (int i = 0; i < (int) stem.segments.size(); ++i)
+        {
+            const auto& seg = stem.segments[(size_t) i];
+            engine::SegSnap ss;
+            ss.stem     = s;
+            ss.segIndex = i;
+            ss.start    = juce::jlimit((int64_t) 0, (int64_t) out.numSamples, (int64_t) std::llround((double) seg.startSample * scale));
+            ss.end      = juce::jlimit(ss.start,    (int64_t) out.numSamples, (int64_t) std::llround((double) seg.endSample * scale));
+            ss.loop     = seg.effects.loop;
+            ss.midiNote = seg.midiNote;
+            const int idx = (int) snap->segs.size();
+            snap->segs.push_back(ss);
+            if (ss.end > ss.start)
+            {
+                if (seg.midiNote >= 0 && seg.midiNote < 128)
+                    snap->noteMap[(size_t) seg.midiNote].push_back(idx);
+                snap->maxSegmentSeconds = juce::jmax(snap->maxSegmentSeconds, (double) (ss.end - ss.start) / rate);
+            }
+        }
+    }
+    for (int s = snap->stemCount; s <= engine::kMaxStems; ++s)
+        snap->stemSegBase[(size_t) s] = (int) snap->segs.size();
+
+    // Sequencer lanes -> trimmed windows in stem-buffer samples.
+    for (const auto& ld : lanes)
+    {
+        engine::LaneSnap ls;
+        ls.numCells = juce::jmax(1, ld.numCells);
+        ls.muted    = ld.muted;
+        ls.cellStart.assign((size_t) ls.numCells, -1);
+        ls.cellCover.assign((size_t) ls.numCells, -1);
+        for (int i = 0; i < (int) ld.slots.size(); ++i)
+        {
+            const auto& sd = ld.slots[(size_t) i];
+            if (sd.empty || sd.stem < 0 || sd.stem >= snap->stemCount) continue;
+            const int base = snap->stemSegBase[(size_t) sd.stem];
+            const int next = snap->stemSegBase[(size_t) sd.stem + 1];
+            if (sd.segIndex < 0 || base + sd.segIndex >= next) continue;
+            const auto& seg = snap->segs[(size_t) (base + sd.segIndex)];
+            const int64_t len = seg.end - seg.start;
+            if (len <= 0) continue;
+
+            engine::SlotSnap ss;
+            ss.stem      = sd.stem;
+            ss.segIndex  = sd.segIndex;
+            ss.slotIndex = i;
+            int64_t ts = seg.start + (int64_t) (sd.trimStart * (double) len);
+            int64_t te = seg.start + (int64_t) (sd.trimEnd * (double) len);
+            ts = juce::jlimit(seg.start, seg.end, ts);
+            te = juce::jlimit(juce::jmin(ts + 1, seg.end), seg.end, te);
+            if (te <= ts) continue;
+            ss.start      = ts;
+            ss.end        = te;
+            ss.gridCell   = juce::jlimit(0, ls.numCells - 1, sd.gridCell);
+            ss.cellSpan   = juce::jmax(1, sd.cellSpan);
+            ss.velocity   = sd.velocity;
+            ss.pitchSemis = sd.pitchSemis;
+            ss.speed      = sd.speed > 0.0f ? sd.speed : 1.0f;
+            ss.reverse    = sd.reverse;
+
+            const int slotIdx = (int) ls.slots.size();
+            ls.slots.push_back(ss);
+            if (ls.cellStart[(size_t) ss.gridCell] < 0)
+                ls.cellStart[(size_t) ss.gridCell] = slotIdx;
+            for (int c = ss.gridCell; c < juce::jmin(ls.numCells, ss.gridCell + ss.cellSpan); ++c)
+                ls.cellCover[(size_t) c] = slotIdx;
+        }
+        snap->lanes.push_back(std::move(ls));
+    }
+    return snap;
 }
 
 } // namespace samplar

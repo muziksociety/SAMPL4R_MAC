@@ -1,14 +1,20 @@
-﻿#include "SModePage.h"
+#include "SModePage.h"
 #include "../../utils/Tracing.h"
 #include "../../utils/RecentSongs.h"
 #include "../../utils/SamplarSettings.h"
 #include "../../app/ServiceLocator.h"
 #include "../../app/ServiceRegistry.h"
 #include "../../services/MidiMappingService.h"
+#include "../../services/FullSongService.h"
+#include "../../services/LicenseSystemService.h"
+#include "../licensing/LicenseActivationDialog.h"
 // SAMPLAR: removed - MentorService deleted
 #include "../../services/smode/SpectralFluxDetector.h"
 #include "../../services/analysis/HybridTempoDetector.h"
+#include "../../services/analysis/KeyDetector.h"
+#include "../../audio/engine/SegmentFx.h"
 #include "../../audio/MicroFade.h"
+#include "../../utils/DataPaths.h"
 
 namespace samplar {
 
@@ -38,215 +44,188 @@ static bool segmentHasAudio(const StemData& stem,
     return rmsDb > thresholdDb;
 }
 
+namespace
+{
+    // Drag-out WAVs must outlive the drag: most DAWs reference the dropped file
+    // in place. Write them to a persistent folder with never-reused names.
+    // (Old behaviour: fixed names in %TEMP% - collided across songs, got purged
+    // by Windows, and FileOutputStream APPENDED to the previous file.)
+    juce::File makeUniqueExportFile(const juce::String& baseName)
+    {
+        auto dir = samplar::DataPaths::getUserDataDirectory().getChildFile("exports");
+        if (!dir.isDirectory())
+            dir.createDirectory();
+        auto f = dir.getNonexistentChildFile(juce::File::createLegalFileName(baseName), ".wav", false);
+        juce::Logger::writeToLog("[SModePage] export file: " + f.getFullPathName());
+        return f;
+    }
+
+    // Runner handed to child components so their heavy jobs go through the
+    // processor-owned SModeService pool (drained on shutdown) instead of
+    // detached std::threads.
+    std::function<bool(std::function<void()>)> makeBackgroundRunner(samplar::SModeService* svc)
+    {
+        return [svc](std::function<void()> job) { return svc != nullptr && svc->runBackground(std::move(job)); };
+    }
+}
+
+namespace
+{
+    // Responsive layout constants (see plan_layout.md section 4).
+    constexpr int   kPagePad      = 8,   kBarPadX     = 8;
+    constexpr int   kBarHTall     = 64,  kBarHNormal  = 52,  kBarHShort = 44;
+    constexpr int   kPageHTall    = 900, kPageHNormal = 600;
+    constexpr int   kStripH       = 14,  kRowH        = 24,  kGap = 4, kStemGap = 4;
+    constexpr int   kStemLaneMinH = 64;
+    constexpr float kStemShare    = 0.60f;   // stems keep >= 60% of stems+sequencer
+    constexpr int   kSeqLaneGap   = 3,   kSeqLaneMinH = 64,  kSeqLaneMaxH = 112, kSeqScrollBarW = 8;
+    constexpr int   kBpmLabelW    = 36,  kRoundW      = 28,  kDawW = 64;
+
+    struct TopBarSpec { int logo, play, loop, undo, grid, bpm, key, half, dbl, lock, tap, more,
+                        loadMin, loadMax, eject, g, G; };
+    constexpr TopBarSpec kFull    { 110, 52, 60, 64, 88, 68, 66, 50, 44, 60, 50,  0, 110, 160, 32, 6, 14 };
+    constexpr TopBarSpec kMedium  {  84, 46, 52, 56, 76, 64, 58, 40, 36, 52, 44, 28,  96, 160, 30, 6, 14 };
+    constexpr TopBarSpec kCompact {  64, 40, 44, 48, 64, 60, 50,  0,  0,  0, 40, 28,  80, 120, 28, 4, 10 };
+
+    int topBarMinWidth(const TopBarSpec& s, bool full, bool withLogo, int sysW)
+    {
+        const int a = (withLogo ? s.logo + s.G : 0) + s.play + s.g + s.loop;
+        const int b = s.undo + s.g + s.undo;
+        int c = s.grid + s.g + s.bpm + s.g + s.key;
+        if (full)       c += kBpmLabelW + 4 + kRoundW + s.g + kDawW;
+        if (s.half > 0) c += s.g + s.half + s.g + s.dbl + s.g + s.lock;
+        c += s.g + s.tap;
+        if (s.more > 0) c += s.g + s.more;
+        const int d = s.loadMin + s.g + s.eject;
+        return a + s.G + b + s.G + c + s.G + d + s.G + sysW;
+    }
+
+    const char* topBarModeName(int m) { return m == 0 ? "FULL" : (m == 1 ? "MEDIUM" : "COMPACT"); }
+
+    // ---- auto-chop helpers (run on the SModeService worker pool) ----------
+    using Range = std::pair<int64_t, int64_t>;
+
+    double rangeRmsDb(const juce::AudioBuffer<float>& b, Range r)
+    {
+        const int64_t s0 = juce::jlimit((int64_t) 0, (int64_t) b.getNumSamples(), r.first);
+        const int64_t s1 = juce::jlimit(s0, (int64_t) b.getNumSamples(), r.second);
+        const int len = (int) (s1 - s0);
+        if (len <= 0 || b.getNumChannels() <= 0) return -120.0;
+        double sum = 0.0;
+        for (int ch = 0; ch < b.getNumChannels(); ++ch)
+        {
+            const float* d = b.getReadPointer(ch) + s0;
+            for (int i = 0; i < len; ++i) sum += (double) d[i] * d[i];
+        }
+        const double rms = std::sqrt(sum / ((double) len * b.getNumChannels()));
+        return rms > 0.0 ? 20.0 * std::log10(rms) : -120.0;
+    }
+
+    /** Keep at most `cap` non-silent ranges, spread over the whole song: the
+     *  candidates (time order) are split into `cap` consecutive groups and the
+     *  loudest range of each group is kept ("first N" would only cover the
+     *  intro). */
+    std::vector<Range> pickChops(const juce::AudioBuffer<float>& b, const std::vector<Range>& cands, int cap)
+    {
+        std::vector<Range> live;
+        std::vector<double> db;
+        for (const auto& r : cands)
+        {
+            const double v = rangeRmsDb(b, r);
+            if (v > -40.0) { live.push_back(r); db.push_back(v); }
+        }
+        if ((int) live.size() <= cap) return live;
+        std::vector<Range> out;
+        const int n = (int) live.size();
+        for (int gI = 0; gI < cap; ++gI)
+        {
+            const int a = (int) ((int64_t) gI * n / cap);
+            const int z = (int) ((int64_t) (gI + 1) * n / cap);
+            int best = a;
+            for (int i = a; i < z; ++i) if (db[(size_t) i] > db[(size_t) best]) best = i;
+            out.push_back(live[(size_t) best]);
+        }
+        return out;
+    }
+
+    std::vector<Range> gridCandidates(int64_t total, int64_t offset, int64_t len)
+    {
+        std::vector<Range> c;
+        if (len <= 0) return c;
+        int64_t pos = juce::jlimit((int64_t) 0, total, offset);
+        // Grid aligned to the downbeat: the intro before beat 1 is left unchopped.
+        while (pos + len <= total) { c.push_back({ pos, pos + len }); pos += len; }
+        if (total - pos > len / 4) c.push_back({ pos, total });
+        return c;
+    }
+
+    std::vector<Range> transientCandidates(const juce::AudioBuffer<float>& b, double sr, double bpm, bool phrases)
+    {
+        const int n = b.getNumSamples();
+        if (n <= 0 || b.getNumChannels() <= 0) return {};
+        std::vector<float> monoStore;
+        const float* mono = b.getReadPointer(0);
+        if (b.getNumChannels() > 1)
+        {
+            monoStore.resize((size_t) n);
+            const float* L = b.getReadPointer(0);
+            const float* Rr = b.getReadPointer(1);
+            for (int i = 0; i < n; ++i) monoStore[(size_t) i] = 0.5f * (L[i] + Rr[i]);
+            mono = monoStore.data();
+        }
+        samplar::SpectralFluxDetector::Settings st;
+        const double beatSec = bpm > 0.0 ? 60.0 / bpm : 0.5;
+        if (phrases) st.minSpacingSec = beatSec;          // vocals: phrase / word onsets, not syllables
+        samplar::SpectralFluxDetector det(st);
+        auto onsets = det.detect(mono, n, sr);
+        const int64_t maxLen = (int64_t) (4.0 * beatSec * sr);   // a chop never runs past one bar
+        const int64_t minLen = (int64_t) (0.05 * sr);
+        std::vector<Range> c;
+        for (size_t i = 0; i < onsets.size(); ++i)
+        {
+            const int64_t s0 = onsets[i];
+            int64_t s1 = i + 1 < onsets.size() ? onsets[i + 1] : (int64_t) n;
+            s1 = juce::jmin(s1, s0 + maxLen);
+            if (s1 - s0 >= minLen) c.push_back({ s0, s1 });
+        }
+        return c;
+    }
+
+    juce::String bankRangeName(int stem)
+    {
+        const int first = samplar::MidiMappingService::getStemBankFirstNote(stem);
+        if (first < 0) return {};
+        return samplar::MidiMappingService::noteNumberToName(first) + "-"
+             + samplar::MidiMappingService::noteNumberToName(first + samplar::MidiMappingService::kBankSize - 1);
+    }
+}
+
 SModePage::SModePage(EventBus& bus)
-    : bus_(bus), midiLearnOverlay_(bus)
+    : SModePage(bus, samplar::ServiceLocator::capture())
+{
+}
+
+SModePage::SModePage(EventBus& bus, const ServiceLocator::Context& ctx)
+    : bus_(bus), ctx_(ctx), midiLearnOverlay_(bus, ctx.getRegistry())
 {
     SAMPLAR_TRACE_SCOPE("page-ctor", "SModePage");
     juce::Logger::writeToLog("🎵 [SModePage] === constructor ===");
 
-    // AppState binding — persist sequencer lanes (shuffled patterns, stem dots,
-    // bars, bpm). Uses SequencerLaneComponent::captureState / restoreState which
-    // already existed for the internal undo stack, so no new lane API needed.
-    if (auto* app = samplar::ServiceLocator::getAppState())
-    {
-        stateBinding_ = std::make_unique<samplar::ScopedStateBinding>(
-            *app,
-            samplar::StateBinding {
-                juce::Identifier("smodePage"), 1,
-                // save
-                [this](juce::ValueTree& t)
-                {
-                    t.removeAllChildren(nullptr);
-                    t.setProperty("laneCount", (int) sequencerLanes_.size(), nullptr);
-                    for (int i = 0; i < (int) sequencerLanes_.size(); ++i)
-                    {
-                        if (! sequencerLanes_[i]) continue;
-                        juce::ValueTree lane("lane");
-                        lane.setProperty("index", i, nullptr);
-                        // captureState returns juce::var (DynamicObject). Store it
-                        // directly — ValueTree properties are juce::var-typed and
-                        // writeToStream round-trips DynamicObjects + arrays intact,
-                        // so there's no need (and no safety) in going through JSON.
-                        auto snap = sequencerLanes_[i]->captureState();
-                        lane.setProperty("state", snap, nullptr);
+    // This instance's services, from the Context the editor captured right
+    // after claiming the locator (review A2). Every later lookup uses these.
+    registry_ = ctx_.getRegistry();
+    appState_ = ctx_.getAppState();
+    juce::Logger::writeToLog(juce::String("[SModePage] services captured: registry=")
+                             + (registry_ != nullptr ? "ok" : "null") + " appState=" + (appState_ != nullptr ? "ok" : "null"));
 
-                        // Diagnostic: how many slots did we actually capture?
-                        int slotCount = 0;
-                        int bars = 0; int subdiv = 0;
-                        if (auto* obj = snap.getDynamicObject())
-                        {
-                            if (auto* arr = obj->getProperty("slots").getArray())
-                                slotCount = arr->size();
-                            bars   = (int) obj->getProperty("numBars");
-                            subdiv = (int) obj->getProperty("slotsPerBar");
-                        }
-                        juce::Logger::writeToLog("[smodePage-binding]   lane " + juce::String(i)
-                            + " captured: slots=" + juce::String(slotCount)
-                            + " bars=" + juce::String(bars)
-                            + " subdiv=" + juce::String(subdiv));
-                        t.appendChild(lane, nullptr);
-                    }
-                    juce::Logger::writeToLog("[smodePage-binding] saved "
-                        + juce::String((int) sequencerLanes_.size()) + " lanes");
-                },
-                // restore
-                [this](const juce::ValueTree& t)
-                {
-                    struct LaneSnap { int index; juce::var state; };
-                    std::vector<LaneSnap> snaps;
-                    for (int i = 0; i < t.getNumChildren(); ++i)
-                    {
-                        auto c = t.getChild(i);
-                        if (! c.hasType(juce::Identifier("lane"))) continue;
-                        LaneSnap s;
-                        s.index = (int) c.getProperty("index", i);
-                        s.state = c.getProperty("state");
-
-                        // Diagnostic: how many slots survived into the restore side?
-                        int slotCount = 0;
-                        if (auto* obj = s.state.getDynamicObject())
-                            if (auto* arr = obj->getProperty("slots").getArray())
-                                slotCount = arr->size();
-                        juce::Logger::writeToLog("[smodePage-binding]   lane " + juce::String(s.index)
-                            + " to-restore: slots=" + juce::String(slotCount));
-                        snaps.push_back(std::move(s));
-                    }
-
-                    sequencerLanes_.clear();
-
-                    // Two-pass restore:
-                    //   Pass 1 — add every lane as a child component.
-                    //   ---- resized() here gives each lane valid bounds so the
-                    //        lane's internal slotArea_ is populated. Without this,
-                    //        buildSlotComponents() inside restoreState() computes
-                    //        cellW from a 0-width slotArea_ and falls back to 20px,
-                    //        which renders all slots clustered at the left edge
-                    //        ("shuffle not saving" bug from 2026-04-22).
-                    //   Pass 2 — apply the saved state (this is when slot components
-                    //        get built with the correct per-cell width).
-                    for (size_t i = 0; i < snaps.size(); ++i)
-                        addSequencerLane();
-
-                    resized();
-
-                    for (size_t i = 0; i < snaps.size() && i < sequencerLanes_.size(); ++i)
-                        if (sequencerLanes_[i])
-                            sequencerLanes_[i]->restoreState(snaps[i].state);
-
-                    resized();
-                    repaint();
-
-                    juce::Logger::writeToLog("[smodePage-binding] restored "
-                        + juce::String((int) snaps.size()) + " lanes (2-pass layout)");
-                }
-            });
-
-        // ── Per-stem pitch persistence ──────────────────────────────────────
-        // Saved as a flat array of semitone values, one per stem index.
-        stemPitchBinding_ = std::make_unique<samplar::ScopedStateBinding>(
-            *app,
-            samplar::StateBinding {
-                juce::Identifier("smodeStemPitch"), 1,
-                // save: pull from MidiMappingService (it's the source of truth)
-                [this](juce::ValueTree& t)
-                {
-                    t.removeAllProperties(nullptr);
-                    samplar::MidiMappingService* midiSvc = nullptr;
-                    if (auto* reg = samplar::ServiceLocator::getRegistry())
-                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-                    for (int i = 0; i < samplar::MidiMappingService::MAX_STEMS; ++i)
-                    {
-                        const float v = midiSvc ? midiSvc->getStemPitchSemitones(i) : 0.0f;
-                        t.setProperty(juce::Identifier("p" + juce::String(i)), v, nullptr);
-                    }
-                    juce::Logger::writeToLog("[smodeStemPitch-binding] saved");
-                },
-                // restore: push into MidiMappingService AND each visible lane's knob
-                [this](const juce::ValueTree& t)
-                {
-                    samplar::MidiMappingService* midiSvc = nullptr;
-                    if (auto* reg = samplar::ServiceLocator::getRegistry())
-                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-                    for (int i = 0; i < samplar::MidiMappingService::MAX_STEMS; ++i)
-                    {
-                        const float v = (float) (double) t.getProperty(
-                            juce::Identifier("p" + juce::String(i)), 0.0);
-                        if (midiSvc) midiSvc->setStemPitchSemitones(i, v);
-                        if (i < (int) stemWaveforms_.size() && stemWaveforms_[(size_t) i])
-                            stemWaveforms_[(size_t) i]->setPitchSemitones(v);
-                    }
-                    juce::Logger::writeToLog("[smodeStemPitch-binding] restored");
-                }
-            });
-
-        // ── Per-stem MIDI-mod state persistence ─────────────────────────────
-        // Persists per-stem velocity curve + pitchBend/modWheel/aftertouch
-        // destinations and ranges. CC bindings are NOT persisted (user
-        // re-learns next session). TODO: persist ccBindings_ once a stable
-        // serialization of std::function callbacks is in place.
-        stemModBinding_ = std::make_unique<samplar::ScopedStateBinding>(
-            *app,
-            samplar::StateBinding {
-                juce::Identifier("smodeStemMod"), 1,
-                // save
-                [this](juce::ValueTree& t)
-                {
-                    t.removeAllProperties(nullptr);
-                    samplar::MidiMappingService* midiSvc = nullptr;
-                    if (auto* reg = samplar::ServiceLocator::getRegistry())
-                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-                    if (!midiSvc) return;
-                    using MM = samplar::MidiMappingService;
-                    for (int i = 0; i < MM::MAX_STEMS; ++i)
-                    {
-                        const juce::String suf = juce::String(i);
-                        t.setProperty("vc"  + suf,
-                            (int) midiSvc->getStemVelocityCurve(i), nullptr);
-                        t.setProperty("pbd" + suf,
-                            (int) midiSvc->getStemPitchBendDest(i),  nullptr);
-                        t.setProperty("mwd" + suf,
-                            (int) midiSvc->getStemModWheelDest(i),   nullptr);
-                        t.setProperty("atd" + suf,
-                            (int) midiSvc->getStemAftertouchDest(i), nullptr);
-                        t.setProperty("pbr" + suf,
-                            (double) midiSvc->getStemPitchBendRange(i),  nullptr);
-                        t.setProperty("mwr" + suf,
-                            (double) midiSvc->getStemModWheelRange(i),   nullptr);
-                        t.setProperty("atr" + suf,
-                            (double) midiSvc->getStemAftertouchRange(i), nullptr);
-                    }
-                    juce::Logger::writeToLog("[smodeStemMod-binding] saved");
-                },
-                // restore
-                [this](const juce::ValueTree& t)
-                {
-                    samplar::MidiMappingService* midiSvc = nullptr;
-                    if (auto* reg = samplar::ServiceLocator::getRegistry())
-                        midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-                    if (!midiSvc) return;
-                    using MM = samplar::MidiMappingService;
-                    for (int i = 0; i < MM::MAX_STEMS; ++i)
-                    {
-                        const juce::String suf = juce::String(i);
-                        const int vc  = (int) t.getProperty("vc"  + suf, (int) MM::VelocityCurve::Linear);
-                        const int pbd = (int) t.getProperty("pbd" + suf, (int) MM::ModDestination::Pitch);
-                        const int mwd = (int) t.getProperty("mwd" + suf, (int) MM::ModDestination::None);
-                        const int atd = (int) t.getProperty("atd" + suf, (int) MM::ModDestination::None);
-                        const float pbr = (float) (double) t.getProperty("pbr" + suf, 2.0);
-                        const float mwr = (float) (double) t.getProperty("mwr" + suf, 12.0);
-                        const float atr = (float) (double) t.getProperty("atr" + suf, 12.0);
-                        midiSvc->setStemVelocityCurve(i, (MM::VelocityCurve)  vc);
-                        midiSvc->setStemPitchBendDest (i, (MM::ModDestination) pbd);
-                        midiSvc->setStemModWheelDest  (i, (MM::ModDestination) mwd);
-                        midiSvc->setStemAftertouchDest(i, (MM::ModDestination) atd);
-                        midiSvc->setStemPitchBendRange (i, pbr);
-                        midiSvc->setStemModWheelRange  (i, mwr);
-                        midiSvc->setStemAftertouchRange(i, atr);
-                    }
-                    juce::Logger::writeToLog("[smodeStemMod-binding] restored");
-                }
-            });
-    }
+    // Persistence (review N-2): sequencer lanes, per-stem pitch and the per-stem
+    // MIDI mod state are saved ONLY in the processor's "smode" session node
+    // (<play>, SModeSession.h), which works with the editor closed. The old
+    // page bindings "smodePage", "smodeStemPitch" and "smodeStemMod" are gone:
+    // they late-drained stale values over <play> on every editor open. Old
+    // projects that only have the legacy nodes are migrated (clamped) by the
+    // processor restore. The knobs mirror the service (timerCallback).
+    juce::Logger::writeToLog("[SModePage] persistence: session node only (no page bindings)");
 
 
     // ── Top-bar additions (Phase 1 visual build-out) ────────────────────
@@ -324,11 +303,8 @@ SModePage::SModePage(EventBus& bus)
         juce::Logger::writeToLog("[SModePage] Loop toggled: " + juce::String(loopOn ? "ON" : "OFF"));
 
         // Set transport looping
-        if (auto* reg = samplar::ServiceLocator::getRegistry())
-        {
-            if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-                midiSvc->setSModeTransportLooping(loopOn);
-        }
+        if (auto* midiSvc = midiService())
+            midiSvc->setSModeTransportLooping(loopOn);
 
         // Set segment effects loop on ALL segments
         if (smodeService_)
@@ -351,47 +327,23 @@ SModePage::SModePage(EventBus& bus)
     dawSyncBtn_.setColour(juce::ToggleButton::tickColourId, juce::Colours::orange);
     dawSyncBtn_.onClick = [this]()
     {
-        bool synced = dawSyncBtn_.getToggleState();
-        juce::Logger::writeToLog("[SModePage] DAW tempo sync: " + juce::String(synced ? "ON" : "OFF"));
-        // Use the singleton-bus pattern that SampleBrowserPage uses — proven to work.
-        auto* bus = samplar::ServiceLocator::getBus();
-        if (bus == nullptr)
-        {
-            juce::Logger::writeToLog("[SModePage] DAW sync: ServiceLocator::getBus() returned null!");
-            return;
-        }
-        if (synced)
-        {
-            // Subscribe FIRST so the immediate re-publish below is captured.
-            hostTempoSub_ = bus->subscribe("host.tempo", [this](const juce::var& v) {
-                double hostBpm = static_cast<double>(v);
-                juce::Logger::writeToLog("[SModePage] host.tempo received: " + juce::String(hostBpm, 3));
-                if (hostBpm <= 0.0) return;
-                // Route through the canonical applyBpm() — same path the BPM input uses,
-                // updates display, model, grid, waveforms, and pattern engine.
-                applyBpm(hostBpm);
-            });
-            // Ask the audio thread to (re-)publish the current host BPM right now.
-            bus->publish("host.tempo.request");
-            juce::Logger::writeToLog("[SModePage] DAW sync: subscribed to host.tempo, requested re-publish");
-        }
-        else
-        {
-            if (hostTempoSub_ != 0)
-            {
-                bus->unsubscribe("host.tempo", hostTempoSub_);
-                hostTempoSub_ = 0;
-            }
-        }
+        const bool synced = dawSyncBtn_.getToggleState();
+        juce::Logger::writeToLog("[SModePage] DAW tempo sync clicked: " + juce::String(synced ? "ON" : "OFF"));
+        setDawSync(synced);
     };
 
     // Segmentation controls
     for (auto* btn : { &autoBeatBtn_, &autoBarBtn_, &auto2BarBtn_, &autoTransientBtn_,
-                        &quickAssignBtn_, &exportBtn_, &undoBtn_, &redoBtn_ })
+                        &quickAssignBtn_, &undoBtn_, &redoBtn_ })
     {
         addAndMakeVisible(btn);
         btn->setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d2d3a));
     }
+    // Auto: Bar / 2-Bar / Transient live in autoBeatBtn_'s right-click menu;
+    // these three were never laid out (0x0 but "visible") -> hide them.
+    autoBarBtn_.setVisible(false);
+    auto2BarBtn_.setVisible(false);
+    autoTransientBtn_.setVisible(false);
     addAndMakeVisible(&clearAllBtn_);
     clearAllBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xffaa1f1f));
 
@@ -412,11 +364,7 @@ SModePage::SModePage(EventBus& bus)
         juce::String label = model.peekUndoLabel();
         if (model.undo())
         {
-            // Post-undo UI refresh MUST NOT push a new undo entry — suppress push while we run it.
-            model.beginSuppressPush();
-            applyBpm(model.getDetectedTempo());
-            for (auto& wf : stemWaveforms_) wf->repaint();
-            model.endSuppressPush();
+            refreshAfterUndoRedo();
 
             flashUndoStatus("Undid: " + (label.isEmpty() ? juce::String("change") : label));
             bus_.publish("smode.undo.applied", juce::var(label));
@@ -429,10 +377,7 @@ SModePage::SModePage(EventBus& bus)
         juce::String label = model.peekRedoLabel();
         if (model.redo())
         {
-            model.beginSuppressPush();
-            applyBpm(model.getDetectedTempo());
-            for (auto& wf : stemWaveforms_) wf->repaint();
-            model.endSuppressPush();
+            refreshAfterUndoRedo();
 
             flashUndoStatus("Redid: " + (label.isEmpty() ? juce::String("change") : label));
             bus_.publish("smode.redo.applied", juce::var(label));
@@ -485,36 +430,29 @@ SModePage::SModePage(EventBus& bus)
         updateSnapState();
     };
 
-    // Auto segment — single combo button, right-click to switch mode
-    autoBeatBtn_.setButtonText("Auto: Beat");
-    autoBeatBtn_.setTooltip("Left-click: auto-segment  |  Right-click to switch mode: Beat / Bar / 2-Bar / Transient");
-    autoBeatBtn_.onClick = [this]()
-    {
-        auto text = autoBeatBtn_.getButtonText();
-        if (text == "Auto: Beat")         autoSegmentByDivision(1.0);
-        else if (text == "Auto: Bar")     autoSegmentByDivision(4.0);
-        else if (text == "Auto: 2-Bar")   autoSegmentByDivision(8.0);
-        else if (text == "Auto: Transient") autoSegmentByTransient();
-    };
+    // Auto-chop - single combo button, right-click to switch mode. Default
+    // "Smart": transients on Drums + Vocals, bars on Bass + Melody, at most
+    // kMaxChopsPerStem chops per stem, grid aligned to the detected downbeat.
+    autoBeatBtn_.onClick = [this]() { runAutoChop(autoMode_, true, "button"); };
     autoBeatBtn_.onStateChange = [this]()
     {
-        if (autoBeatBtn_.isDown() && juce::ModifierKeys::currentModifiers.isPopupMenu())
+        if (autoBeatBtn_.isDown() && juce::ModifierKeys::currentModifiers.isPopupMenu() && ! autoChopBusy_)
         {
             juce::PopupMenu menu;
-            menu.addItem(1, "Auto: Beat",      true, autoBeatBtn_.getButtonText() == "Auto: Beat");
-            menu.addItem(2, "Auto: Bar",       true, autoBeatBtn_.getButtonText() == "Auto: Bar");
-            menu.addItem(3, "Auto: 2-Bar",     true, autoBeatBtn_.getButtonText() == "Auto: 2-Bar");
-            menu.addItem(4, "Auto: Transient", true, autoBeatBtn_.getButtonText() == "Auto: Transient");
-            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&autoBeatBtn_),
-                [this](int result)
+            for (int m = 0; m <= (int) AutoMode::Transient; ++m)
+                menu.addItem(m + 1, autoModeName((AutoMode) m), true, (int) autoMode_ == m);
+            juce::Component::SafePointer<SModePage> safe(this);
+            menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&autoBeatBtn_).withDeletionCheck(*this),
+                [safe](int result)
             {
-                if (result == 1) autoBeatBtn_.setButtonText("Auto: Beat");
-                else if (result == 2) autoBeatBtn_.setButtonText("Auto: Bar");
-                else if (result == 3) autoBeatBtn_.setButtonText("Auto: 2-Bar");
-                else if (result == 4) autoBeatBtn_.setButtonText("Auto: Transient");
+                if (safe == nullptr || result <= 0) return;
+                safe->autoMode_ = (AutoMode) (result - 1);
+                safe->updateAutoButton();
+                juce::Logger::writeToLog("[SModePage] auto-chop mode -> " + autoModeName(safe->autoMode_));
             });
         }
     };
+    updateAutoButton();
     // Hide the other 3 auto buttons — merged into autoBeatBtn_
     autoBarBtn_.setVisible(false);
     auto2BarBtn_.setVisible(false);
@@ -527,134 +465,47 @@ SModePage::SModePage(EventBus& bus)
         int stemCount = model.getStemCount();
         if (stemCount == 0) return;
 
-        // Build popup menu: All Stems + each individual stem
+        if (quickAssignBusy_) return;
+
+        // Build popup menu: All Stems + each individual stem with its note bank
         juce::PopupMenu menu;
-        menu.addItem(1, "All Stems");
+        menu.addItem(1, "All Stems (each to its own bank)");
         menu.addSeparator();
         for (int s = 0; s < stemCount; ++s)
         {
             auto* stem = model.getStem(s);
             juce::String name = stem ? stem->name : ("Stem " + juce::String(s));
-            menu.addItem(s + 10, name);
+            const auto bank = bankRangeName(s);
+            menu.addItem(s + 10, name + (bank.isNotEmpty() ? "  (" + bank + ")" : juce::String()), bank.isNotEmpty());
         }
 
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&quickAssignBtn_),
-            [this](int result)
+        juce::Component::SafePointer<SModePage> safe(this);
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&quickAssignBtn_).withDeletionCheck(*this),
+            [safe](int result)
         {
-            if (result == 0) return;  // User cancelled
-            if (!smodeService_) return;
-            auto& model = smodeService_->getModel();
+            if (safe == nullptr || result == 0) return;  // page gone / user cancelled
+            auto* self = safe.getComponent();
+            if (! self->smodeService_) return;
+            auto& model = self->smodeService_->getModel();
 
             // Determine which stems to assign
             std::set<int> stemsToAssign;
             if (result == 1)
             {
                 // All stems (respecting exclusion)
-                for (int s = 0; s < model.getStemCount(); ++s)
+                for (int st = 0; st < model.getStemCount(); ++st)
                 {
-                    if (s < static_cast<int>(stemWaveforms_.size()) &&
-                        stemWaveforms_[static_cast<size_t>(s)]->excludedFromQuickAssign_)
+                    if (st < static_cast<int>(self->stemWaveforms_.size()) &&
+                        self->stemWaveforms_[static_cast<size_t>(st)]->excludedFromQuickAssign_)
                         continue;
-                    stemsToAssign.insert(s);
+                    stemsToAssign.insert(st);
                 }
             }
             else
             {
                 stemsToAssign.insert(result - 10);
             }
-
-            // Snapshot segment audio data on message thread
-            struct SegSnap { int segIdx; int64_t start, end; std::vector<std::vector<float>> ch; };
-            struct StemSnap { int stemIdx; std::vector<SegSnap> segs; };
-            std::vector<StemSnap> snapshots;
-
-            for (int s : stemsToAssign)
-            {
-                auto* stem = model.getStem(s);
-                if (!stem) continue;
-                StemSnap ss; ss.stemIdx = s;
-                for (int i = 0; i < static_cast<int>(stem->segments.size()); ++i)
-                {
-                    const auto& seg = stem->segments[static_cast<size_t>(i)];
-                    int64_t st = juce::jlimit((int64_t)0, (int64_t)stem->audioBuffer.getNumSamples(), seg.startSample);
-                    int64_t en = juce::jlimit(st, (int64_t)stem->audioBuffer.getNumSamples(), seg.endSample);
-                    int len = static_cast<int>(en - st);
-                    SegSnap seg2; seg2.segIdx = i; seg2.start = st; seg2.end = en;
-                    for (int ch = 0; ch < stem->audioBuffer.getNumChannels(); ++ch)
-                    {
-                        const float* p = stem->audioBuffer.getReadPointer(ch) + st;
-                        seg2.ch.emplace_back(p, p + len);
-                    }
-                    ss.segs.push_back(std::move(seg2));
-                }
-                snapshots.push_back(std::move(ss));
-            }
-
-            quickAssignBtn_.setEnabled(false);
-            quickAssignBtn_.setButtonText("Analyzing...");
-
-            std::thread([this, snapshots = std::move(snapshots)]() mutable
-            {
-                // Compute RMS per segment off message thread.
-                //   toAssign — segments above the silence threshold (get MIDI notes)
-                //   toDelete — segments below the threshold (get removed from the
-                //              model so the stem lane is visually clean)
-                std::vector<std::pair<int,int>> toAssign;
-                std::vector<std::pair<int,int>> toDelete;
-                for (auto& ss : snapshots)
-                {
-                    for (auto& seg : ss.segs)
-                    {
-                        double sumSq = 0.0;
-                        int total = 0;
-                        for (auto& ch : seg.ch)
-                        {
-                            for (float v : ch) sumSq += v * v;
-                            total += static_cast<int>(ch.size());
-                        }
-                        float rms = total > 0 ? static_cast<float>(std::sqrt(sumSq / total)) : 0.0f;
-                        float db = rms > 0.0f ? 20.0f * std::log10(rms) : -100.0f;
-                        if (db > -40.0f)
-                            toAssign.push_back({ ss.stemIdx, seg.segIdx });
-                        else
-                            toDelete.push_back({ ss.stemIdx, seg.segIdx });
-                    }
-                }
-
-                juce::MessageManager::callAsync([this,
-                    toAssign = std::move(toAssign),
-                    toDelete = std::move(toDelete)]()
-                {
-                    if (!smodeService_) return;
-                    auto& model = smodeService_->getModel();
-                    model.pushUndoState("Quick-assign MIDI notes");
-
-                    // Assign first (uses current indices, before any deletion).
-                    int note = 36;
-                    for (const auto& [si, segi] : toAssign)
-                    {
-                        if (note > 127) break;
-                        model.assignMidiNote(si, segi, note++);
-                    }
-
-                    // Delete silent segments in DESCENDING index order per-stem
-                    // so removal doesn't invalidate the indices of later deletions.
-                    auto sortedToDelete = toDelete;
-                    std::sort(sortedToDelete.begin(), sortedToDelete.end(),
-                        [](const auto& a, const auto& b) {
-                            return a.first == b.first ? a.second > b.second : a.first < b.first;
-                        });
-                    for (const auto& [si, segi] : sortedToDelete)
-                        model.removeSegment(si, segi);
-
-                    quickAssignBtn_.setEnabled(true);
-                    quickAssignBtn_.setButtonText("Quick Assign");
-                    juce::Logger::writeToLog("✅ [SModePage] Quick Assign: "
-                        + juce::String(toAssign.size()) + " segments assigned, "
-                        + juce::String(toDelete.size()) + " silent segments removed");
-                    for (auto& wf : stemWaveforms_) wf->repaint();
-                });
-            }).detach();
+            self->runQuickAssign(stemsToAssign);
         });
     };
 
@@ -665,8 +516,10 @@ SModePage::SModePage(EventBus& bus)
         model.pushUndoState("Clear all segments");
         for (int i = 0; i < model.getStemCount(); ++i)
             model.clearSegments(i);
+        lastAutoChopValid_ = false;
         juce::Logger::writeToLog("🎵 [SModePage] Clear All: all segments removed");
         for (auto& wf : stemWaveforms_) wf->repaint();
+        refreshInspector();
     };
 
     // MIDI controls — single combo button: cycles POLY/1SH → POLY/GATE → MONO/1SH → MONO/GATE
@@ -676,24 +529,17 @@ SModePage::SModePage(EventBus& bus)
     monoPolyBtn_.setTooltip("Click to cycle: POLY/MONO + ONE-SHOT/GATE");
     monoPolyBtn_.onClick = [this]()
     {
-        // Cycle through 4 modes
-        static int midiMode = 0;
-        midiMode = (midiMode + 1) % 4;
-        bool mono = (midiMode >= 2);
-        bool gate = (midiMode == 1 || midiMode == 3);
-
-        juce::String label = juce::String(mono ? "MONO" : "POLY") + " " + juce::String(gate ? "GATE" : "1SH");
-        monoPolyBtn_.setButtonText(label);
-
-        if (auto* reg = samplar::ServiceLocator::getRegistry())
-        {
-            if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-            {
-                midiSvc->setMonophonic(mono);
-                midiSvc->setSampleGateMode(gate);
-                juce::Logger::writeToLog("[SModePage] MIDI mode: " + label);
-            }
-        }
+        // Cycle POLY/1SH -> POLY/GATE -> MONO/1SH -> MONO/GATE. B25: the mode
+        // lives in this instance's engine (no function-local static shared
+        // by every plugin instance); the label always mirrors the engine.
+        auto* midiSvc = midiService();
+        if (midiSvc == nullptr) return;
+        const int cur  = (midiSvc->isMonophonic() ? 2 : 0) + (midiSvc->isSampleGateMode() ? 1 : 0);
+        const int next = (cur + 1) % 4;
+        midiSvc->setMonophonic(next >= 2);
+        midiSvc->setSampleGateMode(next == 1 || next == 3);
+        updateMonoPolyLabel();
+        juce::Logger::writeToLog("[SModePage] MIDI mode: " + monoPolyBtn_.getButtonText());
     };
 
     // trigModeBtn_ hidden — merged into monoPolyBtn_
@@ -701,15 +547,13 @@ SModePage::SModePage(EventBus& bus)
 
     // LINK ALL button — syncs zoom/scroll/segments across all stems
     addAndMakeVisible(linkAllBtn_);
-    linkAllBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d6d3a));
     linkAllBtn_.setClickingTogglesState(true);
-    linkAllBtn_.setToggleState(true, juce::dontSendNotification);
+    updateLinkAllButton();   // B16: OFF by default - every stem is its own sampler
     linkAllBtn_.onClick = [this]()
     {
         if (smodeService_) smodeService_->getModel().pushUndoState("Link all stems");
         linkAllActive_ = linkAllBtn_.getToggleState();
-        linkAllBtn_.setColour(juce::TextButton::buttonColourId,
-                              linkAllActive_ ? juce::Colour(0xff2d6d3a) : juce::Colour(0xff2d2d3a));
+        updateLinkAllButton();
 
         // When Link All is ON, set all stems as linked in the model.
         // When OFF, clear all stems so individual L buttons start from a clean slate.
@@ -748,9 +592,20 @@ SModePage::SModePage(EventBus& bus)
     };
     bpmInput_.onFocusLost = [this]()
     {
+        // B24: focus changes alone must not push "BPM change" entries.
         double val = bpmInput_.getText().getDoubleValue();
-        if (val >= 30.0 && val <= 300.0) applyBpm(val);
+        if (val >= 30.0 && val <= 300.0 && std::abs(val - detectedBpm_) > 0.005) applyBpm(val);
     };
+
+    addAndMakeVisible(keyLabel_);
+    keyLabel_.setFont(juce::FontOptions(13.0f, juce::Font::bold));
+    keyLabel_.setColour(juce::Label::textColourId, juce::Colour(0xffffd54f));
+    keyLabel_.setColour(juce::Label::backgroundColourId, juce::Colour::fromString("ff21262D"));
+    keyLabel_.setColour(juce::Label::outlineColourId, juce::Colour::fromString("ff30363D"));
+    keyLabel_.setJustificationType(juce::Justification::centred);
+    keyLabel_.setMinimumHorizontalScale(0.6f);
+    keyLabel_.setInterceptsMouseClicks(true, false);   // tooltip
+    setKeyText("--", "Musical key (detected on the Melody + Bass stems after a song loads)");
 
     addAndMakeVisible(bpmRoundBtn_);
     bpmRoundBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromString("ff30363D"));
@@ -787,11 +642,12 @@ SModePage::SModePage(EventBus& bus)
     {
         if (smodeService_) smodeService_->getModel().pushUndoState("Grid lock");
         gridLocked_ = !gridLocked_;
-        gridLockBtn_.setButtonText(gridLocked_ ? "LOCKED" : "LOCK");
-        gridLockBtn_.setColour(juce::TextButton::buttonColourId,
-                               gridLocked_ ? juce::Colour(0xffb35900) : juce::Colour::fromString("ff21262D"));
         if (gridLocked_)
             lockedBpm_ = detectedBpm_;
+        else
+            lockSemis_ = 0;   // unlocking drops the transpose
+        applyLockTranspose();
+        updateGridLockButton();
         juce::Logger::writeToLog("[SModePage] Grid lock: " + juce::String(gridLocked_ ? "LOCKED" : "UNLOCKED")
                                  + " at " + juce::String(lockedBpm_, 2) + " BPM");
     };
@@ -831,9 +687,12 @@ SModePage::SModePage(EventBus& bus)
 
         // Flash the button color briefly
         tapTempoBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff4a9d4a));
-        juce::Timer::callAfterDelay(100, [this]()
+        // Local first: MSVC mis-resolves `this` inside a nested lambda's init-capture.
+        juce::Component::SafePointer<SModePage> safeTap(this);
+        juce::Timer::callAfterDelay(100, [safeTap]()
         {
-            tapTempoBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromString("ff21262D"));
+            if (safeTap == nullptr) return;
+            safeTap->tapTempoBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromString("ff21262D"));
         });
     };
 
@@ -853,7 +712,9 @@ SModePage::SModePage(EventBus& bus)
         int picked = divisionCombo_.getSelectedId();
         if (picked > 0) setGridDivision(picked);
     };
-    setGridDivision(currentGridDivision_);  // Initialize combo selection + propagate
+    // Show the current division right away (setGridDivision() returns early
+    // when the value is unchanged, so the combo used to stay blank).
+    divisionCombo_.setSelectedId(currentGridDivision_, juce::dontSendNotification);
 
     // Controller area label (placeholder)
     addAndMakeVisible(controllerAreaLabel_);
@@ -869,26 +730,20 @@ SModePage::SModePage(EventBus& bus)
         auto& model = smodeService_->getModel();
         model.pushUndoState("MIDI learn");
 
-        // When LINK ALL is active, assign the same note to the same segment index
-        // on ALL stems — so one key triggers all stems' corresponding segment together
-        if (linkAllActive_)
+        if (model.getSegment(stemIdx, segIdx) == nullptr) return;   // chop gone meanwhile
+        model.assignMidiNote(stemIdx, segIdx, noteNumber);
+        juce::Logger::writeToLog("[SModePage] MIDI Learn assigned: stem=" + juce::String(stemIdx)
+                                 + " seg=" + juce::String(segIdx) + " note=" + juce::String(noteNumber)
+                                 + " (" + samplar::MidiMappingService::noteNumberToName(noteNumber) + ")");
+        // Explicitly linked stems layer: the chop at the SAME TIME on each
+        // linked stem gets the note too (B16: link by time, never by index).
+        for (const auto& [ls, lseg] : linkedSegmentsAt(stemIdx, segIdx))
         {
-            for (int s = 0; s < model.getStemCount(); ++s)
-            {
-                auto* stem = model.getStem(s);
-                if (stem && segIdx < static_cast<int>(stem->segments.size()))
-                    model.assignMidiNote(s, segIdx, noteNumber);
-            }
-            juce::Logger::writeToLog("✅ [SModePage] MIDI Learn (LINK ALL): note=" + juce::String(noteNumber)
-                                     + " assigned to seg " + juce::String(segIdx) + " on ALL stems");
-        }
-        else
-        {
-            model.assignMidiNote(stemIdx, segIdx, noteNumber);
-            juce::Logger::writeToLog("✅ [SModePage] MIDI Learn assigned: stem=" + juce::String(stemIdx)
-                                     + " seg=" + juce::String(segIdx) + " note=" + juce::String(noteNumber));
+            model.assignMidiNote(ls, lseg, noteNumber);
+            juce::Logger::writeToLog("[SModePage]   linked layer: stem=" + juce::String(ls) + " seg=" + juce::String(lseg));
         }
         for (auto& wf : stemWaveforms_) wf->repaint();
+        refreshInspector();
     };
 
     // Sequencer: + SEQ and Smart Fill buttons
@@ -945,103 +800,50 @@ SModePage::SModePage(EventBus& bus)
         juce::Logger::writeToLog("[SModePage] spaceKeyAction_ -> sequencer-all (Play All button)");
     };
 
-    // Chain button kept in code but hidden from UI
-    playChainBtn_.setVisible(false);
-
-    // Stop button hidden — Play All toggles play/stop
-    stopAllSeqBtn_.setVisible(false);
-
     addAndMakeVisible(dragSeqWavArea_);
     dragSeqWavArea_.setHasContent(true);
-    dragSeqWavArea_.onCanRender = [this]() { return !sequencerLanes_.empty(); };
-    dragSeqWavArea_.onRenderPattern = [this](double& outSampleRate,
+    dragSeqWavArea_.onCanRender = [this]()
+    {
+        if (auto* m = midiService()) pushLanesToEngine(*m);   // message thread: latest lanes
+        return !sequencerLanes_.empty();
+    };
+    dragSeqWavArea_.onRenderPattern = [target = renderTarget_](double& outSampleRate,
         std::function<void(float)> progressCb) -> std::unique_ptr<juce::AudioBuffer<float>>
     {
-        if (!smodeService_) return nullptr;
-        auto& model = smodeService_->getModel();
-        double modelSr = model.getSampleRate();
-        if (modelSr <= 0.0) modelSr = 44100.0;
-        outSampleRate = modelSr;
-        double bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
-        double samplesPerBeat = (60.0 / bpm) * modelSr;
-
-        int maxCells = 0;
-        int numCh = 2;
-        for (auto& lane : sequencerLanes_)
-        {
-            if (lane->isMuted()) continue;
-            maxCells = juce::jmax(maxCells, lane->getNumBars() * 4);
-            for (const auto& slot : lane->getSlots())
-            {
-                if (slot.empty) continue;
-                auto* stem = model.getStem(slot.stemIndex);
-                if (stem) { numCh = stem->audioBuffer.getNumChannels(); break; }
-            }
-        }
-        if (maxCells <= 0) return nullptr;
-
-        int64_t totalSmp = static_cast<int64_t>(maxCells * samplesPerBeat);
-        auto buf = std::make_unique<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSmp));
-        buf->clear();
-
-        int totalSlots = 0;
-        for (auto& lane : sequencerLanes_)
-            if (!lane->isMuted()) totalSlots += static_cast<int>(lane->getSlots().size());
-
-        int processed = 0;
-        for (auto& lane : sequencerLanes_)
-        {
-            if (lane->isMuted()) continue;
-            for (const auto& slot : lane->getSlots())
-            {
-                if (slot.empty) { ++processed; continue; }
-                auto* stem = model.getStem(slot.stemIndex);
-                auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-                if (!stem || !seg || seg->getLengthSamples() <= 0) { ++processed; continue; }
-
-                const auto& srcBuf = stem->audioBuffer;
-                int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-                int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
-                int64_t segLen = segEnd - segStart;
-
-                int64_t writePos = static_cast<int64_t>(slot.gridCell * samplesPerBeat);
-                int64_t cellDur = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-                int64_t trimStart = segStart + static_cast<int64_t>(slot.trimStart * segLen);
-                int64_t trimEnd = segStart + static_cast<int64_t>(slot.trimEnd * segLen);
-                trimStart = juce::jlimit(segStart, segEnd, trimStart);
-                trimEnd = juce::jlimit(trimStart + 1, segEnd, trimEnd);
-                int copyLen = static_cast<int>(juce::jmin(trimEnd - trimStart, cellDur));
-
-                if (copyLen > 0 && writePos + copyLen <= totalSmp)
-                {
-                    int chCopy = juce::jmin(numCh, srcBuf.getNumChannels());
-                    for (int ch = 0; ch < chCopy; ++ch)
-                        buf->addFrom(ch, static_cast<int>(writePos), srcBuf, ch,
-                                      static_cast<int>(trimStart), copyLen, slot.velocity);
-                }
-                ++processed;
-                if (progressCb) progressCb(static_cast<float>(processed) / juce::jmax(1, totalSlots));
-            }
-        }
-        return buf;
+        // WaveDragArea worker thread: never touches the page. Every lane is
+        // rendered by the realtime engine itself (pitch, speed, reverse,
+        // fades, velocity identical to playback - B26).
+        auto* svc = target->svc.load();
+        const uint32_t mask = target->allMask.load();
+        if (svc == nullptr || mask == 0) return nullptr;
+        return svc->renderSequencerOffline(mask, outSampleRate, std::move(progressCb));
     };
+
+    // 30 Hz UI timer: transport playhead, sequencer playhead / playing slot,
+    // lane -> engine sync. The sequencer clock itself is on the audio thread.
+    startTimerHz(30);
 
     // Tooltips for every button
     transportBtn_.setTooltip("Play / Stop transport (Spacebar)");
-    autoBeatBtn_.setTooltip("Left-click: auto-segment  |  Right-click to switch mode: Beat / Bar / 2-Bar / Transient");
     autoBarBtn_.setTooltip("Auto-segment by bar (4 beats per segment)");
     auto2BarBtn_.setTooltip("Auto-segment by 2 bars (8 beats per segment)");
     autoTransientBtn_.setTooltip("Auto-segment by transient detection");
     snapToggle_.setTooltip("Snap segment edges to grid lines");
     freeformToggle_.setTooltip("Draw segments freely without snapping");
-    quickAssignBtn_.setTooltip("Auto-assign MIDI notes (C1+) to all segments");
+    quickAssignBtn_.setTooltip("Map each stem's chops to its own 16-note bank: Vocals " + bankRangeName(0)
+                               + ", Bass " + bankRangeName(1) + ", Drums " + bankRangeName(2)
+                               + ", Melody " + bankRangeName(3) + " (C3 = middle C = MIDI 60). "
+                               "Computer keyboard: A..; plays, Z / X shifts the octave.");
     clearAllBtn_.setTooltip("Remove all segments from all stems");
-    exportBtn_.setTooltip("Export all segments as individual WAV files");
-    monoPolyBtn_.setTooltip("Toggle monophonic (one voice) / polyphonic (multiple voices)");
+    monoPolyBtn_.setTooltip("Click to cycle POLY/MONO + 1SH (play to the end) / GATE (stop on note-off). "
+                            "A chop's own trigger setting in the inspector overrides 1SH/GATE.");
+    updateMonoPolyLabel();   // B25: mirror this instance's engine (it outlives the editor)
     trigModeBtn_.setTooltip("Toggle One-Shot (play full sample) / Gate (play while held)");
-    linkAllBtn_.setTooltip("Link all stems: zoom, scroll, and segment together");
+    linkAllBtn_.setTooltip("LINK ALL (layer): stems share zoom/scroll and chop edits, and a chop plays "
+                           "together with the chops at the same time on the other stems. Off = every stem is its own sampler.");
     bpmInput_.setTooltip("Type BPM value and press Enter");
-    gridLockBtn_.setTooltip("Lock grid: BPM changes transpose pitch instead of re-segmenting");
+    gridLockBtn_.setTooltip("Lock grid: BPM changes transpose every stem (12 x log2 of the tempo ratio) "
+                            "instead of moving the grid");
     tapTempoBtn_.setTooltip("Tap repeatedly to set tempo by rhythm");
     bpmRoundBtn_.setTooltip("Round BPM to nearest whole number");
     halfTempoBtn_.setTooltip("Halve the tempo (wider grid)");
@@ -1050,6 +852,38 @@ SModePage::SModePage(EventBus& bus)
     smartFillBtn_.setTooltip("Analyze segment audio and auto-fill 3 lanes (Drums / Bass / Melodic)");
     undoBtn_.setTooltip("Undo last action (Ctrl+Z)");
     redoBtn_.setTooltip("Redo last undone action (Ctrl+Y)");
+
+    // Tempo overflow menu ("...") - holds the tempo controls the bar hides at MEDIUM / COMPACT width.
+    addAndMakeVisible(tempoMoreBtn_);
+    tempoMoreBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour::fromString("ff21262D"));
+    tempoMoreBtn_.setTooltip("More tempo options");
+    tempoMoreBtn_.onClick = [this]() { showTempoOverflowMenu(); };
+
+    // Sequencer collapse toggle - stems get the space back when collapsed.
+    addAndMakeVisible(seqCollapseBtn_);
+    seqCollapseBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d2d3a));
+    seqCollapseBtn_.setTooltip("Show / hide the sequencer lanes");
+    seqCollapseBtn_.onClick = [this]()
+    {
+        seqCollapsed_ = ! seqCollapsed_;
+        updateSeqCollapseButton();
+        juce::Logger::writeToLog("[SModePage] sequencer " + juce::String(seqCollapsed_ ? "collapsed" : "expanded"));
+        resized();
+    };
+    updateSeqCollapseButton();
+
+    // Sequencer lanes live in a scrollable viewport (stems never scroll).
+    addChildComponent(seqViewport_);
+    seqViewport_.setViewedComponent(&seqContent_, false);
+    seqViewport_.setScrollBarsShown(true, false);
+    seqViewport_.setScrollBarThickness(kSeqScrollBarW);
+
+    // Legacy header widgets replaced by logo / big play button.
+    titleLabel_.setVisible(false);
+    trackNameLabel_.setVisible(false);
+    bpmLabel_.setVisible(false);
+    transportBtn_.setVisible(false);
+    controllerAreaLabel_.setVisible(false);
 
     // LOAD SONG button — primary entry point for S-Mode separation
     // (also accepts drag-drop via FileDragAndDropTarget)
@@ -1067,18 +901,59 @@ SModePage::SModePage(EventBus& bus)
     ejectBtn_.setVisible(false);  // hidden until stems load
     ejectBtn_.onClick = [this]() { unloadCurrentAudio(); };
 
+    // Per-chop inspector strip (lower tool area). Disabled until a chop is selected.
+    addAndMakeVisible(chopInspector_);
+    chopInspector_.onEditBegin = [this]()
+    {
+        if (smodeService_ != nullptr && findInspectorSegment() >= 0)
+            smodeService_->getModel().pushUndoState("Chop settings");
+    };
+    chopInspector_.onValuesChanged = [this](const ChopInspectorStrip::Values& v)
+    {
+        if (smodeService_ == nullptr) return;
+        const int seg = findInspectorSegment();
+        if (seg < 0) { refreshInspector(); return; }
+        auto& model = smodeService_->getModel();
+        auto fx = model.getSegmentEffects(inspStem_, seg);
+        fx.pitchSemitones = v.pitchSemis;
+        fx.volume  = ChopInspectorStrip::gainDbToLinear(v.gainDb);
+        fx.pan     = v.pan;
+        fx.reverse = v.reverse;
+        samplar::engine::setTriggerMode(fx, v.trigger);
+        samplar::engine::setAttackMs(fx, v.attackMs);
+        samplar::engine::setReleaseMs(fx, v.releaseMs);
+        model.setSegmentEffects(inspStem_, seg, fx);
+        if (auto* m = midiService()) m->syncSnapshotNow();   // next trigger already uses it
+        if (inspStem_ >= 0 && inspStem_ < (int) stemWaveforms_.size())
+            stemWaveforms_[(size_t) inspStem_]->repaint();
+        if (auto* app = appState_) app->markDirty();
+    };
+    chopInspector_.onMidiMenu = [this](const juce::String& param, juce::Component& anchor)
+    {
+        showMidiLearnMenu(inspectorCcTarget(param), "Selected chop " + param, anchor);
+    };
+    if (auto* midiSvc = midiService())
+    {
+        // The inspector controls are CC targets while this page exists; a bound
+        // CC with the editor closed is kept (inert) and saved with the project.
+        juce::Component::SafePointer<SModePage> safeInsp(this);
+        for (const auto& param : ChopInspectorStrip::midiParams())
+            midiSvc->registerCcTarget(inspectorCcTarget(param), [safeInsp, param](float v)
+            {
+                if (safeInsp != nullptr) safeInsp->applyInspectorCc(param, v);
+            });
+        juce::Logger::writeToLog("[SModePage] chop inspector CC targets registered: "
+                                 + juce::String(ChopInspectorStrip::midiParams().size()));
+    }
+
     // Empty-state overlay — sits on top of all other children
     addAndMakeVisible(loadAudioOverlay_);
     loadAudioOverlay_.onLoad = [this]() { openLoadAudioChooser(); };
     loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
     loadAudioOverlay_.onLoadRecent = [this](const juce::File& f) {
         if (!f.existsAsFile()) return;  // overlay handles missing entries itself
-        juce::Logger::writeToLog("[SModePage] " + juce::String(juce::CharPointer_UTF8("\xf0\x9f\x93\x81"))
-                                 + " recent click: " + f.getFullPathName());
-        samplar::RecentSongs::push(f);  // bumps it back to the top
-        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
-        if (onRequestSeparation)
-            onRequestSeparation(f);
+        juce::Logger::writeToLog("[SModePage] recent click: " + f.getFullPathName());
+        requestLoadFile(f, "recent");
     };
     loadAudioOverlay_.onLoadFile = [this](const juce::File& f) {
         if (!f.existsAsFile()) {
@@ -1086,19 +961,256 @@ SModePage::SModePage(EventBus& bus)
                                      + f.getFullPathName());
             return;
         }
-        juce::Logger::writeToLog("[SModePage] "
-            + juce::String(juce::CharPointer_UTF8("\xf0\x9f\x93\x81"))
-            + " drag-drop load: " + f.getFullPathName());
-        samplar::RecentSongs::push(f);
-        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
-        if (onRequestSeparation)
-            onRequestSeparation(f);
+        juce::Logger::writeToLog("[SModePage] drag-drop load: " + f.getFullPathName());
+        requestLoadFile(f, "overlay drop");
     };
     loadAudioOverlay_.setVisible(true);   // start visible (no audio loaded yet)
+    updateAudioDependentControls();
 
     // Register as KeyListener so spacebar/shortcuts work regardless of which child has focus
     addKeyListener(this);
     setWantsKeyboardFocus(true);
+
+    // Debug-only layout self-test (inert unless SAMPLAR_UI_SWEEP_DIR is set).
+    {
+        SModeUiSelfTest::Callbacks cb;
+        juce::Component::SafePointer<SModePage> safe(this);
+        cb.loadSynthetic = [safe]() { if (safe != nullptr) safe->debugLoadSyntheticStems(); };
+        cb.loadLong      = [safe](double seconds) { if (safe != nullptr) safe->debugLoadSyntheticStems(seconds); };
+        cb.notice        = [safe](const juce::String& kind)
+        {
+            if (safe == nullptr) return;
+            if (kind == "missing")
+                safe->showMissingAudioNotice("Audio missing: the song 'My Song (final mix 3) - extended version.wav' and its saved "
+                                             "stems were not found. Your chops are kept; load the song again to relink them.");
+            else if (kind == "unavailable")
+                safe->showSeparationUnavailableNotice();
+            else if (kind == "signin")
+                safe->showSignInRequiredNotice();
+            else
+                safe->hideNotice();
+        };
+        cb.unload        = [safe]() { if (safe != nullptr && safe->audioLoaded_) safe->unloadCurrentAudio(); };
+        cb.setSeqLanes   = [safe](int n)
+        {
+            if (safe == nullptr) return;
+            while ((int) safe->sequencerLanes_.size() < n)
+            {
+                const auto before = safe->sequencerLanes_.size();
+                safe->addSequencerLane();
+                if (safe->sequencerLanes_.size() == before) break;
+            }
+            while ((int) safe->sequencerLanes_.size() > juce::jmax(0, n))
+                safe->removeSequencerLane((int) safe->sequencerLanes_.size() - 1);
+        };
+        cb.setCollapsed  = [safe](bool c)
+        {
+            // Same effect as clicking seqCollapseBtn_ (a click would be ignored
+            // while the root is disabled behind the licence panel).
+            if (safe == nullptr || safe->seqCollapsed_ == c) return;
+            safe->seqCollapsed_ = c;
+            safe->updateSeqCollapseButton();
+            safe->resized();
+        };
+        cb.scrollSeq     = [safe](bool bottom)
+        {
+            if (safe == nullptr) return;
+            safe->seqViewport_.setViewPosition(0, bottom ? safe->seqContent_.getHeight() : 0);
+        };
+        cb.playheadTick  = [safe](double t)
+        {
+            if (safe == nullptr) return;
+            safe->playheadTimeSec_ = t;
+            safe->updatePlayheadDisplay();
+        };
+        cb.midi          = [safe](const juce::String& step) -> juce::String
+        {
+            return safe != nullptr ? safe->debugMidiSelfTest(step) : juce::String("FAIL page gone");
+        };
+        cb.extraChecks   = [safe]() -> juce::StringArray
+        {
+            juce::StringArray fails;
+            if (safe == nullptr) return fails;
+            auto& p = *safe;
+            const auto pageBounds = p.getLocalBounds();
+            // Key label: visible in the top bar at every size, text fits, no overlap.
+            if (! p.keyLabel_.isVisible() || p.keyLabel_.getWidth() < 40 || p.keyLabel_.getHeight() < 16)
+                fails.add("key label hidden or too small: " + p.keyLabel_.getBounds().toString());
+            else
+            {
+                if (! pageBounds.contains(p.keyLabel_.getBounds()))
+                    fails.add("key label outside the page: " + p.keyLabel_.getBounds().toString());
+                for (auto* c : p.getChildren())
+                    if (c != &p.keyLabel_ && c->isVisible() && c != &p.loadAudioOverlay_ && c != &p.midiLearnOverlay_
+                        && c->getBounds().intersects(p.keyLabel_.getBounds()))
+                        fails.add("key label overlaps " + juce::String(typeid(*c).name()) + " " + c->getBounds().toString());
+                const auto text = p.keyLabel_.getText();
+                const float need = juce::GlyphArrangement::getStringWidth(p.keyLabel_.getFont(), text);
+                const float room = (float) (p.keyLabel_.getWidth() - 4) / p.keyLabel_.getMinimumHorizontalScale();
+                if (text.isEmpty() || need > room)
+                    fails.add("key label text '" + text + "' does not fit (" + juce::String(need, 1) + " > " + juce::String(room, 1) + ")");
+            }
+            if (p.audioLoaded_)
+            {
+                // B16: stems are independent by default.
+                if (p.linkAllActive_ || p.linkAllBtn_.getToggleState())
+                    fails.add("LINK ALL is ON after a fresh load (B16 default must be OFF)");
+                if (p.smodeService_ != nullptr)
+                    for (int i = 0; i < p.smodeService_->getModel().getStemCount(); ++i)
+                        if (p.smodeService_->getModel().isLinked(i))
+                            fails.add("stem " + juce::String(i) + " linked after a fresh load");
+                // Chop inspector: in the lower tool area, enabled for the selected chop.
+                if (! p.chopInspector_.isVisible() || p.chopInspector_.getHeight() < 18
+                    || ! pageBounds.contains(p.chopInspector_.getBounds()))
+                    fails.add("chop inspector not laid out: " + p.chopInspector_.getBounds().toString());
+                else if (! p.chopInspector_.hasTarget())
+                    fails.add("chop inspector has no target although a chop is selected");
+            }
+            else if (p.chopInspector_.isVisible())
+                fails.add("chop inspector visible in the empty state");
+
+            // In-page notice: under the top bar, inside the page, text readable,
+            // overlaps nothing (the overlay / lanes are laid out below it).
+            if (p.noticeBanner_.isVisible())
+            {
+                const auto nb = p.noticeBanner_.getBounds();
+                if (! pageBounds.contains(nb) || nb.getHeight() < 30)
+                    fails.add("notice banner badly placed: " + nb.toString());
+                for (auto* c : p.getChildren())
+                    if (c != &p.noticeBanner_ && c->isVisible() && c != &p.midiLearnOverlay_
+                        && c->getWidth() > 0 && c->getHeight() > 0 && c->getBounds().intersects(nb)
+                        && c->getY() >= nb.getY())
+                        fails.add("notice banner overlaps " + juce::String(typeid(*c).name()) + " " + c->getBounds().toString());
+                const auto& lbl = p.noticeBanner_.getLabel();
+                const auto font = lbl.getFont();
+                const int lines = juce::jmax(1, (int) ((float) lbl.getHeight() / font.getHeight()));
+                const float need = juce::GlyphArrangement::getStringWidth(font, lbl.getText());
+                const float room = (float) (lbl.getWidth() - 4) * (float) lines / lbl.getMinimumHorizontalScale();
+                if (lbl.getWidth() < 120 || need > room)
+                    fails.add("notice text does not fit (" + juce::String(need, 0) + " > " + juce::String(room, 0)
+                              + ", label " + lbl.getBounds().toString() + ")");
+                if (p.noticeBanner_.getKind() == SModeNoticeBanner::Kind::MissingAudio
+                    && ! p.noticeBanner_.getActionButton().isVisible())
+                    fails.add("missing-audio notice has no Locate button");
+                if (p.noticeBanner_.getKind() == SModeNoticeBanner::Kind::SignInRequired)
+                {
+                    auto& btn = p.noticeBanner_.getActionButton();
+                    if (! btn.isVisible() || btn.getButtonText() != "Sign in again" || btn.getWidth() < 100)
+                        fails.add("sign-in notice has no usable 'Sign in again' button " + btn.getBounds().toString());
+                }
+            }
+            return fails;
+        };
+        uiSelfTest_ = SModeUiSelfTest::createIfEnabled(*this, std::move(cb));
+    }
+
+    // In-page notice strip (replaces modal "audio missing" alerts).
+    addChildComponent(noticeBanner_);
+    noticeBanner_.onAction = [this](SModeNoticeBanner::Kind k)
+    {
+        juce::Logger::writeToLog("[SModePage] notice action clicked (kind=" + juce::String((int) k) + ")");
+        if (k == SModeNoticeBanner::Kind::MissingAudio)
+            locateMissingSong();
+        else if (k == SModeNoticeBanner::Kind::SignInRequired)
+            openSignInPanel();
+    };
+    noticeBanner_.onDismiss = [this]()
+    {
+        if (noticeBanner_.getKind() == SModeNoticeBanner::Kind::SignInRequired)
+            signInNoticeDismissed_ = true;   // back on the next sign-in requirement
+        hideNotice();
+    };
+
+    // Licence kept but a fresh sign-in is required (token_* reply): non-blocking
+    // strip. license.status may arrive on any thread -> hop to the message thread.
+    {
+        juce::Component::SafePointer<SModePage> safe(this);
+        licenseStatusSub_ = bus_.subscribe("license.status", [safe](const juce::var&)
+        {
+            juce::MessageManager::callAsync([safe]() { if (safe != nullptr) safe->updateSignInNotice(); });
+        });
+    }
+
+    // Controls mirror this instance's engine state (project restore / editor
+    // reopen): POLY/MONO + 1SH/GATE label, DAW tempo sync.
+    updateMonoPolyLabel();
+    if (auto* midiSvc = midiService(); midiSvc != nullptr && midiSvc->isDawTempoSync())
+    {
+        juce::Logger::writeToLog("[SModePage] ctor: DAW tempo sync was ON in this instance -> re-subscribing");
+        setDawSync(true);
+    }
+    if (auto* svc = serviceFromContext();
+        svc != nullptr && svc->getSessionStatus() == SModeService::SessionStatus::MissingAudio)
+        showMissingAudioNotice(svc->getSessionMessage());
+    updateSignInNotice();
+}
+
+void SModePage::debugLoadSyntheticStems(double drumSeconds)
+{
+    juce::Logger::writeToLog("[SModePage] === debugLoadSyntheticStems (UI self-test) drumSeconds="
+                             + juce::String(drumSeconds, 1) + " ===");
+    auto* reg = registry_;
+    auto* svc = reg != nullptr ? dynamic_cast<samplar::SModeService*>(reg->get("smode")) : nullptr;
+    if (svc == nullptr)
+    {
+        juce::Logger::writeToLog("[SModePage] self-test: smode service not found");
+        return;
+    }
+    constexpr double kSr = 44100.0;
+    constexpr int kLen = (int) (kSr * 20.0);
+    // --bpm-unload: one LONG mono drum stem (clicks at 120 BPM) so the BPM job
+    // (BeatThis) runs for tens of seconds; the other stems stay 20 s.
+    const int drumLen = drumSeconds > 20.0 ? (int) (kSr * juce::jmin(drumSeconds, 1200.0)) : kLen;
+    static const char* names[] = { "Vocals", "Bass", "Drums", "Melody" };
+    static const double freqs[] = { 440.0, 55.0, 110.0, 330.0 };
+    auto& m = svc->getModel();
+    m.clear();   // a new "song": fresh undo history + stem link state
+    m.setStemCount(4);
+    for (int i = 0; i < 4; ++i)
+    {
+        auto* stem = m.getStem(i);
+        if (stem == nullptr) continue;
+        stem->name = names[i];
+        if (i == 2 && drumLen != kLen)
+        {
+            juce::AudioBuffer<float> drums(1, drumLen);
+            drums.clear();
+            auto* d = drums.getWritePointer(0);
+            const int beat = (int) (kSr * 0.5);
+            for (int pos = 0; pos < drumLen; pos += beat)
+                for (int n = 0; n < 2000 && pos + n < drumLen; ++n)
+                    d[pos + n] = (float) (0.9 * std::exp(-n / 300.0) * std::sin(2.0 * juce::MathConstants<double>::pi * 60.0 * n / kSr));
+            m.setStemAudio(i, std::move(drums));
+            continue;
+        }
+        stem->audioBuffer.setSize(2, kLen);
+        for (int ch = 0; ch < 2; ++ch)
+        {
+            auto* d = stem->audioBuffer.getWritePointer(ch);
+            for (int n = 0; n < kLen; ++n)
+            {
+                const double t = n / kSr;
+                const double env = 0.5 + 0.45 * std::sin(2.0 * juce::MathConstants<double>::pi * (0.5 + i * 0.3) * t);
+                d[n] = (float) (0.8 * env * std::sin(2.0 * juce::MathConstants<double>::pi * freqs[i] * t));
+            }
+        }
+    }
+    m.setSampleRate(kSr);
+    svc->setSourceFile(juce::File::getSpecialLocation(juce::File::tempDirectory).getChildFile("ui_selftest.wav"));
+    onStemsReady(*svc);
+
+    // Deterministic chops for the sweep: 4 x 2 s per stem on its note bank,
+    // and chop 1 of the Vocals stem selected (shows the inspector).
+    for (int i = 0; i < 4; ++i)
+        for (int k = 0; k < 4; ++k)
+        {
+            const int idx = m.addSegment(i, (int64_t) (k * 2.0 * kSr), (int64_t) ((k + 1) * 2.0 * kSr));
+            if (idx >= 0) m.assignMidiNote(i, idx, samplar::MidiMappingService::getStemBankFirstNote(i) + k);
+        }
+    if (auto* st = m.getStem(0); st != nullptr && st->segments.size() > 1)
+        st->segments[1].selected = true;
+    selectChopForInspector(0, 1);
+    for (auto& wf : stemWaveforms_) wf->repaint();
 }
 
 SModePage::~SModePage()
@@ -1107,7 +1219,49 @@ SModePage::~SModePage()
     // SModeService (and its model) is owned by the processor and survives
     // editor close/reopen. MIDI triggering must continue without the UI.
 
+    juce::Logger::writeToLog("[SModePage] === destructor START ===");
     stopTimer();
+
+    // MIDI CC learn: the inspector targets point into this page. Bindings stay
+    // (saved with the project, inert until an editor registers them again).
+    if (auto* midiSvc = midiService())
+    {
+        for (const auto& param : ChopInspectorStrip::midiParams())
+            midiSvc->unregisterCcTarget(inspectorCcTarget(param));
+        if (pendingLearnTarget_.isNotEmpty() && midiSvc->getCcLearnTarget() == pendingLearnTarget_)
+            midiSvc->endCcLearn();   // never leave a learn armed with no UI to show it
+        juce::Logger::writeToLog("[SModePage]   CC targets unregistered");
+    }
+
+    // B2/B36: the sequencer clock runs on the audio thread now, but closing the
+    // editor still stops it (unchanged UX; the lanes live in this page).
+    if (seqPlayingFlag_ && seqPlayingFlag_->load())
+    {
+        juce::Logger::writeToLog("[SModePage]   stopping sequencer playback before teardown");
+        stopAllSequencerPlayback();
+    }
+    if (seqPlayingFlag_) seqPlayingFlag_->store(false);
+
+    // B4: DAW tempo sync subscription lives on the processor bus, which
+    // outlives this page.
+    if (hostTempoSub_ != 0)
+    {
+        // Same bus it was subscribed on (U-H2), not whatever the locator holds now.
+        bus_.unsubscribe("host.tempo", hostTempoSub_);
+        hostTempoSub_ = 0;
+        juce::Logger::writeToLog("[SModePage]   unsubscribed host.tempo");
+    }
+
+    // B1: the model is processor-lifetime; detach every callback that points
+    // back into this page (undo UI + extra-state hooks), otherwise
+    // SModeService::shutdown() -> model.clear() calls into a dead page.
+    if (smodeService_ != nullptr)
+    {
+        auto& model = smodeService_->getModel();
+        model.onUndoStackChanged = nullptr;
+        model.setExtraStateHooks(nullptr, nullptr);
+        juce::Logger::writeToLog("[SModePage]   detached model callbacks");
+    }
 
     if (segmentTriggeredSub_ != 0)
         bus_.unsubscribe("smode.segment.triggered", segmentTriggeredSub_);
@@ -1117,6 +1271,9 @@ SModePage::~SModePage()
         bus_.unsubscribe("smode.transport.stopped", transportStoppedSub_);
     if (downbeatDetectedSub_ != 0)
         bus_.unsubscribe("smode.downbeat.detected", downbeatDetectedSub_);
+    if (licenseStatusSub_ != 0)
+        bus_.unsubscribe("license.status", licenseStatusSub_);
+    juce::Logger::writeToLog("[SModePage] === destructor END ===");
 }
 
 void SModePage::openLoadAudioChooser()
@@ -1126,23 +1283,77 @@ void SModePage::openLoadAudioChooser()
         "Choose audio file for S-Mode separation",
         juce::File::getSpecialLocation(juce::File::userMusicDirectory),
         "*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg");
+    juce::Component::SafePointer<SModePage> safe(this);
     chooser->launchAsync(juce::FileBrowserComponent::openMode |
                          juce::FileBrowserComponent::canSelectFiles,
-        [this, chooser](const juce::FileChooser& fc) {
+        [safe, chooser](const juce::FileChooser& fc) {
             auto results = fc.getResults();
-            if (results.isEmpty()) return;
+            if (safe == nullptr || results.isEmpty()) return;
             juce::File chosen = results[0];
             juce::Logger::writeToLog("[SModePage] File chosen: " + chosen.getFullPathName());
-            samplar::RecentSongs::push(chosen);
-            loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
-            if (onRequestSeparation)
-                onRequestSeparation(chosen);
+            safe->requestLoadFile(chosen, "file chooser");
         });
+}
+
+void SModePage::requestLoadFile(const juce::File& f, const juce::String& source)
+{
+    juce::Logger::writeToLog("[SModePage] requestLoadFile (" + source + "): " + f.getFullPathName()
+                             + " sessionLoaded=" + juce::String(audioLoaded_ ? 1 : 0));
+    if (! f.existsAsFile()) return;
+    if (! audioLoaded_)
+    {
+        startLoad(f);
+        return;
+    }
+    // B28: a loaded session (chops, MIDI map, lanes) is never discarded silently.
+    juce::Component::SafePointer<SModePage> safe(this);
+    juce::AlertWindow::showOkCancelBox(juce::MessageBoxIconType::QuestionIcon,
+        "Replace current session?",
+        "Load \"" + f.getFileName() + "\"?\n\nThe current song's chops, MIDI mapping and sequencer lanes "
+        "will be replaced (Ctrl+Z cannot bring them back).",
+        "Replace", "Cancel", this,
+        juce::ModalCallbackFunction::create([safe, f](int ok)
+        {
+            if (safe == nullptr) return;
+            juce::Logger::writeToLog("[SModePage] replace-session prompt: " + juce::String(ok != 0 ? "REPLACE" : "cancel"));
+            if (ok != 0) safe->startLoad(f);
+        }));
+}
+
+void SModePage::startLoad(const juce::File& f)
+{
+    // N-21: no up-front refusal when the ONNX Runtime is missing - a song whose
+    // stems are cached loads without it (FullSongService serves cache hits
+    // first). A real separation then fails with runtimeUnavailable and the
+    // "reinstall" error, which MainWindow turns into the in-page notice.
+    juce::Logger::writeToLog("[SModePage] startLoad: " + f.getFileName() + " (separation runtime "
+                             + (samplar::FullSongService::isSeparationRuntimeAvailable() ? "available" : "MISSING - cache only")
+                             + ")");
+    samplar::RecentSongs::push(f);
+    loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+    if (onRequestSeparation)
+        onRequestSeparation(f);
+    else
+        juce::Logger::writeToLog("[SModePage] WARNING: onRequestSeparation not set");
 }
 
 void SModePage::beginSeparationVisuals(int stemCount)
 {
     juce::Logger::writeToLog("[SModePage] === beginSeparationVisuals stemCount=" + juce::String(stemCount) + " ===");
+    hideNotice();   // a new song / relink is loading
+
+    // B28: a new song starts clean - sequencer lanes pointed at the old song's
+    // chops, the inspector at an old chop, the key / BPM at the old song.
+    if (seqPlayingFlag_ && seqPlayingFlag_->load()) stopAllSequencerPlayback();
+    for (auto& l : sequencerLanes_)
+        if (l) seqContent_.removeChildComponent(l.get());
+    sequencerLanes_.clear();
+    selectChopForInspector(-1, -1);
+    lastAutoChopValid_ = false;
+    setKeyText("--", "Musical key: detecting after the stems are ready");
+    bpmDotsAnim_.reset();
+    bpmInput_.setText("...", juce::dontSendNotification);
+    ++bpmEditCounter_;
 
     stemWaveforms_.clear();
 
@@ -1210,6 +1421,7 @@ void SModePage::onStemsReady(SModeService& service)
     smodeService_ = &service;
     auto& model = service.getModel();
     int stemCount = model.getStemCount();
+    hideNotice();
 
     // ── Undo/Redo wiring ─────────────────────────────────────────────
     // 1) Register hooks so the model's snapshot can save/restore lane patterns + UI flags.
@@ -1220,18 +1432,17 @@ void SModePage::onStemsReady(SModeService& service)
     // 2) UI updates when the stack changes.
     model.onUndoStackChanged = [this]() { updateUndoUi(); };
 
-    // 3) New session: clear any history left from a prior track.
-    model.clearUndoHistory();
+    // 3) B11: do NOT clear the history here. A new song clears the model
+    //    (SModeService::startWorkflow / reset -> model.clear() drops both
+    //    stacks); reopening the editor reconnects to the same session and
+    //    keeps its undo history.
     updateUndoUi();
 
-    // Wire S-Mode model to MidiMappingService for MIDI-triggered segment playback
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (reg) {
-        auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-        if (midiSvc) {
-            midiSvc->setSModeModel(&model);
-            juce::Logger::writeToLog("[SModePage] Wired SModeSegmentModel to MidiMappingService");
-        }
+    // Wire S-Mode model to THIS instance's MidiMappingService (review A2).
+    if (auto* midiSvc = midiService())
+    {
+        midiSvc->setSModeModel(&model);
+        juce::Logger::writeToLog("[SModePage] Wired SModeSegmentModel to MidiMappingService");
     }
 
     // Subscribe to segment trigger events for visual animation
@@ -1380,19 +1591,21 @@ void SModePage::onStemsReady(SModeService& service)
                 bool destLinked = linkAllActive_ || model.isLinked(j);
                 if (!destLinked) continue;
 
-                // Copy segments from source stem to destination (preserve MIDI notes)
+                // Explicit layer (LINK): copy the chops, notes and per-chop settings.
                 model.clearSegments(j);
                 for (const auto& seg : srcStem->segments)
                 {
                     int newSegIdx = model.addSegment(j, seg.startSample, seg.endSample);
-                    if (seg.midiNote >= 0 && newSegIdx >= 0)
+                    if (newSegIdx < 0) continue;
+                    if (seg.midiNote >= 0)
                         model.assignMidiNote(j, newSegIdx, seg.midiNote);
+                    model.setSegmentEffects(j, newSegIdx, seg.effects);
                 }
 
                 stemWaveforms_[static_cast<size_t>(j)]->repaint();
             }
         };
-        wf->onSegmentDeleted = [this, i](int segIdx)
+        wf->onSegmentDeleted = [this, i](int segIdx, int64_t delStart, int64_t delEnd)
         {
             // Surgical delete propagation for LINK ALL / linked stems.
             // The generic onSegmentsChanged path uses clearSegments+rebuild, which
@@ -1405,90 +1618,68 @@ void SModePage::onStemsReady(SModeService& service)
             if (!thisLinked)
             {
                 stemWaveforms_[static_cast<size_t>(i)]->repaint();
+                refreshInspector();
                 return;
             }
 
+            // B16: mirror the delete on linked stems BY TIME - the chop with
+            // the same start/end there - never by index (stems diverge).
+            juce::ignoreUnused(segIdx);
             for (int j = 0; j < static_cast<int>(stemWaveforms_.size()); ++j)
             {
                 if (j == i) continue;
                 bool destLinked = linkAllActive_ || model.isLinked(j);
                 if (!destLinked) continue;
-
                 auto* destStem = model.getStem(j);
                 if (!destStem) continue;
-
-                const int beforeCount = static_cast<int>(destStem->segments.size());
-                if (segIdx >= 0 && segIdx < beforeCount)
+                for (int k = static_cast<int>(destStem->segments.size()) - 1; k >= 0; --k)
                 {
-                    juce::Logger::writeToLog("[SMode] deleteSegment-linked stem=" + juce::String(j)
-                                             + " segIdx=" + juce::String(segIdx)
-                                             + " before=" + juce::String(beforeCount));
-                    model.removeSegment(j, segIdx);
-                    juce::Logger::writeToLog("[SMode] deleteSegment-linked stem=" + juce::String(j)
-                                             + " after=" + juce::String((int) destStem->segments.size()));
+                    const auto& d = destStem->segments[(size_t) k];
+                    if (d.startSample == delStart && d.endSample == delEnd)
+                    {
+                        juce::Logger::writeToLog("[SMode] deleteSegment-linked stem=" + juce::String(j)
+                                                 + " seg=" + juce::String(k) + " (same time range)");
+                        model.removeSegment(j, k);
+                        break;
+                    }
                 }
-
                 stemWaveforms_[static_cast<size_t>(j)]->repaint();
             }
+            refreshInspector();
         };
         wf->onSegmentSelected = [this](int stemIdx, int segIdx) {
-            juce::Logger::writeToLog("🎵 [SModePage] Segment selected: stem=" + juce::String(stemIdx)
+            juce::Logger::writeToLog("[SModePage] Segment selected: stem=" + juce::String(stemIdx)
                                      + " seg=" + juce::String(segIdx));
+            selectChopForInspector(stemIdx, segIdx);
         };
         wf->onSegmentClicked = [this](int stemIdx, int segIdx) {
-            // Single-click plays the segment (and linked segments if LINK ALL)
+            // B16: a click plays THIS stem's chop (directly, not through its
+            // MIDI note, which other stems may share). Explicitly linked
+            // stems layer the chop at the same time position.
             if (!smodeService_) return;
             auto& model = smodeService_->getModel();
 
-            auto* reg = samplar::ServiceLocator::getRegistry();
-            if (!reg) return;
-            auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+            auto* midiSvc = midiService();
             if (!midiSvc) return;
 
-            // ── Stop any currently playing voices (retrigger, no layering) ──
+            // -- Stop any currently playing voices (retrigger, no layering) --
             midiSvc->stopAllVoices();
 
-            // ── Interrupt transport if playing ──
+            // -- Interrupt transport if playing --
             if (transportPlaying_)
             {
                 juce::Logger::writeToLog("[SModePage] Click-play: interrupting transport");
                 stopTransport();
             }
 
-            // ── Gate mode: if this segment is already playing, stop it ──
-            bool isGateMode = midiSvc->isSampleGateMode();
-
-            // If segment has a MIDI note, trigger via that (plays ALL stems with this note)
-            auto* seg = model.getSegment(stemIdx, segIdx);
-            if (seg && seg->midiNote >= 0)
-            {
-                if (isGateMode)
-                {
-                    // In gate mode, send note-off to stop if already playing
-                    midiSvc->handleNoteOff(1, seg->midiNote);
-                }
-                midiSvc->handleNoteOn(1, seg->midiNote, 1.0f);
-                return;
-            }
-
-            // No MIDI note — play directly (and linked stems at same segment index)
-            std::vector<std::pair<int, int>> toPlay;
-            if (linkAllActive_)
-            {
-                for (int s = 0; s < model.getStemCount(); ++s)
-                {
-                    auto* stem = model.getStem(s);
-                    if (stem && segIdx < static_cast<int>(stem->segments.size()))
-                        toPlay.push_back({ s, segIdx });
-                }
-            }
-            else
-            {
-                toPlay.push_back({ stemIdx, segIdx });
-            }
+            const bool isGateMode = midiSvc->isSampleGateMode();
+            std::vector<std::pair<int, int>> toPlay { { stemIdx, segIdx } };
+            for (const auto& ls : linkedSegmentsAt(stemIdx, segIdx))
+                toPlay.push_back(ls);
 
             double modelSr = model.getSampleRate();
             if (modelSr <= 0.0) modelSr = 44100.0;
+            const bool isLooping = loopBtn_.getToggleState();
 
             for (const auto& [si, sgi] : toPlay)
             {
@@ -1496,32 +1687,14 @@ void SModePage::onStemsReady(SModeService& service)
                 auto* s = model.getSegment(si, sgi);
                 if (!stem || !s || s->getLengthSamples() <= 0 || stem->mute) continue;
 
-                // Realtime pitch path: read from raw stem buffer, pass stemIdx
-                // through to playBufferDirect so the voice uses SoundTouch.
-                const auto& srcBuf = stem->audioBuffer;
+                // Same engine path as a MIDI note: a window of the shared stem
+                // buffer + stem pitch knob + fades. No copy on the UI thread (B26).
+                midiSvc->playSegment(si, sgi, isLooping);
 
-                int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) s->startSample);
-                int64_t endSmp   = juce::jlimit(startSmp,    (int64_t)srcBuf.getNumSamples(), (int64_t) s->endSample);
-                int segLen = static_cast<int>(endSmp - startSmp);
-                if (segLen <= 0) continue;
-
-                auto segBuf = std::make_shared<juce::AudioBuffer<float>>(srcBuf.getNumChannels(), segLen);
-                for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
-                    segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
-
-                bool isLooping = loopBtn_.getToggleState();
-                const float pitchSemi = midiSvc->getStemPitchSemitones(si);
-                juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(si)
-                    + " pitch=" + juce::String(pitchSemi, 2));
-                midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, isLooping, si);
-
-                double durSec = static_cast<double>(segLen) / modelSr;
+                const double durSec = static_cast<double>(s->getLengthSamples()) / modelSr;
                 stemWaveforms_[static_cast<size_t>(si)]->startSegmentAnimation(sgi, durSec, isLooping);
             }
 
-            // In gate mode, start a timer-based animation stop isn't needed —
-            // the animation already has its own duration and will stop naturally.
-            // But if the user clicks again in gate mode, the note-off above handles it.
             juce::Logger::writeToLog("[SModePage] Click-play: stem=" + juce::String(stemIdx)
                                      + " seg=" + juce::String(segIdx)
                                      + " gate=" + juce::String(isGateMode ? "YES" : "NO"));
@@ -1551,33 +1724,28 @@ void SModePage::onStemsReady(SModeService& service)
             auto* stem = model.getStem(stemIdx);
             auto* seg  = model.getSegment(stemIdx, segIdx);
             if (!stem || !seg || seg->getLengthSamples() <= 0) return;
+            auto* midiSvc = midiService();
+            if (!midiSvc) return;
+            midiSvc->syncSnapshotNow();   // export the chop exactly as it is now
 
-            const auto& srcBuf = stem->audioBuffer;
-            double sr = model.getSampleRate();
-            int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-            int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), seg->endSample);
-            int len = static_cast<int>(endSmp - startSmp);
-            if (len <= 0) return;
-
-            // Copy audio into shared buffer (message thread — fast, just a memcpy)
-            auto segBuf = std::make_shared<juce::AudioBuffer<float>>(srcBuf.getNumChannels(), len);
-            for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
-                segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), len);
-
-            // Match what the user heard during playback: apply the same micro-fade
-            // at start and end of the exported segment (no-op if fade is disabled).
-            samplar::applyMicroFade(*segBuf, sr);
-
-            int numCh = srcBuf.getNumChannels();
             juce::String stemName = stem->name;
             juce::String noteName = (seg->midiNote >= 0)
                 ? StemWaveformComponent::midiNoteToName(seg->midiNote) : juce::String(segIdx);
 
-            // Write WAV on background thread, then trigger drag on message thread
-            std::thread([this, segBuf, sr, numCh, stemName, noteName, segIdx]()
+            // Render through the realtime engine (stem pitch, fades, pitched
+            // tail = what the user hears, B26) and write the WAV on the worker.
+            auto safeThis = juce::Component::SafePointer<SModePage>(this);
+            smodeService_->runBackground([safeThis, midiSvc, stemIdx, segIdx, stemName, noteName]()
             {
-                auto tmpFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                                   .getChildFile(stemName + "_" + noteName + "_seg" + juce::String(segIdx) + ".wav");
+                double sr = 44100.0;
+                auto segBuf = midiSvc->renderSegmentOffline(stemIdx, segIdx, sr);
+                if (segBuf == nullptr || segBuf->getNumSamples() == 0)
+                {
+                    juce::Logger::writeToLog("[SModePage] Drag-out: render produced no audio (muted / empty chop)");
+                    return;
+                }
+                const int numCh = segBuf->getNumChannels();
+                auto tmpFile = makeUniqueExportFile(stemName + "_" + noteName + "_seg" + juce::String(segIdx));
 
                 juce::WavAudioFormat wavFmt;
                 if (auto os = std::unique_ptr<juce::FileOutputStream>(tmpFile.createOutputStream()))
@@ -1591,104 +1759,80 @@ void SModePage::onStemsReady(SModeService& service)
                         delete writer;
 
                         juce::String path = tmpFile.getFullPathName();
-                        juce::MessageManager::callAsync([this, path]()
+                        juce::MessageManager::callAsync([safeThis, path]()
                         {
+                            if (safeThis == nullptr) return;   // page destroyed
+                            // B30: an OS drag can only start while the button is
+                            // still held; a late start would silently do nothing.
+                            if (! juce::ModifierKeys::getCurrentModifiersRealtime().isLeftButtonDown())
+                            {
+                                juce::Logger::writeToLog("[SModePage] Drag-out: mouse released before the WAV was ready - saved to " + path);
+                                safeThis->flashUndoStatus("Chop saved to Exports (drag again)");
+                                return;
+                            }
                             juce::StringArray files;
                             files.add(path);
-                            juce::DragAndDropContainer::performExternalDragDropOfFiles(files, true, this);
+                            juce::DragAndDropContainer::performExternalDragDropOfFiles(files, true, safeThis.getComponent());
                             juce::Logger::writeToLog("[SModePage] Drag-out WAV ready: " + path);
                         });
                     }
                 }
-            }).detach();
+            });
         };
 
         wf->onMultiSegmentDragOut = [this](int /*triggerStemIdx*/, int /*triggerSegIdx*/)
         {
             if (!smodeService_) return;
             auto& model = smodeService_->getModel();
+            auto* midiSvc = midiService();
+            if (!midiSvc) return;
 
             // Collect every selected segment across every stem.
-            struct Pick { int stemIdx; int segIdx; };
-            std::vector<Pick> picks;
+            struct Job { int stemIdx; int segIdx; juce::String fileName; };
+            auto jobs = std::make_shared<std::vector<Job>>();
             for (int s = 0; s < model.getStemCount(); ++s)
             {
                 auto* stem = model.getStem(s);
                 if (!stem) continue;
                 for (int i = 0; i < static_cast<int>(stem->segments.size()); ++i)
-                    if (stem->segments[(size_t) i].selected)
-                        picks.push_back({ s, i });
-            }
-
-            if (picks.empty())
-            {
-                juce::Logger::writeToLog("[SModePage] Multi-drag: no selected segments — nothing to drag");
-                return;
-            }
-
-            juce::Logger::writeToLog("[SModePage] Multi-drag: rendering "
-                                     + juce::String((int) picks.size()) + " segment(s)");
-
-            // Snapshot audio + metadata on the message thread, render on a worker.
-            struct Job {
-                juce::String fileName;
-                int numCh;
-                double sr;
-                std::shared_ptr<juce::AudioBuffer<float>> buf;
-            };
-            auto jobs = std::make_shared<std::vector<Job>>();
-            const double sr = model.getSampleRate();
-
-            for (const auto& p : picks)
-            {
-                auto* stem = model.getStem(p.stemIdx);
-                auto* seg  = model.getSegment(p.stemIdx, p.segIdx);
-                if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-                const auto& srcBuf = stem->audioBuffer;
-                int64_t startSmp = juce::jlimit((int64_t) 0, (int64_t) srcBuf.getNumSamples(), seg->startSample);
-                int64_t endSmp   = juce::jlimit(startSmp,       (int64_t) srcBuf.getNumSamples(), seg->endSample);
-                int len = static_cast<int>(endSmp - startSmp);
-                if (len <= 0) continue;
-
-                Job j;
-                j.numCh = srcBuf.getNumChannels();
-                j.sr    = sr;
-                j.buf   = std::make_shared<juce::AudioBuffer<float>>(j.numCh, len);
-                for (int ch = 0; ch < j.numCh; ++ch)
-                    j.buf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), len);
-                samplar::applyMicroFade(*j.buf, sr);
-
-                juce::String noteName = (seg->midiNote >= 0)
-                    ? StemWaveformComponent::midiNoteToName(seg->midiNote) : juce::String(p.segIdx);
-                j.fileName = stem->name + "_" + noteName + "_seg" + juce::String(p.segIdx) + ".wav";
-
-                jobs->push_back(std::move(j));
+                {
+                    const auto& seg = stem->segments[(size_t) i];
+                    if (!seg.selected || seg.getLengthSamples() <= 0) continue;
+                    juce::String noteName = (seg.midiNote >= 0)
+                        ? StemWaveformComponent::midiNoteToName(seg.midiNote) : juce::String(i);
+                    jobs->push_back({ s, i, stem->name + "_" + noteName + "_seg" + juce::String(i) });
+                }
             }
 
             if (jobs->empty())
             {
-                juce::Logger::writeToLog("[SModePage] Multi-drag: all selected segments empty — abort");
+                juce::Logger::writeToLog("[SModePage] Multi-drag: no selected segments - nothing to drag");
                 return;
             }
+            juce::Logger::writeToLog("[SModePage] Multi-drag: rendering "
+                                     + juce::String((int) jobs->size()) + " segment(s) through the engine");
+            midiSvc->syncSnapshotNow();
 
-            std::thread([this, jobs]()
+            auto safeThis = juce::Component::SafePointer<SModePage>(this);
+            smodeService_->runBackground([safeThis, midiSvc, jobs]()
             {
                 juce::WavAudioFormat wavFmt;
                 juce::StringArray paths;
-                auto tmpDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
 
                 for (auto& j : *jobs)
                 {
-                    auto tmpFile = tmpDir.getChildFile(j.fileName);
+                    double sr = 44100.0;
+                    auto buf = midiSvc->renderSegmentOffline(j.stemIdx, j.segIdx, sr);
+                    if (buf == nullptr || buf->getNumSamples() == 0) continue;
+                    auto tmpFile = makeUniqueExportFile(j.fileName);
                     if (auto os = std::unique_ptr<juce::FileOutputStream>(tmpFile.createOutputStream()))
                     {
-                        auto* writer = wavFmt.createWriterFor(os.get(), j.sr,
-                                                              static_cast<unsigned int>(j.numCh), 24, {}, 0);
+                        auto* writer = wavFmt.createWriterFor(os.get(), sr,
+                                                              static_cast<unsigned int>(buf->getNumChannels()), 24, {}, 0);
                         if (writer)
                         {
                             os.release();
-                            writer->writeFromAudioSampleBuffer(*j.buf, 0, j.buf->getNumSamples());
+                            writer->writeFromAudioSampleBuffer(*buf, 0, buf->getNumSamples());
                             delete writer;
                             paths.add(tmpFile.getFullPathName());
                         }
@@ -1701,31 +1845,32 @@ void SModePage::onStemsReady(SModeService& service)
                     return;
                 }
 
-                juce::MessageManager::callAsync([this, paths]()
+                juce::MessageManager::callAsync([safeThis, paths]()
                 {
-                    juce::DragAndDropContainer::performExternalDragDropOfFiles(paths, true, this);
+                    if (safeThis == nullptr) return;   // page destroyed
+                    if (! juce::ModifierKeys::getCurrentModifiersRealtime().isLeftButtonDown())   // B30
+                    {
+                        juce::Logger::writeToLog("[SModePage] Multi-drag: mouse released before the WAVs were ready - kept in Exports");
+                        safeThis->flashUndoStatus(juce::String(paths.size()) + " chops saved to Exports");
+                        return;
+                    }
+                    juce::DragAndDropContainer::performExternalDragDropOfFiles(paths, true, safeThis.getComponent());
                     juce::Logger::writeToLog("[SModePage] Multi-drag-out: " + juce::String(paths.size()) + " file(s)");
                 });
-            }).detach();
+            });
         };
 
         wf->onGridQuickAssign = [this](int stemIdx, double beatsPerSegment) {
             gridQuickAssignStem(stemIdx, beatsPerSegment);
         };
-        wf->onGridOffsetChanged = [this](int stemIdx, double gridOffset) {
-            // Propagate grid offset to all linked stems during drag
-            if (!smodeService_) return;
-            auto& model = smodeService_->getModel();
-            bool srcLinked = linkAllActive_ || model.isLinked(stemIdx);
-            if (!srcLinked) return;
-
-            for (int j = 0; j < static_cast<int>(stemWaveforms_.size()); ++j)
-            {
-                if (j == stemIdx) continue;
-                bool destLinked = linkAllActive_ || model.isLinked(j);
-                if (!destLinked) continue;
-                stemWaveforms_[static_cast<size_t>(j)]->setGridOffsetSeconds(gridOffset);
-            }
+        wf->onGridDragStarted = [this](int stemIdx) {
+            // B19: grid drags are undoable (grid offset is in the UI undo state).
+            if (smodeService_) smodeService_->getModel().pushUndoState("Move grid");
+            juce::Logger::writeToLog("[SModePage] grid drag started on stem " + juce::String(stemIdx));
+        };
+        wf->onGridOffsetChanged = [this](int /*stemIdx*/, double gridOffset) {
+            // B19: ONE beat grid for the song (model + every lane), linked or not.
+            setGlobalGridOffset(gridOffset);
         };
         wf->onMidiAssignRequested = [this](int stemIdx, int segIdx) {
             // Show MIDI learn overlay
@@ -1737,17 +1882,25 @@ void SModePage::onStemsReady(SModeService& service)
             }
             midiLearnOverlay_.show(stemIdx, segIdx, stemName);
         };
+        wf->onPitchMidiMenu = [this](int stemIdx)
+        {
+            if (stemIdx < 0 || stemIdx >= (int) stemWaveforms_.size() || ! stemWaveforms_[(size_t) stemIdx]) return;
+            juce::String stemName = "Stem " + juce::String(stemIdx + 1);
+            if (smodeService_ != nullptr)
+                if (auto* st = smodeService_->getModel().getStem(stemIdx); st != nullptr && st->name.isNotEmpty())
+                    stemName = st->name;
+            showMidiLearnMenu(stemPitchCcTarget(stemIdx), stemName + " pitch", stemWaveforms_[(size_t) stemIdx]->getPitchKnob());
+        };
+        if (auto* midiSvc = midiService())
+            wf->setPitchSemitones(midiSvc->getStemPitchSemitones(i));   // restored / CC-moved value
         wf->onPitchChanged = [this](int stemIdx, float semi)
         {
-            juce::Logger::writeToLog("[SModePage] 🎵 stem pitch changed stem="
+            juce::Logger::writeToLog("[SModePage] stem pitch changed stem="
                 + juce::String(stemIdx) + " semi=" + juce::String(semi, 2));
-            if (auto* reg = samplar::ServiceLocator::getRegistry())
-            {
-                if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-                    midiSvc->setStemPitchSemitones(stemIdx, semi);
-            }
-            // Mark project dirty so the AppState binding flushes on save.
-            if (auto* app = samplar::ServiceLocator::getAppState())
+            if (auto* midiSvc = midiService())
+                midiSvc->setStemPitchSemitones(stemIdx, semi);
+            // Mark the project dirty (pitch is saved in the session <play> node).
+            if (auto* app = appState_)
                 app->markDirty();
         };
         wf->onFocusRequested = [this](int stemIdx) {
@@ -1756,10 +1909,8 @@ void SModePage::onStemsReady(SModeService& service)
             {
                 // Unfocus — show all stems except removed ones
                 focusedStem_ = -1;
-                for (int s = 0; s < static_cast<int>(stemWaveforms_.size()); ++s)
-                    stemWaveforms_[static_cast<size_t>(s)]->setVisible(
-                        removedStems_.find(s) == removedStems_.end());
-                juce::Logger::writeToLog("[SModePage] Unfocused — showing all non-removed stems");
+                applyRemovedStemVisibility();
+                juce::Logger::writeToLog("[SModePage] Unfocused - showing all non-removed stems");
             }
             else
             {
@@ -1776,10 +1927,14 @@ void SModePage::onStemsReady(SModeService& service)
             // Hide the channel and mute it in the model
             if (stemIdx >= 0 && stemIdx < static_cast<int>(stemWaveforms_.size()))
             {
+                // B23: removedStems_ is part of the UI undo state, so Ctrl+Z
+                // brings the lane back (the model undoes the mute).
                 if (smodeService_)
-                    smodeService_->getModel().pushUndoState("Remove stem");
+                    smodeService_->getModel().pushUndoState("Remove channel");
                 stemWaveforms_[static_cast<size_t>(stemIdx)]->setVisible(false);
                 removedStems_.insert(stemIdx);
+                if (inspStem_ == stemIdx) selectChopForInspector(-1, -1);
+                flashUndoStatus("Channel removed (Ctrl+Z to restore)");
 
                 // Mute the stem so it doesn't play in transport or MIDI
                 if (smodeService_)
@@ -1804,20 +1959,33 @@ void SModePage::onStemsReady(SModeService& service)
             double duration = static_cast<double>(stem->audioBuffer.getNumSamples()) / sampleRate;
             stemWaveforms_[static_cast<size_t>(i)]->setViewRange(0.0, duration);
         }
-        stemWaveforms_[static_cast<size_t>(i)]->computeSpectralColorsAsync();
+        stemWaveforms_[static_cast<size_t>(i)]->computeSpectralColorsAsync(makeBackgroundRunner(smodeService_),
+                                                                           smodeService_->getJobCancelFlag());
     }
 
-    // Synchronize model link state with LINK ALL default so L button visuals are accurate.
-    for (int i = 0; i < stemCount; ++i)
-        model.setLinked(i, linkAllActive_);
+    // B16 / B11: LINK ALL mirrors the model (a fresh song has every stem
+    // unlinked -> OFF; reopening the editor keeps the user's choice).
+    {
+        bool allLinked = stemCount > 0;
+        for (int i = 0; i < stemCount; ++i)
+            allLinked = allLinked && model.isLinked(i);
+        linkAllActive_ = allLinked;
+        updateLinkAllButton();
+    }
+    refreshLaneButtons();
+    updateMonoPolyLabel();
     for (auto& w : stemWaveforms_)
-        if (w) w->refreshLinkButton();
+        if (w) w->setGridOffsetSeconds(model.getGridOffsetSeconds());   // grid survives editor reopen
+    applyRemovedStemVisibility();
+    juce::Logger::writeToLog("[SModePage] onStemsReady: linkAll=" + juce::String(linkAllActive_ ? "ON" : "OFF")
+                             + " gridOffset=" + juce::String(model.getGridOffsetSeconds(), 4) + "s");
 
     juce::Logger::writeToLog("✅ [SModePage] Built " + juce::String(stemCount) + " stem waveform components");
     resized();
     repaint();
 
-    juce::MessageManager::callAsync([this]() {
+    juce::MessageManager::callAsync([this, safeThis = juce::Component::SafePointer<SModePage>(this)]() {
+        if (safeThis == nullptr) return;
         resized();
         for (auto& wf : stemWaveforms_)
             wf->repaint();
@@ -1855,6 +2023,23 @@ void SModePage::onStemsReady(SModeService& service)
         {
             if (wf) wf->setGridOffsetSeconds(offsetSec);
         }
+
+        // An auto-chop made before the downbeat arrived used offset 0: redo
+        // it on the real bar grid, unless the user edited the chops since
+        // (impl_analysis follow-up). Not a new undo step.
+        if (smodeService_ != nullptr && lastAutoChopValid_ && ! autoChopBusy_
+            && lastAutoChopMode_ != AutoMode::Transient
+            && segmentLayoutHash(smodeService_->getModel()) == lastAutoChopLayout_)
+        {
+            juce::Logger::writeToLog("[SModePage] downbeat arrived after auto-chop - re-chopping bars on the new grid");
+            runAutoChop(lastAutoChopMode_, false, "downbeat");
+        }
+        else if (smodeService_ != nullptr && autoChopBusy_)
+        {
+            // N-20: the running job uses the old grid offset; re-chop once it lands.
+            downbeatRechopPending_ = true;
+            juce::Logger::writeToLog("[SModePage] downbeat arrived during auto-chop - re-chop deferred until it finishes");
+        }
     });
 
     // Auto-open with one sequencer lane if none exist
@@ -1864,6 +2049,10 @@ void SModePage::onStemsReady(SModeService& service)
     // Run BPM detection on the drum stem (tightest tempo reference)
     runBpmDetectionOnDrumStem();
 
+    // Musical key on Melody + Bass (worker pool), shown next to the BPM.
+    runKeyDetection();
+    refreshInspector();
+
     // Audio is loaded — hide the empty-state overlay
     loadAudioOverlay_.setVisible(false);
 
@@ -1871,6 +2060,7 @@ void SModePage::onStemsReady(SModeService& service)
     audioLoaded_ = true;
     ejectBtn_.setVisible(true);
     ejectBtn_.toFront(false);
+    updateAudioDependentControls();
 }
 
 void SModePage::unloadCurrentAudio()
@@ -1878,28 +2068,35 @@ void SModePage::unloadCurrentAudio()
     juce::Logger::writeToLog("[SModePage] === unloadCurrentAudio START ===");
 
     // 1-3. Stop transport, kill voices, detach S-Mode model from MIDI
-    if (auto* reg = samplar::ServiceLocator::getRegistry())
+    if (auto* midiSvc = midiService())
     {
-        if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-        {
-            juce::Logger::writeToLog("[SModePage]   stopping S-Mode transport + voices");
-            midiSvc->stopSModeTransport();
-            midiSvc->stopAllVoices();
-            midiSvc->setSModeModel(nullptr);
-        }
-        else
-        {
-            juce::Logger::writeToLog("[SModePage] WARNING: midi.mapping service not found");
-        }
+        juce::Logger::writeToLog("[SModePage]   stopping S-Mode transport + voices");
+        midiSvc->stopSModeTransport();
+        midiSvc->stopAllVoices();
+        midiSvc->setSModeModel(nullptr);
+        midiSvc->setGlobalTransposeSemitones(0.0f);
+    }
+    else
+    {
+        juce::Logger::writeToLog("[SModePage] WARNING: midi.mapping service not found");
     }
 
     // 4. Reset SModeService session
     if (smodeService_)
     {
-        juce::Logger::writeToLog("[SModePage]   resetting SModeService");
+        // Detach this page's model hooks first: smodeService_ becomes nullptr
+        // below, so ~SModePage can no longer detach them, and the processor-
+        // lifetime model would call into a dead page from SModeService::shutdown()
+        // -> model.clear() (crash on plugin unload after Eject; found by the
+        // UI self-test sweep).
+        auto& model = smodeService_->getModel();
+        model.onUndoStackChanged = nullptr;
+        model.setExtraStateHooks(nullptr, nullptr);
+        juce::Logger::writeToLog("[SModePage]   detached model callbacks, resetting SModeService");
         smodeService_->reset();
     }
     smodeService_ = nullptr;
+    updateUndoUi();
 
     // 5. Clear UI state — remove all stem waveforms and sequencer lanes
     juce::Logger::writeToLog("[SModePage]   clearing " + juce::String(stemWaveforms_.size())
@@ -1909,7 +2106,7 @@ void SModePage::unloadCurrentAudio()
     stemWaveforms_.clear();
 
     for (auto& l : sequencerLanes_)
-        if (l) removeChildComponent(l.get());
+        if (l) seqContent_.removeChildComponent(l.get());
     sequencerLanes_.clear();
 
     // Reset transport / playhead / loop state
@@ -1923,7 +2120,22 @@ void SModePage::unloadCurrentAudio()
     detectedBpm_ = 0.0;
     lockedBpm_ = 0.0;
     gridLocked_ = false;
+    lockSemis_ = 0;
+    updateGridLockButton();
     downbeatDetectionRequested_ = false;
+    // Per-song displays: the BPM field kept the old song's value after Eject.
+    bpmDotsAnim_.reset();
+    ++bpmEditCounter_;   // a BPM / key job still running for the old song is dropped
+    bpmInput_.setText("--", juce::dontSendNotification);
+    setKeyText("--", "Musical key (detected on the Melody + Bass stems after a song loads)");
+    selectChopForInspector(-1, -1);
+    lastAutoChopValid_ = false;
+    ++autoChopTicket_;       // N-20: results of jobs started for the old song are dropped
+    downbeatRechopPending_ = false;
+    ++quickAssignTicket_;
+    autoChopBusy_ = false;
+    updateAutoButton();
+    resetQuickAssignButton();
 
     // Reflect "stopped" state on the big play button
     playBtn_.setPlaying(false);
@@ -1931,6 +2143,7 @@ void SModePage::unloadCurrentAudio()
     // Show empty-state overlay again
     audioLoaded_ = false;
     ejectBtn_.setVisible(false);
+    updateAudioDependentControls();
     loadAudioOverlay_.setVisible(true);
     loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
     loadAudioOverlay_.toFront(true);
@@ -1953,14 +2166,8 @@ void SModePage::paint(juce::Graphics& g)
     g.setGradientFill(bgGrad);
     g.fillRect(bgBounds);
 
-    if (stemWaveforms_.empty())
-    {
-        // Drop zone prompt — shown when no stems loaded yet
-        auto centre = getLocalBounds().withHeight(getHeight() / 2);
-        g.setColour(juce::Colours::grey.withAlpha(0.6f));
-        g.setFont(juce::FontOptions(16.0f));
-        g.drawText("Drop a song here or click LOAD SONG", centre, juce::Justification::centred);
-    }
+    // (Empty state: LoadAudioOverlay shows LOAD AUDIO + recents; the old page-level
+    //  "Drop a song here" text sat behind the overlay's button.)
 
     // Drag-over highlight
     if (dragHighlight_)
@@ -1987,23 +2194,11 @@ void SModePage::paint(juce::Graphics& g)
         g.setColour(juce::Colour(0xff1a1a2e));
         g.fillRect(playheadStripArea_);
 
-        // Calculate playhead X position from time
-        // Use first waveform's view range for coordinate mapping
-        auto& wf0 = *stemWaveforms_[0];
-        double viewStart = wf0.getViewStartTime();
-        double viewEnd = wf0.getViewEndTime();
-        double viewDur = viewEnd - viewStart;
-
-        if (viewDur > 0.0 && playheadTimeSec_ >= viewStart && playheadTimeSec_ <= viewEnd)
+        // Playhead marker, mapped onto the first visible lane's wave area.
+        // (No page-level vertical line: every lane draws its own playhead.)
+        const int phX = playheadStripX(playheadTimeSec_);
+        if (phX >= 0)
         {
-            // Map time to X position in the strip (offset past control panel = 178px)
-            double frac = (playheadTimeSec_ - viewStart) / viewDur;
-            const int kStemControlW = 178;  // matches StemWaveformComponent's panel width
-            int stripWaveX = playheadStripArea_.getX() + kStemControlW;
-            int stripWaveW = playheadStripArea_.getWidth() - kStemControlW;
-            int phX = stripWaveX + static_cast<int>(frac * stripWaveW);
-
-            // Triangle marker (pointing down)
             juce::Path triangle;
             float tx = static_cast<float>(phX);
             float ty = static_cast<float>(playheadStripArea_.getY());
@@ -2012,202 +2207,313 @@ void SModePage::paint(juce::Graphics& g)
 
             g.setColour(transportPlaying_ ? juce::Colours::lime : juce::Colours::white);
             g.fillPath(triangle);
-
-            // Vertical line extending through all waveforms
-            if (!stemWaveforms_.empty())
-            {
-                int lineTop = playheadStripArea_.getBottom();
-                int lineBot = stemWaveforms_.back()->getBounds().getBottom();
-                g.setColour(juce::Colours::white.withAlpha(0.6f));
-                g.drawVerticalLine(phX, static_cast<float>(lineTop), static_cast<float>(lineBot));
-            }
         }
     }
 }
 
 void SModePage::resized()
 {
-    auto area = getLocalBounds().reduced(8);
-
-    // ── Header row (1500×72 top bar) ──────────────────────────────────
+    auto area = getLocalBounds().reduced(kPagePad);
     trackNameLabel_.setVisible(false);
     bpmLabel_.setVisible(false);
     titleLabel_.setVisible(false);   // replaced by logoLabel_
     transportBtn_.setVisible(false); // replaced by playBtn_
 
-    auto topBar = area.removeFromTop(72).reduced(14, 10);
-
-    // Zone 1: Logo (130px)
-    logoLabel_.setBounds(topBar.removeFromLeft(130));
-
-    // Zone 2: Transport (260px) — PLAY (56×52) + record circle + snapshot circle
+    const int barH = getHeight() >= kPageHTall ? kBarHTall
+                   : getHeight() >= kPageHNormal ? kBarHNormal : kBarHShort;
+    layoutTopBar(area.removeFromTop(barH).reduced(kBarPadX, 0));
+    area.removeFromTop(kGap);
+    int overlayTop = kPagePad + barH;
+    if (noticeBanner_.isVisible())
     {
-        auto transportArea = topBar.removeFromLeft(152);
-        playBtn_.setBounds(transportArea.removeFromLeft(56).withSizeKeepingCentre(56, 52));
-        transportArea.removeFromLeft(8);
-        loopBtn_.setBounds(transportArea.removeFromLeft(80).withSizeKeepingCentre(80, 36));
-    }
-
-    // Zone 3: Utility (230px) — Undo, Redo, DAW toggle
-    {
-        auto utilityArea = topBar.removeFromLeft(230);
-        undoBtn_.setBounds(utilityArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
-        utilityArea.removeFromLeft(6);
-        redoBtn_.setBounds(utilityArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
-        utilityArea.removeFromLeft(8);
-        dawSyncBtn_.setBounds(utilityArea.removeFromLeft(70));
-    }
-
-    // Zone 4: Stem status indicators (180px)
-    {
-        // (Stem status indicators removed — MainWindow has these in its top strip.)
-    }
-
-    // Zone 5: Grid division combo (was presetCombo_ — restored to divisionCombo_)
-    divisionCombo_.setBounds(topBar.removeFromLeft(100).withSizeKeepingCentre(96, 36));
-    divisionCombo_.toFront(false);  // ensure popup renders above siblings
-
-    // Zone 6: BPM (150px) — label + input + R button
-    {
-        auto bpmArea = topBar.removeFromLeft(150);
-        bpmTitleLabel_.setBounds(bpmArea.removeFromLeft(40));
-        bpmInput_.setBounds(bpmArea.removeFromLeft(72).withSizeKeepingCentre(72, 36));
-        bpmArea.removeFromLeft(4);
-        bpmRoundBtn_.setBounds(bpmArea.removeFromLeft(28).withSizeKeepingCentre(28, 28));
-    }
-
-    // Zone 7: Mode buttons (260px) — Half, Dbl, LOCK, TAP
-    {
-        auto modeArea = topBar.removeFromLeft(260);
-        halfTempoBtn_.setBounds(modeArea.removeFromLeft(54).withSizeKeepingCentre(54, 32));
-        modeArea.removeFromLeft(4);
-        doubleTempoBtn_.setBounds(modeArea.removeFromLeft(48).withSizeKeepingCentre(48, 32));
-        modeArea.removeFromLeft(4);
-        gridLockBtn_.setBounds(modeArea.removeFromLeft(60).withSizeKeepingCentre(60, 32));
-        modeArea.removeFromLeft(4);
-        tapTempoBtn_.setBounds(modeArea.removeFromLeft(54).withSizeKeepingCentre(54, 32));
-    }
-
-    // Zone 8: LOAD SONG + Eject (~190px remainder)
-    {
-        auto rightArea = topBar.reduced(0, 6);
-        // Eject button on the far right (32×32), same row as LOAD SONG
-        auto ejectSlot = rightArea.removeFromRight(32);
-        ejectBtn_.setBounds(ejectSlot.withSizeKeepingCentre(32, 32));
-        rightArea.removeFromRight(4);  // small gap
-        loadSongBtn_.setBounds(rightArea);
-    }
-
-    // divisionCombo_ is now visible in Zone 5 above — no off-screen override needed.
-
-    // Flash label: bottom-left corner toast for undo/redo confirmations.
-    {
-        auto bounds = getLocalBounds();
-        undoStatusLabel_.setBounds(bounds.getX() + 8, bounds.getBottom() - 26, 280, 20);
-    }
-
-    area.removeFromTop(4);
-
-    // ── Bottom row: Smart Fill + Drag Wave ──────────────────────────
-    auto midiRow = area.removeFromBottom(28);
-    dragSeqWavArea_.setBounds(midiRow.removeFromRight(100));
-    midiRow.removeFromRight(4);
-    smartFillBtn_.setBounds(midiRow.removeFromLeft(80));
-
-    exportBtn_.setVisible(false);
-
-    area.removeFromBottom(4);
-
-    // ── Split remaining area: playhead strip + waveforms + controller ──
-    if (!stemWaveforms_.empty())
-    {
-        // Playhead strip (14px above waveforms)
-        playheadStripArea_ = area.removeFromTop(14);
-        area.removeFromTop(2);
-
-        int stemCount = static_cast<int>(stemWaveforms_.size());
-        int numSeqLanes = static_cast<int>(sequencerLanes_.size());
-        // Scale lane height: 1 lane = tall (like a channel), more lanes = smaller
-        int maxSeqH = area.getHeight() / 2;  // Max half the total area for sequencer
-        int seqLaneH = numSeqLanes > 0
-            ? juce::jlimit(50, 140, (maxSeqH - 28) / juce::jmax(1, numSeqLanes))
-            : 62;
-        int seqTotalH = numSeqLanes > 0 ? (numSeqLanes * seqLaneH + (numSeqLanes - 1) * 3 + 28) : 24;
-
-        // No controller area — sequencer lanes use all remaining space below waveforms
-        int totalH = area.getHeight();
-        int waveformAreaH = totalH - seqTotalH - 8;
-
-        auto waveArea = area.removeFromTop(waveformAreaH);
-        area.removeFromTop(4);
-
-        // Sequencer area (uses remaining space)
-        auto seqArea = area;
-        auto seqBtnRow = seqArea.removeFromTop(24);
-        // Clear All at far right (red)
-        clearAllBtn_.setBounds(seqBtnRow.removeFromRight(58));
-        seqBtnRow.removeFromRight(4);
-        // Left section: +SEQ | Play All | Auto | Quick Assign | Poly/1SH | LINK ALL | Snap | Free | Tips
-        addSeqBtn_.setBounds(seqBtnRow.removeFromLeft(55));
-        seqBtnRow.removeFromLeft(3);
-        playAllSeqBtn_.setBounds(seqBtnRow.removeFromLeft(55));
-        seqBtnRow.removeFromLeft(5);
-        autoBeatBtn_.setBounds(seqBtnRow.removeFromLeft(95));
-        seqBtnRow.removeFromLeft(4);
-        quickAssignBtn_.setBounds(seqBtnRow.removeFromLeft(80));
-        seqBtnRow.removeFromLeft(3);
-        monoPolyBtn_.setBounds(seqBtnRow.removeFromLeft(75));
-        seqBtnRow.removeFromLeft(3);
-        linkAllBtn_.setBounds(seqBtnRow.removeFromLeft(65));
-        seqBtnRow.removeFromLeft(6);
-        snapToggle_.setBounds(seqBtnRow.removeFromLeft(62));
-        seqBtnRow.removeFromLeft(2);
-        freeformToggle_.setBounds(seqBtnRow.removeFromLeft(52));
-        seqBtnRow.removeFromLeft(4);
-        fadeToggle_.setBounds(seqBtnRow.removeFromLeft(52));
-        seqBtnRow.removeFromLeft(4);
-        tooltipToggle_.setBounds(seqBtnRow.removeFromLeft(52));
-
-        for (int i = 0; i < numSeqLanes; ++i)
-        {
-            seqArea.removeFromTop(3);
-            sequencerLanes_[static_cast<size_t>(i)]->setBounds(seqArea.removeFromTop(seqLaneH));
-        }
-
-        controllerArea_ = {};
-
-        // Stack visible stems in the waveform area (focus mode hides others)
-        int visibleCount = 0;
-        for (auto& w : stemWaveforms_)
-            if (w->isVisible()) ++visibleCount;
-        if (visibleCount == 0) visibleCount = 1;
-
-        int gap = 4;
-        int totalGaps = (visibleCount - 1) * gap;
-        int stemH = (waveArea.getHeight() - totalGaps) / visibleCount;
-
-        for (int i = 0; i < stemCount; ++i)
-        {
-            if (!stemWaveforms_[static_cast<size_t>(i)]->isVisible())
-                continue;
-            stemWaveforms_[static_cast<size_t>(i)]->setBounds(waveArea.removeFromTop(stemH));
-            waveArea.removeFromTop(gap);
-        }
-
-        controllerAreaLabel_.setBounds(juce::Rectangle<int>());
+        noticeBanner_.setBounds(area.removeFromTop(kNoticeH));
+        area.removeFromTop(kGap);
+        overlayTop = area.getY();
     }
     else
     {
-        controllerArea_ = {};
+        noticeBanner_.setBounds({});
+    }
+
+    const bool hasLanes = ! stemWaveforms_.empty();
+    // Empty state: no stale, click-through buttons under the overlay (D-9).
+    for (auto* c : std::initializer_list<juce::Component*> { &autoBeatBtn_, &quickAssignBtn_, &monoPolyBtn_,
+                       &linkAllBtn_, &snapToggle_, &freeformToggle_, &fadeToggle_, &tooltipToggle_, &clearAllBtn_,
+                       &seqCollapseBtn_, &addSeqBtn_, &playAllSeqBtn_, &smartFillBtn_, &dragSeqWavArea_,
+                       &chopInspector_ })
+        c->setVisible(hasLanes);
+    playheadStripArea_ = {};
+    controllerArea_    = {};
+    int stemH = 0, seqH = 0;
+
+    if (hasLanes)
+    {
+        playheadStripArea_ = area.removeFromTop(kStripH);
+        area.removeFromTop(2);
+
+        int visibleCount = 0;
+        for (auto& w : stemWaveforms_)
+            if (w->isVisible()) ++visibleCount;
+        visibleCount = juce::jmax(1, visibleCount);
+
+        const int numSeq   = static_cast<int>(sequencerLanes_.size());
+        const bool seqOpen = ! seqCollapsed_ && numSeq > 0;
+        const int avail     = area.getHeight() - (kGap + kRowH + kGap + kRowH + kGap + kRowH);
+        const int stemsMinH = visibleCount * kStemLaneMinH + (visibleCount - 1) * kStemGap;
+        const int stemsPref = juce::jmax(stemsMinH, juce::roundToInt((float) avail * kStemShare));
+        if (seqOpen)
+        {
+            const int wanted = numSeq * kSeqLaneMaxH + (numSeq - 1) * kSeqLaneGap;
+            const int room   = juce::jmax(kSeqLaneMinH, avail - stemsPref - kSeqLaneGap);
+            seqH = juce::jmin(wanted, room);
+        }
+        auto waveArea = area.removeFromTop(juce::jmax(0, avail - (seqOpen ? seqH + kSeqLaneGap : 0)));
+        area.removeFromTop(kGap);
+        layoutToolRow(area.removeFromTop(kRowH));
+        area.removeFromTop(kGap);
+        layoutInspectorRow(area.removeFromTop(kRowH));
+        area.removeFromTop(kGap);
+        layoutSeqHeader(area.removeFromTop(kRowH));
+        area.removeFromTop(kSeqLaneGap);
+        // Lanes are laid out even when collapsed so each lane's slotArea_ stays
+        // valid for restoreState() (protects the 2026-04-22 "slots clustered left" fix).
+        layoutSeqLanes(seqOpen ? area.removeFromTop(seqH) : area.withHeight(0), seqOpen);
+
+        const int totalGaps = (visibleCount - 1) * kStemGap;
+        stemH = juce::jmax(0, (waveArea.getHeight() - totalGaps) / visibleCount);
+        for (auto& w : stemWaveforms_)
+        {
+            if (! w->isVisible()) continue;
+            w->setBounds(waveArea.removeFromTop(stemH));
+            waveArea.removeFromTop(kStemGap);
+        }
+        controllerAreaLabel_.setBounds({});
+    }
+    else
+    {
+        seqViewport_.setVisible(false);
+        undoStatusLabel_.setBounds({});
     }
 
     // MIDI learn overlay covers the entire page
     midiLearnOverlay_.setBounds(getLocalBounds());
 
-    // Empty-state overlay covers the entire page (z-order: on top of everything)
-    loadAudioOverlay_.setBounds(getLocalBounds());
+    // Empty-state overlay starts BELOW the top bar (D-9): LOAD SONG / settings stay reachable.
+    loadAudioOverlay_.setBounds(getLocalBounds().withTrimmedTop(overlayTop));
     loadAudioOverlay_.toFront(false);
+    if (noticeBanner_.isVisible())
+        noticeBanner_.toFront(false);
 
+    const juce::String log = juce::String("[SModePage] layout: bar=") + topBarModeName((int) topBarMode_) + "/" + juce::String(barH)
+        + " lanes=" + juce::String((int) stemWaveforms_.size()) + "x" + juce::String(stemH)
+        + " seq=" + juce::String((int) sequencerLanes_.size()) + (seqCollapsed_ ? " collapsed" : " open")
+        + " seqH=" + juce::String(seqH) + " sys=" + juce::String(systemZoneW_);
+    if (log != lastLayoutLog_)
+    {
+        lastLayoutLog_ = log;
+        juce::Logger::writeToLog(log);
+    }
+}
+
+void SModePage::layoutTopBar(juce::Rectangle<int> bar)
+{
+    const int barH  = bar.getHeight();
+    const int ctrlH = barH >= kBarHTall ? 36 : (barH >= kBarHNormal ? 32 : 28);
+    const int playH = barH >= kBarHTall ? 48 : (barH >= kBarHNormal ? 40 : 34);
+    const int W = bar.getWidth();
+
+    topBarMode_ = topBarMinWidth(kFull, true, true, systemZoneW_)    <= W ? TopBarMode::Full
+                : topBarMinWidth(kMedium, false, true, systemZoneW_) <= W ? TopBarMode::Medium
+                                                                         : TopBarMode::Compact;
+    const auto& s      = topBarMode_ == TopBarMode::Full ? kFull : topBarMode_ == TopBarMode::Medium ? kMedium : kCompact;
+    const bool full    = topBarMode_ == TopBarMode::Full;
+    const bool compact = topBarMode_ == TopBarMode::Compact;
+    const bool showLogo = ! compact || topBarMinWidth(kCompact, false, true, systemZoneW_) <= W;
+
+    bpmTitleLabel_.setVisible(full);
+    bpmRoundBtn_.setVisible(full);
+    dawSyncBtn_.setVisible(full);
+    halfTempoBtn_.setVisible(! compact);
+    doubleTempoBtn_.setVisible(! compact);
+    gridLockBtn_.setVisible(! compact);
+    tempoMoreBtn_.setVisible(! full);
+    logoLabel_.setVisible(showLogo);
+    for (auto* c : std::initializer_list<juce::Component*> { &bpmTitleLabel_, &bpmRoundBtn_, &dawSyncBtn_,
+                       &halfTempoBtn_, &doubleTempoBtn_, &gridLockBtn_, &tempoMoreBtn_, &logoLabel_ })
+        if (! c->isVisible()) c->setBounds({});
+
+    auto left = [&bar](juce::Component& c, int w, int h)
+    {
+        c.setBounds(bar.removeFromLeft(w).withSizeKeepingCentre(w, h));
+    };
+
+    // Right end: system zone (RootComponent's window buttons), then eject.
+    systemZone_ = bar.removeFromRight(systemZoneW_);
+    bar.removeFromRight(s.G);
+    ejectBtn_.setBounds(bar.removeFromRight(s.eject).withSizeKeepingCentre(s.eject, s.eject));
+    bar.removeFromRight(s.g);
+
+    // Left groups: [logo] | play loop | undo redo | grid [BPM:] bpm [R][DAW] [half dbl lock] tap [...]
+    if (showLogo) { left(logoLabel_, s.logo, barH - 8); bar.removeFromLeft(s.G); }
+    left(playBtn_, s.play, playH);          bar.removeFromLeft(s.g);
+    left(loopBtn_, s.loop, ctrlH);          bar.removeFromLeft(s.G);
+    left(undoBtn_, s.undo, ctrlH);          bar.removeFromLeft(s.g);
+    left(redoBtn_, s.undo, ctrlH);          bar.removeFromLeft(s.G);
+    left(divisionCombo_, s.grid, ctrlH);    bar.removeFromLeft(s.g);
+    divisionCombo_.toFront(false);
+    if (full) left(bpmTitleLabel_, kBpmLabelW, ctrlH);
+    left(bpmInput_, s.bpm, ctrlH);
+    bar.removeFromLeft(s.g); left(keyLabel_, s.key, ctrlH);
+    keyLabel_.setFont(juce::FontOptions(full ? 13.0f : (compact ? 11.0f : 12.0f), juce::Font::bold));
+    if (full)
+    {
+        bar.removeFromLeft(4);   left(bpmRoundBtn_, kRoundW, kRoundW);
+        bar.removeFromLeft(s.g); left(dawSyncBtn_, kDawW, ctrlH);
+    }
+    if (! compact)
+    {
+        bar.removeFromLeft(s.g); left(halfTempoBtn_,   s.half, ctrlH);
+        bar.removeFromLeft(s.g); left(doubleTempoBtn_, s.dbl,  ctrlH);
+        bar.removeFromLeft(s.g); left(gridLockBtn_,    s.lock, ctrlH);
+    }
+    bar.removeFromLeft(s.g); left(tapTempoBtn_, s.tap, ctrlH);
+    if (! full) { bar.removeFromLeft(s.g); left(tempoMoreBtn_, s.more, ctrlH); }
+
+    // Whatever is left is flex; LOAD SONG takes up to loadMax from its right end.
+    bar.removeFromLeft(s.G);
+    const int loadW = juce::jlimit(s.loadMin, s.loadMax, bar.getWidth());
+    loadSongBtn_.setBounds(bar.removeFromRight(loadW).withSizeKeepingCentre(loadW, ctrlH));
+    jassert(bar.getWidth() >= 0);   // fails only if the mode table and topBarMinWidth disagree
+}
+
+void SModePage::layoutToolRow(juce::Rectangle<int> row)
+{
+    clearAllBtn_.setBounds(row.removeFromRight(58));      row.removeFromRight(8);
+    autoBeatBtn_.setBounds(row.removeFromLeft(95));       row.removeFromLeft(4);
+    quickAssignBtn_.setBounds(row.removeFromLeft(80));    row.removeFromLeft(3);
+    monoPolyBtn_.setBounds(row.removeFromLeft(75));       row.removeFromLeft(3);
+    linkAllBtn_.setBounds(row.removeFromLeft(65));        row.removeFromLeft(6);
+    snapToggle_.setBounds(row.removeFromLeft(62));        row.removeFromLeft(2);
+    freeformToggle_.setBounds(row.removeFromLeft(52));    row.removeFromLeft(4);
+    fadeToggle_.setBounds(row.removeFromLeft(52));        row.removeFromLeft(4);
+    tooltipToggle_.setBounds(row.removeFromLeft(52));     row.removeFromLeft(8);
+    // B15: the undo toast sits in the free space of this row, never over a button.
+    undoStatusLabel_.setBounds(row.withWidth(juce::jmax(0, juce::jmin(280, row.getWidth()))));
+}
+
+void SModePage::layoutInspectorRow(juce::Rectangle<int> row)
+{
+    chopInspector_.setBounds(row);
+}
+
+void SModePage::layoutSeqHeader(juce::Rectangle<int> row)
+{
+    dragSeqWavArea_.setBounds(row.removeFromRight(110));
+    seqCollapseBtn_.setBounds(row.removeFromLeft(58));    row.removeFromLeft(4);
+    addSeqBtn_.setBounds(row.removeFromLeft(55));         row.removeFromLeft(3);
+    playAllSeqBtn_.setBounds(row.removeFromLeft(55));     row.removeFromLeft(5);
+    smartFillBtn_.setBounds(row.removeFromLeft(80));
+}
+
+void SModePage::layoutSeqLanes(juce::Rectangle<int> r, bool show)
+{
+    seqViewport_.setVisible(show);
+    seqViewport_.setBounds(r);
+    const int n = static_cast<int>(sequencerLanes_.size());
+    if (n == 0)
+    {
+        seqContent_.setSize(r.getWidth(), 0);
+        return;
+    }
+    const int fitH     = (r.getHeight() - (n - 1) * kSeqLaneGap) / n;
+    const int laneH    = juce::jlimit(kSeqLaneMinH, kSeqLaneMaxH, fitH);
+    const int contentH = n * laneH + (n - 1) * kSeqLaneGap;
+    const bool scroll  = show && contentH > r.getHeight();
+    const int contentW = juce::jmax(0, r.getWidth() - (scroll ? kSeqScrollBarW : 0));
+    seqContent_.setSize(contentW, contentH);
+    for (int i = 0; i < n; ++i)
+        sequencerLanes_[(size_t) i]->setBounds(0, i * (laneH + kSeqLaneGap), contentW, laneH);
+}
+
+void SModePage::setSystemZoneWidth(int w)
+{
+    if (w == systemZoneW_) return;
+    systemZoneW_ = w;
+    if (! getLocalBounds().isEmpty()) resized();
+}
+
+void SModePage::updateSeqCollapseButton()
+{
+    seqCollapseBtn_.setButtonText(juce::String::charToString(seqCollapsed_ ? (juce::juce_wchar) 0x25B8
+                                                                           : (juce::juce_wchar) 0x25BE) + " SEQ");
+}
+
+void SModePage::updateAudioDependentControls()
+{
+    // D-9: controls that do nothing without a song are disabled until one loads.
+    for (auto* c : std::initializer_list<juce::Component*> { &playBtn_, &loopBtn_, &bpmRoundBtn_, &halfTempoBtn_,
+                       &doubleTempoBtn_, &gridLockBtn_, &tapTempoBtn_ })
+        c->setEnabled(audioLoaded_);
+    juce::Logger::writeToLog("[SModePage] audio-dependent controls " + juce::String(audioLoaded_ ? "enabled" : "disabled"));
+}
+
+void SModePage::showTempoOverflowMenu()
+{
+    const bool compact = topBarMode_ == TopBarMode::Compact;
+    juce::PopupMenu m;
+    m.addItem(1, "Round BPM to integer", audioLoaded_ && detectedBpm_ >= 30.0);
+    if (compact)
+    {
+        m.addItem(2, "Half tempo",   audioLoaded_ && detectedBpm_ / 2.0 >= 30.0);
+        m.addItem(3, "Double tempo", audioLoaded_ && detectedBpm_ > 0.0 && detectedBpm_ * 2.0 <= 300.0);
+        m.addItem(4, "Lock grid", audioLoaded_, gridLocked_);
+    }
+    m.addItem(5, "Sync tempo to DAW", true, dawSyncBtn_.getToggleState());
+    juce::Logger::writeToLog("[SModePage] tempo overflow menu opened (" + juce::String(topBarModeName((int) topBarMode_)) + ")");
+    juce::Component::SafePointer<SModePage> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&tempoMoreBtn_),
+        [safe](int r)
+        {
+            if (safe == nullptr || r == 0) return;
+            juce::Logger::writeToLog("[SModePage] tempo menu item " + juce::String(r));
+            switch (r)
+            {
+                case 1: safe->bpmRoundBtn_.triggerClick();    break;
+                case 2: safe->halfTempoBtn_.triggerClick();   break;
+                case 3: safe->doubleTempoBtn_.triggerClick(); break;
+                case 4: safe->gridLockBtn_.triggerClick();    break;
+                case 5: safe->dawSyncBtn_.triggerClick();     break;   // toggles, then onClick
+                default: break;
+            }
+        });
+}
+
+StemWaveformComponent* SModePage::firstVisibleLane() const
+{
+    for (auto& w : stemWaveforms_)
+        if (w != nullptr && w->isVisible())
+            return w.get();
+    return nullptr;
+}
+
+juce::Rectangle<int> SModePage::getWaveColumnInPage() const
+{
+    if (auto* w = firstVisibleLane())
+        return getLocalArea(w, w->getWaveArea());
+    return {};
+}
+
+int SModePage::playheadStripX(double timeSec) const
+{
+    auto* w = firstVisibleLane();
+    if (w == nullptr || playheadStripArea_.isEmpty()) return -1;
+    const double viewStart = w->getViewStartTime();
+    const double viewEnd   = w->getViewEndTime();
+    const double viewDur   = viewEnd - viewStart;
+    if (viewDur <= 0.0 || timeSec < viewStart || timeSec > viewEnd) return -1;
+    const auto col = getWaveColumnInPage();
+    if (col.getWidth() <= 0) return -1;
+    return col.getX() + static_cast<int>((timeSec - viewStart) / viewDur * col.getWidth());
 }
 
 juce::Colour SModePage::getStemColour(int index)
@@ -2224,150 +2530,278 @@ juce::Colour SModePage::getStemColour(int index)
     return colours[index % numColours];
 }
 
-// ── Auto-Segmentation ────────────────────────────────────────────────────────
+// -- Auto-chop -----------------------------------------------------------------
 
-void SModePage::autoSegmentByDivision(double beatsPerSegment)
+juce::String SModePage::autoModeName(AutoMode m)
 {
-    if (!smodeService_) return;
+    switch (m)
+    {
+        case AutoMode::Smart:     return "Auto Chop";
+        case AutoMode::Beat:      return "Auto: Beat";
+        case AutoMode::Bar:       return "Auto: Bar";
+        case AutoMode::TwoBar:    return "Auto: 2-Bar";
+        case AutoMode::Transient: return "Auto: Transient";
+    }
+    return "Auto Chop";
+}
+
+uint64_t SModePage::segmentLayoutHash(const SModeSegmentModel& m)
+{
+    uint64_t h = 1469598103934665603ULL;
+    auto mix = [&h](uint64_t v) { for (int i = 0; i < 8; ++i) { h ^= (v >> (i * 8)) & 0xFFu; h *= 1099511628211ULL; } };
+    mix((uint64_t) m.getStemCount());
+    for (const auto& st : m.getStems())
+    {
+        mix((uint64_t) st.segments.size());
+        for (const auto& sg : st.segments)
+        {
+            mix((uint64_t) sg.startSample);
+            mix((uint64_t) sg.endSample);
+            mix((uint64_t) (int64_t) sg.midiNote);
+        }
+    }
+    return h;
+}
+
+void SModePage::updateAutoButton()
+{
+    autoBeatBtn_.setEnabled(! autoChopBusy_);
+    autoBeatBtn_.setButtonText(autoChopBusy_ ? juce::String("Analyzing...") : autoModeName(autoMode_));
+    autoBeatBtn_.setTooltip(autoMode_ == AutoMode::Smart
+        ? "Chop every stem: transients on Drums + Vocals, bars on Bass + Melody, max "
+              + juce::String(kMaxChopsPerStem) + " chops per stem spread over the song, grid from the downbeat. "
+              "Right-click: Beat / Bar / 2-Bar / Transient"
+        : autoModeName(autoMode_) + " on every stem (max " + juce::String(kMaxChopsPerStem)
+              + " chops per stem). Right-click to change the mode");
+}
+
+void SModePage::runAutoChop(AutoMode mode, bool pushUndo, const juce::String& reason)
+{
+    juce::Logger::writeToLog("[SModePage] === runAutoChop mode=" + autoModeName(mode) + " reason=" + reason
+                             + " pushUndo=" + juce::String(pushUndo ? 1 : 0) + " ===");
+    if (smodeService_ == nullptr) return;
+    if (autoChopBusy_)
+    {
+        // Review U-H4: never two analyses at once (they used to stack chops).
+        juce::Logger::writeToLog("[SModePage] runAutoChop ignored: an analysis is already running");
+        return;
+    }
     auto& model = smodeService_->getModel();
     double bpm = model.getDetectedTempo();
-
     if (bpm <= 0.0)
     {
-        bpm = 120.0;
-        model.setDetectedTempo(bpm);
-        bpmLabel_.setText("BPM: 120 (default)", juce::dontSendNotification);
+        bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
+        juce::Logger::writeToLog("[SModePage] runAutoChop: no detected tempo yet, using " + juce::String(bpm, 2));
     }
+    const double sr = model.getSampleRate() > 0.0 ? model.getSampleRate() : 44100.0;
+    const double offsetSec = model.getGridOffsetSeconds();
 
-    double sampleRate = model.getSampleRate();
-    double segmentDuration = (60.0 / bpm) * beatsPerSegment;
-    int64_t segmentSamples = static_cast<int64_t>(segmentDuration * sampleRate);
-
-    // Use the grid offset so segments align with visible grid lines
-    double gridOffset = 0.0;
-    if (!stemWaveforms_.empty())
-        gridOffset = stemWaveforms_[0]->getGridOffsetSeconds();
-    int64_t offsetSamples = juce::jlimit((int64_t)0,
-                                          (int64_t)(sampleRate * 600),
-                                          static_cast<int64_t>(gridOffset * sampleRate));
-
-    model.pushUndoState("Auto-segment");
-
-    for (int stemIdx = 0; stemIdx < model.getStemCount(); ++stemIdx)
+    struct Job { int stem; int kind; std::shared_ptr<const juce::AudioBuffer<float>> audio; };   // kind: 0 grid, 1 transient, 2 phrase
+    std::vector<Job> jobs;
+    double gridBeats = 4.0;
+    if (mode == AutoMode::Beat)   gridBeats = 1.0;
+    if (mode == AutoMode::TwoBar) gridBeats = 8.0;
+    for (int si = 0; si < model.getStemCount(); ++si)
     {
-        model.clearSegments(stemIdx);
-        auto* stem = model.getStem(stemIdx);
-        if (!stem || stem->audioBuffer.getNumSamples() == 0) continue;
-
-        int64_t totalSamples = stem->audioBuffer.getNumSamples();
-
-        // Auto-segment STRICTLY from the grid (first downbeat), not song start.
-        // Anything before the grid offset (intro / silence) is intentionally left
-        // without segments — it is not musical grid territory.
-        int64_t pos = juce::jlimit((int64_t) 0, totalSamples, offsetSamples);
-        while (pos + segmentSamples <= totalSamples)
+        auto* st = model.getStem(si);
+        if (st == nullptr || st->audioBuffer.getNumSamples() == 0) continue;
+        if (si < (int) stemWaveforms_.size() && removedStems_.count(si) > 0) continue;   // removed channel
+        int kind = 0;
+        if (mode == AutoMode::Transient) kind = 1;
+        else if (mode == AutoMode::Smart)
         {
-            model.addSegment(stemIdx, pos, pos + segmentSamples);
-            pos += segmentSamples;
+            const auto n = st->name.toLowerCase();
+            if (n.contains("drum"))       kind = 1;
+            else if (n.contains("vocal")) kind = 2;
         }
-        // Tail: include any remainder > 25% of a full segment as a partial final segment.
-        if (totalSamples - pos > segmentSamples / 4)
-            model.addSegment(stemIdx, pos, totalSamples);
+        jobs.push_back({ si, kind, model.getSharedStemAudio(si) });   // B33: shared, no copy
     }
+    if (jobs.empty()) return;
 
-    juce::Logger::writeToLog("✅ [SModePage] Auto-segment: " + juce::String(beatsPerSegment)
-                             + " beats/seg at " + juce::String(bpm, 1) + " BPM");
-
-    for (auto& wf : stemWaveforms_)
+    autoChopBusy_ = true;
+    const uint64_t ticket = ++autoChopTicket_;
+    updateAutoButton();
+    const uint64_t generation = model.getContentGeneration();
+    const uint64_t layoutAtStart = segmentLayoutHash(model);
+    auto safeThis = juce::Component::SafePointer<SModePage>(this);
+    const bool queued = smodeService_->runBackground([safeThis, jobs, bpm, sr, offsetSec, gridBeats, generation,
+                                                      layoutAtStart, mode, pushUndo, ticket]()
     {
-        wf->setGridBPM(bpm);
-        wf->repaint();
+        std::vector<std::pair<int, std::vector<Range>>> plans;
+        const int64_t gridLen = (int64_t) std::llround(60.0 / bpm * gridBeats * sr);
+        const int64_t offset  = (int64_t) std::llround(juce::jmax(0.0, offsetSec) * sr);
+        for (const auto& j : jobs)
+        {
+            if (j.audio == nullptr) continue;
+            auto cands = j.kind == 0 ? gridCandidates(j.audio->getNumSamples(), offset, gridLen)
+                                     : transientCandidates(*j.audio, sr, bpm, j.kind == 2);
+            const int nCand = (int) cands.size();
+            auto picked = pickChops(*j.audio, cands, kMaxChopsPerStem);
+            juce::Logger::writeToLog("[SModePage] auto-chop stem " + juce::String(j.stem) + ": "
+                                     + juce::String(j.kind == 0 ? "grid" : (j.kind == 1 ? "transient" : "phrase"))
+                                     + " candidates=" + juce::String(nCand) + " kept=" + juce::String((int) picked.size()));
+            plans.push_back({ j.stem, std::move(picked) });
+        }
+        juce::MessageManager::callAsync([safeThis, plans = std::move(plans), generation, layoutAtStart, mode, pushUndo, ticket]()
+        {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;   // page destroyed (editor closed)
+            if (ticket != self->autoChopTicket_)
+            {
+                // N-20: a newer job (or a new song) owns the busy flag now.
+                juce::Logger::writeToLog("[SModePage] auto-chop result dropped (stale ticket " + juce::String((juce::int64) ticket)
+                                         + ", current " + juce::String((juce::int64) self->autoChopTicket_) + ")");
+                return;
+            }
+            self->autoChopBusy_ = false;
+            self->updateAutoButton();      // U-M8: the button never stays on "Analyzing..."
+            const bool rechopPending = std::exchange(self->downbeatRechopPending_, false);   // dropped results never re-chop
+            if (self->smodeService_ == nullptr) return;
+            auto& model = self->smodeService_->getModel();
+            if (generation != model.getContentGeneration())
+            {
+                juce::Logger::writeToLog("[SModePage] auto-chop result dropped (song changed)");
+                return;
+            }
+            if (segmentLayoutHash(model) != layoutAtStart)
+            {
+                juce::Logger::writeToLog("[SModePage] auto-chop result dropped (chops edited / undone during the analysis)");
+                self->flashUndoStatus("Auto chop cancelled: chops changed meanwhile");
+                return;
+            }
+            if (pushUndo) model.pushUndoState("Auto chop");
+            int total = 0;
+            for (const auto& [si, ranges] : plans)
+            {
+                model.clearSegments(si);
+                for (const auto& r : ranges) { model.addSegment(si, r.first, r.second); ++total; }
+            }
+            self->lastAutoChopValid_  = true;
+            self->lastAutoChopMode_   = mode;
+            self->lastAutoChopLayout_ = segmentLayoutHash(model);
+            for (auto& wf : self->stemWaveforms_) { wf->setGridBPM(model.getDetectedTempo() > 0.0 ? model.getDetectedTempo() : 120.0); wf->repaint(); }
+            self->refreshInspector();
+            juce::Logger::writeToLog("[SModePage] auto-chop applied: " + juce::String(total) + " chops on "
+                                     + juce::String((int) plans.size()) + " stems");
+            if (rechopPending)
+            {
+                if (mode != AutoMode::Transient)
+                {
+                    juce::Logger::writeToLog("[SModePage] running the deferred downbeat re-chop");
+                    self->runAutoChop(mode, false, "downbeat (deferred)");
+                }
+            }
+        });
+    });
+    if (! queued && ticket == autoChopTicket_)
+    {
+        autoChopBusy_ = false;
+        updateAutoButton();
+        juce::Logger::writeToLog("[SModePage] auto-chop job NOT queued (service shutting down)");
     }
 }
 
-void SModePage::autoSegmentByTransient()
+// -- Quick Assign (B21) ------------------------------------------------------
+
+void SModePage::resetQuickAssignButton()
 {
-    if (!smodeService_) return;
+    quickAssignBusy_ = false;
+    quickAssignBtn_.setEnabled(true);
+    quickAssignBtn_.setButtonText("Quick Assign");
+}
+
+void SModePage::runQuickAssign(const std::set<int>& stems)
+{
+    juce::Logger::writeToLog("[SModePage] === runQuickAssign stems=" + juce::String((int) stems.size()) + " ===");
+    if (smodeService_ == nullptr || quickAssignBusy_ || stems.empty()) return;
     auto& model = smodeService_->getModel();
-    model.pushUndoState("Auto-segment transient");
 
-    // Snapshot stem audio data into thread-safe copies (mono mix per stem)
-    struct StemSnapshot {
-        int stemIdx;
-        std::vector<float> mono;
-        int totalSamples;
-        double sampleRate;
-    };
-
-    double sampleRate = model.getSampleRate();
-    std::vector<StemSnapshot> snapshots;
-
-    for (int si = 0; si < model.getStemCount(); ++si)
+    // Chops are identified by their sample range (indices go stale if the
+    // user edits during the analysis - review U-M5). Audio is shared (B33).
+    struct StemJob { int stem; std::shared_ptr<const juce::AudioBuffer<float>> audio; std::vector<Range> chops; };
+    std::vector<StemJob> jobs;
+    for (int si : stems)
     {
-        auto* stem = model.getStem(si);
-        if (!stem || stem->audioBuffer.getNumSamples() == 0) continue;
-        const auto& buf = stem->audioBuffer;
-        int numSmp = buf.getNumSamples();
-        int numCh = buf.getNumChannels();
-
-        // Mix to mono for spectral analysis
-        std::vector<float> mono(numSmp, 0.0f);
-        for (int ch = 0; ch < numCh; ++ch)
-        {
-            const float* ptr = buf.getReadPointer(ch);
-            for (int i = 0; i < numSmp; ++i)
-                mono[i] += ptr[i];
-        }
-        if (numCh > 1)
-            for (auto& v : mono) v /= static_cast<float>(numCh);
-
-        snapshots.push_back({ si, std::move(mono), numSmp, sampleRate });
-        model.clearSegments(si);
+        auto* st = model.getStem(si);
+        if (st == nullptr || samplar::MidiMappingService::getStemBankFirstNote(si) < 0) continue;
+        StemJob j { si, model.getSharedStemAudio(si), {} };
+        for (const auto& sg : st->segments) j.chops.push_back({ sg.startSample, sg.endSample });
+        jobs.push_back(std::move(j));
     }
+    if (jobs.empty()) return;
 
-    autoTransientBtn_.setEnabled(false);
-    autoTransientBtn_.setButtonText("Analyzing...");
-
-    std::thread([this, snapshots = std::move(snapshots)]() mutable
+    quickAssignBusy_ = true;
+    const uint64_t ticket = ++quickAssignTicket_;
+    quickAssignBtn_.setEnabled(false);
+    quickAssignBtn_.setButtonText("Analyzing...");
+    const uint64_t generation = model.getContentGeneration();
+    auto safeThis = juce::Component::SafePointer<SModePage>(this);
+    const bool queued = smodeService_->runBackground([safeThis, jobs, generation, ticket]()
     {
-        // Spectral flux transient detection (4-stage pipeline)
-        samplar::SpectralFluxDetector detector;
-        // Per-stem: map stemIdx → list of {start, end} pairs
-        std::vector<std::pair<int, std::vector<std::pair<int64_t, int64_t>>>> results;
-
-        for (auto& snap : snapshots)
+        // Audible chops in time order, per stem.
+        std::vector<std::pair<int, std::vector<Range>>> audible;
+        for (const auto& j : jobs)
         {
-            auto onsets = detector.detect(snap.mono.data(), snap.totalSamples, snap.sampleRate);
-
-            // Always include 0 as first onset if not present
-            if (onsets.empty() || onsets.front() != 0)
-                onsets.insert(onsets.begin(), 0);
-
-            // Convert onsets to segment pairs
-            std::vector<std::pair<int64_t, int64_t>> segs;
-            for (size_t i = 0; i + 1 < onsets.size(); ++i)
-                segs.push_back({ onsets[i], onsets[i + 1] });
-            if (!onsets.empty())
-                segs.push_back({ onsets.back(), static_cast<int64_t>(snap.totalSamples) });
-
-            results.push_back({ snap.stemIdx, std::move(segs) });
+            std::vector<Range> keep;
+            for (const auto& r : j.chops)
+                if (j.audio != nullptr && rangeRmsDb(*j.audio, r) > -40.0) keep.push_back(r);
+            std::sort(keep.begin(), keep.end());
+            audible.push_back({ j.stem, std::move(keep) });
         }
-
-        // Apply results back on message thread
-        juce::MessageManager::callAsync([this, results = std::move(results)]()
+        juce::MessageManager::callAsync([safeThis, audible = std::move(audible), generation, ticket]()
         {
-            if (!smodeService_) return;
-            auto& model = smodeService_->getModel();
-            for (const auto& [si, segs] : results)
-                for (const auto& [s, e] : segs)
-                    model.addSegment(si, s, e);
-
-            autoTransientBtn_.setEnabled(true);
-            autoTransientBtn_.setButtonText("Auto: Transient");
-            juce::Logger::writeToLog("✅ [SModePage] Auto-segment: spectral flux transient detection (async)");
-            for (auto& wf : stemWaveforms_) wf->repaint();
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;
+            if (ticket != self->quickAssignTicket_)
+            {
+                juce::Logger::writeToLog("[SModePage] Quick Assign result dropped (stale ticket)");
+                return;
+            }
+            self->resetQuickAssignButton();
+            if (self->smodeService_ == nullptr) return;
+            auto& model = self->smodeService_->getModel();
+            if (generation != model.getContentGeneration())
+            {
+                juce::Logger::writeToLog("[SModePage] Quick Assign result dropped (song changed)");
+                return;
+            }
+            model.pushUndoState("Quick assign");
+            int mapped = 0, skipped = 0;
+            juce::StringArray summary;
+            for (const auto& [si, ranges] : audible)
+            {
+                auto* st = model.getStem(si);
+                const int first = samplar::MidiMappingService::getStemBankFirstNote(si);
+                if (st == nullptr || first < 0) continue;
+                for (int k = 0; k < (int) st->segments.size(); ++k)
+                    if (st->segments[(size_t) k].midiNote >= 0) model.clearMidiNote(si, k);
+                int note = first;
+                for (const auto& r : ranges)
+                {
+                    if (note >= first + samplar::MidiMappingService::kBankSize) { ++skipped; continue; }
+                    for (int k = 0; k < (int) st->segments.size(); ++k)
+                        if (st->segments[(size_t) k].startSample == r.first && st->segments[(size_t) k].endSample == r.second)
+                        {
+                            model.assignMidiNote(si, k, note++);
+                            ++mapped;
+                            break;
+                        }
+                }
+                if (note > first)
+                    summary.add(st->name + " " + samplar::MidiMappingService::noteNumberToName(first) + "-"
+                                + samplar::MidiMappingService::noteNumberToName(note - 1));
+            }
+            juce::Logger::writeToLog("[SModePage] Quick Assign: " + juce::String(mapped) + " chops mapped, "
+                                     + juce::String(skipped) + " beyond the 16-note bank (no chop deleted): "
+                                     + summary.joinIntoString(", "));
+            self->flashUndoStatus(summary.isEmpty() ? juce::String("Quick Assign: no audible chops")
+                                                    : "Mapped " + summary.joinIntoString(", ")
+                                                      + (skipped > 0 ? " (" + juce::String(skipped) + " over 16 not mapped)" : juce::String()));
+            for (auto& wf : self->stemWaveforms_) wf->repaint();
+            self->refreshInspector();
         });
-    }).detach();
+    });
+    if (! queued && ticket == quickAssignTicket_) resetQuickAssignButton();
 }
 
 void SModePage::updateSnapState()
@@ -2431,61 +2865,42 @@ void SModePage::setGridDivision(int division)
 
 // ── BPM / Tempo ─────────────────────────────────────────────────────────────
 
-void SModePage::applyBpm(double bpm)
+void SModePage::applyBpm(double bpm, bool pushUndo, bool fromDetection)
 {
-    juce::Logger::writeToLog("[SModePage] applyBpm: " + juce::String(bpm, 4));
+    juce::Logger::writeToLog("[SModePage] applyBpm: " + juce::String(bpm, 4) + " undo=" + juce::String(pushUndo ? 1 : 0)
+                             + " detection=" + juce::String(fromDetection ? 1 : 0));
+    if (! (bpm > 0.0)) return;
+    if (! fromDetection) ++bpmEditCounter_;   // U-M6: a running detection must not overwrite this
 
     // Stop the "..." dots animation now that we have a real BPM to display.
     bpmDotsAnim_.reset();
 
-    // Push undo BEFORE any mutation. Guarded against re-entrancy inside the model.
-    if (smodeService_)
+    // B24: only a real change is an undo step (focus changes / re-applies are not).
+    const bool changed = std::abs(bpm - detectedBpm_) > 1.0e-6;
+    if (pushUndo && changed && smodeService_)
         smodeService_->getModel().pushUndoState(
             gridLocked_ && lockedBpm_ > 0.0 ? juce::String("BPM transpose") : juce::String("BPM change"));
 
     if (gridLocked_ && lockedBpm_ > 0.0)
     {
-        // Grid is locked — BPM change becomes a transpose
-        // Ratio: newBpm / lockedBpm → semitone shift via 12 * log2(ratio)
-        double ratio = bpm / lockedBpm_;
-        double semitones = 12.0 * std::log2(ratio);
-        int semiShift = static_cast<int>(std::round(semitones));
-
+        // B17: grid locked -> the BPM change becomes a transpose of every
+        // voice, applied by the realtime engine (12 * log2(new / locked)).
+        const double ratio = bpm / lockedBpm_;
+        lockSemis_ = juce::jlimit(-24, 24, (int) std::lround(12.0 * std::log2(ratio)));
+        applyLockTranspose();
+        updateGridLockButton();
         juce::Logger::writeToLog("[SModePage] Grid LOCKED transpose: ratio=" + juce::String(ratio, 4)
-                                 + " semitones=" + juce::String(semiShift));
-
-        // Apply pitch shift to all segments across all stems
-        if (smodeService_)
-        {
-            auto& model = smodeService_->getModel();
-            for (int s = 0; s < model.getStemCount(); ++s)
-            {
-                auto* stem = model.getStem(s);
-                if (!stem) continue;
-                for (int seg = 0; seg < static_cast<int>(stem->segments.size()); ++seg)
-                {
-                    auto fx = model.getSegmentEffects(s, seg);
-                    fx.pitchSemitones = semiShift;
-                    model.setSegmentEffects(s, seg, fx);
-                }
-            }
-        }
+                                 + " semitones=" + juce::String(lockSemis_));
 
         // Update display but do NOT move the grid
         detectedBpm_ = bpm;
         bpmInput_.setText(juce::String(bpm, 2), juce::dontSendNotification);
-        bpmLabel_.setText("BPM: " + juce::String(bpm, 2) + " (T" + juce::String(semiShift > 0 ? "+" : "")
-                          + juce::String(semiShift) + "st)",
-                          juce::dontSendNotification);
-
-        // Repaint waveforms (segments may show pitch badge) but keep grid at locked BPM
-        for (auto& wf : stemWaveforms_)
-            wf->repaint();
-
+        bpmLabel_.setText("BPM: " + juce::String(bpm, 2) + " (T" + juce::String(lockSemis_ > 0 ? "+" : "")
+                          + juce::String(lockSemis_) + "st)", juce::dontSendNotification);
         return;
     }
 
-    // Normal (unlocked) — move the grid
+    // Normal (unlocked) - move the grid
     detectedBpm_ = bpm;
     bpmInput_.setText(juce::String(bpm, 2), juce::dontSendNotification);
     bpmLabel_.setText("BPM: " + juce::String(bpm, 2), juce::dontSendNotification);
@@ -2502,11 +2917,8 @@ void SModePage::applyBpm(double bpm)
 
     juce::Logger::writeToLog("[SModePage] BPM applied: " + juce::String(bpm, 2));
 
-    // ── Auto downbeat (beat 1) detection ────────────────────────────────
-    // One-shot per stem load: kick off background detection only if we
-    // haven't already computed a grid offset for this session and the BPM
-    // looks usable. The result lands via the "smode.downbeat.detected"
-    // event subscribed in onStemsReady().
+    // Auto downbeat (beat 1) detection, one-shot per stem load. The result
+    // lands via "smode.downbeat.detected" (onStemsReady subscription).
     if (smodeService_ && !downbeatDetectionRequested_)
     {
         auto& model = smodeService_->getModel();
@@ -2516,6 +2928,24 @@ void SModePage::applyBpm(double bpm)
             smodeService_->runDownbeatDetectionAsync(bpm);
         }
     }
+}
+
+void SModePage::updateGridLockButton()
+{
+    // Same text + colours from every path (click, overflow menu, undo - B24).
+    gridLockBtn_.setButtonText(! gridLocked_ ? juce::String("LOCK")
+                               : (lockSemis_ == 0 ? juce::String("LOCKED")
+                                                  : (lockSemis_ > 0 ? "LK +" : "LK ") + juce::String(lockSemis_)));
+    gridLockBtn_.setColour(juce::TextButton::buttonColourId,
+                           gridLocked_ ? juce::Colour(0xffb35900) : juce::Colour::fromString("ff21262D"));
+}
+
+void SModePage::applyLockTranspose()
+{
+    const int semis = gridLocked_ ? lockSemis_ : 0;
+    if (auto* m = midiService())
+        m->setGlobalTransposeSemitones((float) semis);
+    juce::Logger::writeToLog("[SModePage] LOCK transpose -> engine: " + juce::String(semis) + " st");
 }
 
 // ── Loop playback (Alt+Click) ─────────────────────────────────────────────
@@ -2529,37 +2959,22 @@ void SModePage::playLoopedSegment(int stemIdx, int segIdx)
     auto* seg  = model.getSegment(stemIdx, segIdx);
     if (!stem || !seg || seg->getLengthSamples() <= 0) { stopLoop(); return; }
 
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) { stopLoop(); return; }
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+    auto* midiSvc = midiService();
     if (!midiSvc) { stopLoop(); return; }
 
     midiSvc->stopAllVoices();
 
-    const auto& srcBuf = stem->audioBuffer;
+    // Voice-level looping in the engine: seamless wrap with a crossfade (A13),
+    // stem pitch knob applied, no buffer copy.
+    midiSvc->playSegment(stemIdx, segIdx, true);
 
     double sr = model.getSampleRate();
-    int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-    int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-    int len = static_cast<int>(endSmp - startSmp);
-    if (len <= 0) { stopLoop(); return; }
-
-    auto segBuf = std::make_shared<juce::AudioBuffer<float>>(srcBuf.getNumChannels(), len);
-    for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
-        segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), len);
-
-    // Use voice-level looping (seamless wrap in audio engine) instead of
-    // timer-based re-triggering. Realtime pitch is applied via stemIdx.
-    const float pitchSemi = midiSvc->getStemPitchSemitones(stemIdx);
-    juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(stemIdx)
-        + " pitch=" + juce::String(pitchSemi, 2));
-    midiSvc->playBufferDirect(segBuf, sr, 1.0f, true, stemIdx);
-
-    double durMs = (static_cast<double>(len) / sr) * 1000.0;
+    if (sr <= 0.0) sr = 44100.0;
+    const double durSec = static_cast<double>(seg->getLengthSamples()) / sr;
 
     // Animate the segment
     if (stemIdx < static_cast<int>(stemWaveforms_.size()))
-        stemWaveforms_[static_cast<size_t>(stemIdx)]->startSegmentAnimation(segIdx, durMs / 1000.0);
+        stemWaveforms_[static_cast<size_t>(stemIdx)]->startSegmentAnimation(segIdx, durSec);
 }
 
 void SModePage::stopLoop()
@@ -2568,10 +2983,7 @@ void SModePage::stopLoop()
     loopStemIdx_ = -1;
     loopSegIdx_ = -1;
 
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-    if (midiSvc) midiSvc->stopAllVoices();
+    if (auto* midiSvc = midiService()) midiSvc->stopAllVoices();
     juce::Logger::writeToLog("[SModePage] Loop STOP");
 }
 
@@ -2579,37 +2991,29 @@ void SModePage::stopLoop()
 
 void SModePage::startTransport(double startTimeSeconds)
 {
-    if (auto* reg = samplar::ServiceLocator::getRegistry())
+    if (auto* midiSvc = midiService())
     {
-        if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-        {
-            // Stop any segment-click / MIDI-triggered voices that are already playing
-            // so the global transport is the only audio source (Issue 1 fix).
-            midiSvc->stopAllVoices();
-            midiSvc->startSModeTransport(startTimeSeconds);
-            transportPlaying_ = true;
-            playBtn_.setPlaying(true);
-            transportBtn_.setButtonText(juce::String::charToString(0x25A0));  // ■ stop
-            transportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
-            startTimerHz(30);  // 30fps playhead update
-            juce::Logger::writeToLog("[SModePage] Transport START at " + juce::String(startTimeSeconds, 2) + "s");
-        }
+        // Stop any segment-click / MIDI-triggered voices that are already playing
+        // so the global transport is the only audio source (Issue 1 fix).
+        midiSvc->stopAllVoices();
+        midiSvc->startSModeTransport(startTimeSeconds);
+        transportPlaying_ = true;
+        playBtn_.setPlaying(true);
+        transportBtn_.setButtonText(juce::String::charToString(0x25A0));
+        transportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
+        juce::Logger::writeToLog("[SModePage] Transport START at " + juce::String(startTimeSeconds, 2) + "s");
     }
 }
 
 void SModePage::stopTransport()
 {
-    if (auto* reg = samplar::ServiceLocator::getRegistry())
-    {
-        if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-            midiSvc->stopSModeTransport();
-    }
+    if (auto* midiSvc = midiService())
+        midiSvc->stopSModeTransport();
 
     transportPlaying_ = false;
     playBtn_.setPlaying(false);
     transportBtn_.setButtonText(juce::String::charToString(0x25B6));  // ▶ play
     transportBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d6d3a));
-    stopTimer();
 
     // Update playhead on all waveforms
     for (auto& wf : stemWaveforms_)
@@ -2621,48 +3025,59 @@ void SModePage::stopTransport()
 
 void SModePage::timerCallback()
 {
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr) return;
+
+    syncSequencerUi(*midiSvc);
+    if (inspStem_ >= 0) refreshInspector();   // follows undo / delete / resize of the chop
+    syncStemPitchKnobs();
+    if (midiSvc->getCcBindingsGeneration() != lastCcGeneration_)
+        refreshMidiLearnInfo();
+
     if (!transportPlaying_) return;
 
-    // Poll transport position from MidiMappingService
-    if (auto* reg = samplar::ServiceLocator::getRegistry())
+    // Poll transport position from the engine (atomics)
+    if (!midiSvc->isSModeTransportActive())
     {
-        if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-        {
-            if (!midiSvc->isSModeTransportActive())
-            {
-                stopTransport();
-                return;
-            }
-            playheadTimeSec_ = midiSvc->getSModeTransportPositionSeconds();
-        }
+        stopTransport();
+        return;
     }
+    playheadTimeSec_ = midiSvc->getSModeTransportPositionSeconds();
+    updatePlayheadDisplay();
+}
 
-    // Update playhead on all waveforms
+void SModePage::updatePlayheadDisplay()
+{
+    // B32: each lane repaints only its old/new playhead column; the page
+    // repaints only the strip marker (old and new triangle), never the page.
     for (auto& wf : stemWaveforms_)
         wf->setPlayheadTime(playheadTimeSec_);
-    repaint();
+    const int x = playheadStripX(playheadTimeSec_);
+    if (x != lastStripMarkerX_)
+    {
+        if (lastStripMarkerX_ >= 0) repaint(playheadStripArea_.withX(lastStripMarkerX_ - 6).withWidth(13));
+        if (x >= 0)                 repaint(playheadStripArea_.withX(x - 6).withWidth(13));
+        lastStripMarkerX_ = x;
+    }
 }
 
 void SModePage::setPlayheadFromMouse(int x)
 {
     if (stemWaveforms_.empty() || playheadStripArea_.isEmpty()) return;
 
-    // Convert strip X to time using first waveform's view range
-    const int kStemControlW = 178;  // matches StemWaveformComponent's panel width
-    int stripWaveX = playheadStripArea_.getX() + kStemControlW;
-    int stripWaveW = playheadStripArea_.getWidth() - kStemControlW;
-    if (stripWaveW <= 0) return;
+    // Convert strip X to time using the first visible lane's wave area + view range
+    auto* lane = firstVisibleLane();
+    const auto col = getWaveColumnInPage();
+    if (lane == nullptr || col.getWidth() <= 0) return;
 
-    double frac = static_cast<double>(x - stripWaveX) / stripWaveW;
+    double frac = static_cast<double>(x - col.getX()) / col.getWidth();
     frac = juce::jlimit(0.0, 1.0, frac);
 
-    double viewStart = stemWaveforms_[0]->getViewStartTime();
-    double viewEnd = stemWaveforms_[0]->getViewEndTime();
+    double viewStart = lane->getViewStartTime();
+    double viewEnd = lane->getViewEndTime();
     playheadTimeSec_ = viewStart + frac * (viewEnd - viewStart);
 
-    for (auto& wf : stemWaveforms_)
-        wf->setPlayheadTime(playheadTimeSec_);
-    repaint();
+    updatePlayheadDisplay();
 }
 
 void SModePage::mouseDown(const juce::MouseEvent& e)
@@ -2686,11 +3101,8 @@ void SModePage::mouseDrag(const juce::MouseEvent& e)
         // If transport is playing, scrub to the new position in real-time
         if (transportPlaying_)
         {
-            if (auto* reg = samplar::ServiceLocator::getRegistry())
-            {
-                if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
-                    midiSvc->startSModeTransport(playheadTimeSec_);
-            }
+            if (auto* midiSvc = midiService())
+                midiSvc->startSModeTransport(playheadTimeSec_);
         }
     }
 }
@@ -2753,29 +3165,24 @@ bool SModePage::keyPressed(const juce::KeyPress& key, juce::Component* /*origina
         return true;
     }
 
-    // Computer keyboard MIDI — route unmodified key presses to MidiMappingService.
-    // JUCE's keyPressed() fires on OS autorepeat (~30Hz while held); without a
-    // dedup guard this would machine-gun handleNoteOn and bypass POLY/MONO/1SH/
-    // Gate voice logic (which assumes one noteOn per physical press).
-    // Route through MidiMappingService::handleKeyPress which owns the held-set
-    // dedup, so the voice state machine sees exactly one noteOn per press and
-    // keyStateChanged() below drives exactly one noteOff per release.
-    if (!key.getModifiers().isCommandDown() && !key.getModifiers().isCtrlDown())
+    // Computer keyboard MIDI (A W S E D F T G Y H U J K O L P ; = 17 notes,
+    // Z / X = octave). MidiMappingService owns the held-key state: exactly one
+    // note-on per physical press, the note-off releases the note that key
+    // started even if the octave moved meanwhile.
+    if (!key.getModifiers().isCommandDown() && !key.getModifiers().isCtrlDown() && !key.getModifiers().isAltDown())
     {
-        if (auto* reg = samplar::ServiceLocator::getRegistry())
+        if (auto* midiSvc = midiService(); midiSvc != nullptr && midiSvc->isComputerKeyboardEnabled())
         {
-            if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
+            if (samplar::MidiMappingService::isOctaveKey(key))
             {
-                int note = samplar::MidiMappingService::keyToMidiNote(key);
-                if (note >= 0 && midiSvc->isComputerKeyboardEnabled())
-                {
-                    // Track locally too so the existing keyStateChanged release
-                    // loop continues to work for any keys released before the
-                    // service's polled release ticks.
-                    heldKeyboardNotes_.insert(note);
-                    midiSvc->handleKeyPress(key);  // dedup'd; fires noteOn only on first press
-                    return true;
-                }
+                midiSvc->handleKeyPress(key);
+                flashKeyboardRange(*midiSvc);
+                return true;
+            }
+            if (samplar::MidiMappingService::keyToSemitoneOffset(key) >= 0)
+            {
+                midiSvc->handleKeyPress(key);   // dedup'd; fires noteOn only on first press
+                return true;
             }
         }
     }
@@ -2783,54 +3190,29 @@ bool SModePage::keyPressed(const juce::KeyPress& key, juce::Component* /*origina
     return false;
 }
 
+void SModePage::flashKeyboardRange(samplar::MidiMappingService& midiSvc)
+{
+    const int lo = midiSvc.getComputerKeyboardBaseNote();
+    const int hi = midiSvc.getComputerKeyboardTopNote();
+    juce::String bankInfo;
+    for (int st = 0; st < 8; ++st)
+    {
+        const int first = samplar::MidiMappingService::getStemBankFirstNote(st);
+        if (first < 0) break;
+        if (first <= hi && first + samplar::MidiMappingService::kBankSize - 1 >= lo && smodeService_ != nullptr)
+            if (auto* stem = smodeService_->getModel().getStem(st))
+                bankInfo << (bankInfo.isEmpty() ? " - " : ", ") << stem->name;
+    }
+    flashUndoStatus("Keys A..; = " + samplar::MidiMappingService::noteNumberToName(lo) + "-"
+                    + samplar::MidiMappingService::noteNumberToName(hi) + bankInfo);
+}
+
 bool SModePage::keyStateChanged(bool /*isKeyDown*/, juce::Component* /*originatingComponent*/)
 {
-    // Check all held notes — if the key is no longer pressed, send note-off
-    if (heldKeyboardNotes_.empty()) return false;
-
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return false;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-    if (!midiSvc || !midiSvc->isComputerKeyboardEnabled()) return false;
-
-    // Build a KeyPress for each held note and check if it's still down
-    std::vector<int> released;
-    for (int note : heldKeyboardNotes_)
-    {
-        // Reverse-map note to key code to check if still held
-        // We check all possible key codes that map to this note
-        bool stillHeld = false;
-        static const int allKeys[] = {
-            'Z','S','X','D','C','V','G','B','H','N','J','M',
-            'Q','2','W','3','E','R','5','T','6','Y','7','U'
-        };
-        for (int k : allKeys)
-        {
-            if (samplar::MidiMappingService::keyToMidiNote(juce::KeyPress(k)) == note)
-            {
-                if (juce::KeyPress::isKeyCurrentlyDown(k))
-                {
-                    stillHeld = true;
-                    break;
-                }
-            }
-        }
-        if (!stillHeld)
-            released.push_back(note);
-    }
-
-    for (int note : released)
-    {
-        heldKeyboardNotes_.erase(note);
-        // Route through the service's polled release so its held-flag stays
-        // coherent with ours (prevents a stale flag blocking a later re-press).
-        // releaseUnheldComputerKeys will fire handleNoteOff(1, note) for this
-        // note since its key is no longer physically down.
-        (void)note;
-    }
-    midiSvc->releaseUnheldComputerKeys();
-
-    return !released.empty();
+    // Releases are polled by the service (it knows which note each key started).
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr || !midiSvc->isComputerKeyboardEnabled()) return false;
+    return midiSvc->releaseUnheldComputerKeys();
 }
 
 // ── Grid Quick Assign (per-stem) ─────────────────────────────────────────
@@ -2865,16 +3247,17 @@ void SModePage::gridQuickAssignStem(int stemIndex, double beatsPerSegment)
     }
 
     // Use grid offset so segments align with visible grid lines
-    double gridOffset = 0.0;
-    if (stemIndex >= 0 && stemIndex < static_cast<int>(stemWaveforms_.size()))
-        gridOffset = stemWaveforms_[static_cast<size_t>(stemIndex)]->getGridOffsetSeconds();
+    const double gridOffset = model.getGridOffsetSeconds();
     int64_t offsetSamples = juce::jlimit((int64_t)0,
                                           (int64_t)(sampleRate * 600),
                                           static_cast<int64_t>(gridOffset * sampleRate));
 
-    int nextNote = 36;  // Start MIDI assignment from C1
+    // B21: each stem maps onto its own 16-note bank (Vocals C1, Bass E2 ...).
     for (int si : stemsToProcess)
     {
+        const int bankFirst = samplar::MidiMappingService::getStemBankFirstNote(si);
+        int nextNote = bankFirst;
+        const int bankEnd = bankFirst < 0 ? -1 : bankFirst + samplar::MidiMappingService::kBankSize;
         model.clearSegments(si);
         auto* stem = model.getStem(si);
         if (!stem || stem->audioBuffer.getNumSamples() == 0) continue;
@@ -2885,7 +3268,7 @@ void SModePage::gridQuickAssignStem(int stemIndex, double beatsPerSegment)
         if (offsetSamples > 0 && offsetSamples < total)
         {
             int segIdx = model.addSegment(si, 0, offsetSamples);
-            if (segIdx >= 0 && nextNote <= 127)
+            if (segIdx >= 0 && nextNote >= 0 && nextNote < bankEnd)
             {
                 auto& seg = stem->segments[static_cast<size_t>(segIdx)];
                 if (segmentHasAudio(*stem, seg))
@@ -2897,7 +3280,7 @@ void SModePage::gridQuickAssignStem(int stemIndex, double beatsPerSegment)
         while (pos + segSamples <= total)
         {
             int segIdx = model.addSegment(si, pos, pos + segSamples);
-            if (segIdx >= 0 && nextNote <= 127)
+            if (segIdx >= 0 && nextNote >= 0 && nextNote < bankEnd)
             {
                 auto& seg = stem->segments[static_cast<size_t>(segIdx)];
                 if (segmentHasAudio(*stem, seg))
@@ -2908,7 +3291,7 @@ void SModePage::gridQuickAssignStem(int stemIndex, double beatsPerSegment)
         if (total - pos > segSamples / 4)
         {
             int segIdx = model.addSegment(si, pos, total);
-            if (segIdx >= 0 && nextNote <= 127)
+            if (segIdx >= 0 && nextNote >= 0 && nextNote < bankEnd)
             {
                 auto& seg = stem->segments[static_cast<size_t>(segIdx)];
                 if (segmentHasAudio(*stem, seg))
@@ -2917,15 +3300,17 @@ void SModePage::gridQuickAssignStem(int stemIndex, double beatsPerSegment)
         }
     }
 
-    juce::Logger::writeToLog("✅ [SModePage] Grid Quick Assign: " + juce::String(beatsPerSegment)
+    juce::Logger::writeToLog("[SModePage] Grid Quick Assign: " + juce::String(beatsPerSegment)
                              + " beats at " + juce::String(bpm, 1) + " BPM on "
-                             + juce::String(stemsToProcess.size()) + " stems");
+                             + juce::String(stemsToProcess.size()) + " stems (notes from each stem's bank, max 16)");
 
+    lastAutoChopValid_ = false;
     for (auto& wf : stemWaveforms_)
     {
         wf->setGridBPM(bpm);
         wf->repaint();
     }
+    refreshInspector();
 }
 
 void SModePage::runBpmDetectionOnDrumStem()
@@ -2940,7 +3325,7 @@ void SModePage::runBpmDetectionOnDrumStem()
     if (cachedBpm > 0.0)
     {
         juce::Logger::writeToLog("[SModePage] BPM restored from cache: " + juce::String(cachedBpm, 2));
-        applyBpm(cachedBpm);
+        applyBpm(cachedBpm, false, true);   // reconnect: not an undo step
         return;
     }
 
@@ -2999,52 +3384,84 @@ void SModePage::runBpmDetectionOnDrumStem()
         bpmDotsAnim_ = std::move(t);
     }
 
-    // Pass raw pointers to background thread — model is processor-lifetime,
-    // buffers won't be deleted while we read. Avoids blocking the message
-    // thread with a multi-MB buffer copy.
-    const float* const* readPtrs = drumStem->audioBuffer.getArrayOfReadPointers();
-    int numChannels = drumStem->audioBuffer.getNumChannels();
-    int numSamples = drumStem->audioBuffer.getNumSamples();
+    // B33: share the model's immutable stem buffer (refcounted - a new song
+    // load cannot free it under the job) instead of copying the whole stem.
+    auto bufCopy = model.getSharedStemAudio(drumIdx);
+    if (bufCopy == nullptr) { bpmDotsAnim_.reset(); bpmInput_.setText("N/A", juce::dontSendNotification); return; }
     double sampleRate = model.getSampleRate();
+    const uint64_t generation = model.getContentGeneration();
+    const int editStamp = bpmEditCounter_;
+    auto safeThis = juce::Component::SafePointer<SModePage>(this);
 
-    std::thread([this, readPtrs, numChannels, numSamples, sampleRate]()
+    // Cancel token: set first thing in SModeService::shutdown(), so unloading
+    // the plugin mid-analysis returns within ~200 ms (review A4 / U-H1). The
+    // flag lives as long as the service, whose pool drains this job.
+    const std::atomic<bool>* cancelFlag = smodeService_->getJobCancelFlag();
+    // Debug-only evidence for the smoke host's --bpm-unload check (inert
+    // unless the UI self-test is enabled). Written by the worker: file I/O, no logging.
+    const juce::File debugDir = uiSelfTest_ != nullptr ? juce::File(SModeUiSelfTest::readEnv("SAMPLAR_UI_SWEEP_DIR")) : juce::File();
+    const bool roundIt = samplar::SamplarSettings::getInstance().getAutoRoundBpm();
+    juce::Logger::writeToLog("[SModePage] BPM job queued: " + juce::String(bufCopy->getNumSamples()) + " samples @ "
+                             + juce::String(sampleRate, 0) + " Hz, autoRound=" + juce::String(roundIt ? "ON" : "OFF"));
+
+    const bool queued = smodeService_->runBackground([this, safeThis, generation, editStamp, bufCopy, sampleRate,
+                                                      cancelFlag, debugDir, roundIt]()
     {
-        // Build a temporary AudioBuffer from the raw read-pointers (no copy of the
-        // sample data — just a referencing wrapper is not available on AudioBuffer,
-        // so we do a real copy here; drum stems are typically 2ch / < 10 min).
-        juce::AudioBuffer<float> buf(numChannels, numSamples);
-        for (int ch = 0; ch < numChannels; ++ch)
-            buf.copyFrom(ch, 0, readPtrs[ch], numSamples);
+        // Worker thread: no logging, no `this` (only inside the guarded callAsync).
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        if (debugDir != juce::File())
+            debugDir.getChildFile("bpm_started.txt").replaceWithText(juce::String(bufCopy->getNumSamples()));
 
         samplar::HybridTempoDetector detector;
         samplar::HybridTempoDetector::Config cfg;
         cfg.minBPM = 50.0f;
         cfg.maxBPM = 220.0f;
-        auto result = detector.detect(buf, sampleRate, cfg);
+        const auto result = detector.detect(*bufCopy, sampleRate, cfg, samplar::AnalysisCancel(cancelFlag));
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
 
-        double bpm = (result.bpm > 0.0f) ? static_cast<double>(result.bpm) : 120.0;
-        juce::Logger::writeToLog("✅ [SModePage] HybridTempoDetector: "
-            + juce::String(bpm, 2) + " BPM (confidence="
-            + juce::String(result.confidence, 2) + " source=" + result.getSourceName() + ")");
+        if (debugDir != juce::File())
+            debugDir.getChildFile(result.cancelled ? "bpm_cancelled.txt" : "bpm_done.txt")
+                .replaceWithText(juce::String(ms, 1) + " ms");
+        if (result.cancelled)
+            return;   // unloading: never apply (and never post) a cancelled result
 
+        const double bpm = (result.bpm > 0.0f) ? static_cast<double>(result.bpm) : 120.0;
         // Auto-round the detected BPM to the nearest integer if the user
-        // setting is enabled. The full pipeline (Beat This! → TempoRefiner)
-        // lands within ~0.2% of true, and modern productions almost
-        // universally use integer BPM — saves the user a manual round-button
-        // press for every load. Manual entry / host sync / tap tempo bypass
-        // this entirely and keep full precision (they call applyBpm directly
-        // with the user's value). Toggled in Settings → Audio.
-        const bool roundIt = samplar::SamplarSettings::getInstance().getAutoRoundBpm();
+        // setting is enabled (manual entry / host sync / tap keep full precision).
         const double finalBpm = roundIt ? std::round(bpm) : bpm;
-        juce::Logger::writeToLog(juce::String("[SModePage] Auto-round ")
-            + (roundIt ? "ON" : "OFF") + ": "
-            + juce::String(bpm, 4) + " -> " + juce::String(finalBpm, 4));
-        juce::MessageManager::callAsync([this, finalBpm]()
+        const juce::String summary = juce::String(bpm, 2) + " BPM (confidence=" + juce::String(result.confidence, 2)
+                                   + " source=" + result.getSourceName() + ", " + juce::String(ms, 0) + " ms) -> "
+                                   + juce::String(finalBpm, 4);
+        juce::MessageManager::callAsync([this, safeThis, generation, editStamp, finalBpm, summary]()
         {
-            if (!smodeService_) return;
-            applyBpm(finalBpm);
+            if (safeThis == nullptr) return;   // page destroyed (editor closed)
+            juce::Logger::writeToLog("[SModePage] HybridTempoDetector: " + summary);
+            if (!smodeService_) { bpmDotsAnim_.reset(); return; }
+            if (generation != smodeService_->getModel().getContentGeneration())
+            {
+                juce::Logger::writeToLog("[SModePage] BPM result dropped (song changed)");
+                bpmDotsAnim_.reset();   // U-M8: never leave the "..." animation running
+                return;
+            }
+            if (editStamp != bpmEditCounter_)
+            {
+                // U-M6: the user typed / tapped / synced a BPM meanwhile - keep it.
+                juce::Logger::writeToLog("[SModePage] BPM result " + juce::String(finalBpm, 2)
+                                         + " dropped (BPM edited while detecting)");
+                bpmDotsAnim_.reset();
+                bpmInput_.setText(juce::String(detectedBpm_, 2), juce::dontSendNotification);
+                return;
+            }
+            // First tempo of a song: not an undo step (Ctrl+Z must not blank the grid).
+            applyBpm(finalBpm, false, true);
         });
-    }).detach();
+    });
+    if (! queued)
+    {
+        juce::Logger::writeToLog("[SModePage] BPM job NOT queued (service shutting down)");
+        bpmDotsAnim_.reset();
+        bpmInput_.setText("N/A", juce::dontSendNotification);
+    }
 }
 
 // ── Sequencer Lanes ───────────────────────────────────────────────────────
@@ -3060,6 +3477,7 @@ void SModePage::addSequencerLane()
 
     // Set stem info (colors + count) and BPM
     lane->setStemInfo(model.getStemCount(), [](int idx) { return getStemColour(idx); });
+    lane->setServiceRegistry(registry_);
     lane->setBpm(detectedBpm_ > 0.0 ? detectedBpm_ : 120.0);
 
     // Wire callbacks
@@ -3077,105 +3495,29 @@ void SModePage::addSequencerLane()
             }
         }
     };
-    lane->onLaneChanged = [this, lanePtr](int /*idx*/)
+    lane->onStatusMessage = [this](const juce::String& text) { flashUndoStatus(text); };
+    lane->onLaneChanged = [this](int /*idx*/)
     {
-        // If playback is active, restart with updated data
-        static bool restarting = false;
-        if (restarting) return;
-        if (!seqPlayingFlag_ || !seqPlayingFlag_->load()) return;
-
-        restarting = true;
-
-        if (activeSeqLane_ == -2)
-        {
-            // Play All mode — retrigger simultaneous playback
-            playAllLanesSimultaneous();
-            playAllSeqBtn_.setButtonText("Stop");
-            playAllSeqBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff6d2d2d));
-        }
-        else if (activeSeqLane_ >= 0)
-        {
-            // Single lane mode — retrigger if it's this lane
-            for (int i = 0; i < static_cast<int>(sequencerLanes_.size()); ++i)
-            {
-                if (sequencerLanes_[static_cast<size_t>(i)].get() == lanePtr && i == activeSeqLane_)
-                {
-                    playSequencerLane(i);
-                    break;
-                }
-            }
-        }
-
-        restarting = false;
+        // The engine plays from the latest lane data at the next cell - no
+        // restart, no timer chain (B36).
+        if (auto* m = midiService()) pushLanesToEngine(*m);
     };
-    // Wire the WaveDragArea render callback for this lane
-    lane->getDragWavArea().onRenderPattern = [this, lanePtr](double& outSampleRate,
+    // Drag WAV of this lane: rendered by the realtime engine on WaveDragArea's
+    // worker thread. The lambda only reads atomics + the export snapshot.
+    auto laneIdxCell = std::make_shared<std::atomic<int>>(laneIdx);
+    laneIndexCells_[lane.get()] = laneIdxCell;
+    lane->getDragWavArea().onCanRender = [this, lanePtr]()
+    {
+        if (auto* m = midiService()) pushLanesToEngine(*m);
+        return !lanePtr->getSlots().empty();
+    };
+    lane->getDragWavArea().onRenderPattern = [laneIdxCell, target = renderTarget_](double& outSampleRate,
         std::function<void(float)> progressCb) -> std::unique_ptr<juce::AudioBuffer<float>>
     {
-        if (!smodeService_) return nullptr;
-        auto& model = smodeService_->getModel();
-        double modelSr = model.getSampleRate();
-        if (modelSr <= 0.0) modelSr = 44100.0;
-        outSampleRate = modelSr;
-        double bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
-        double samplesPerBeat = (60.0 / bpm) * modelSr;
-
-        SequencerLaneComponent* lane2 = nullptr;
-        for (auto& l : sequencerLanes_)
-            if (l.get() == lanePtr) { lane2 = l.get(); break; }
-        if (!lane2) return nullptr;
-
-        int totalCells = lane2->getNumBars() * 4;
-        int64_t totalSmp = static_cast<int64_t>(totalCells * samplesPerBeat);
-        if (totalSmp <= 0) return nullptr;
-
-        int numCh = 2;
-        for (const auto& slot : lane2->getSlots())
-        {
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            if (stem) { numCh = stem->audioBuffer.getNumChannels(); break; }
-        }
-
-        auto buf = std::make_unique<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSmp));
-        buf->clear();
-
-        // (Realtime pitch path: pre-rendered Play-All-mix uses raw stem buffers.
-        // The mix path itself is pre-rendered on the message thread so pitch
-        // is NOT applied to the offline mix. TODO: pre-mix-path realtime pitch.)
-        auto& slots = lane2->getSlots();
-        for (int i = 0; i < static_cast<int>(slots.size()); ++i)
-        {
-            const auto& slot = slots[static_cast<size_t>(i)];
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-            const auto& srcBuf = stem->audioBuffer;
-
-            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-            int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-            int64_t segLen = segEnd - segStart;
-
-            int64_t writePos = static_cast<int64_t>(slot.gridCell * samplesPerBeat);
-            int64_t cellDur = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-            int64_t trimStart = segStart + static_cast<int64_t>(slot.trimStart * segLen);
-            int64_t trimEnd = segStart + static_cast<int64_t>(slot.trimEnd * segLen);
-            trimStart = juce::jlimit(segStart, segEnd, trimStart);
-            trimEnd = juce::jlimit(trimStart + 1, segEnd, trimEnd);
-            int copyLen = static_cast<int>(juce::jmin(trimEnd - trimStart, cellDur));
-
-            if (copyLen <= 0 || writePos + copyLen > totalSmp) continue;
-            int chCopy = juce::jmin(numCh, srcBuf.getNumChannels());
-            for (int ch = 0; ch < chCopy; ++ch)
-                buf->addFrom(ch, static_cast<int>(writePos), srcBuf, ch,
-                              static_cast<int>(trimStart), copyLen, slot.velocity);
-
-            if (progressCb) progressCb(static_cast<float>(i + 1) / static_cast<float>(slots.size()));
-        }
-
-        return buf;
+        auto* svc = target->svc.load();
+        const int idx = laneIdxCell->load();
+        if (svc == nullptr || idx < 0 || idx >= samplar::engine::kMaxLanes) return nullptr;
+        return svc->renderSequencerOffline(1u << idx, outSampleRate, std::move(progressCb));
     };
     lane->onStemHovered = [this](int stemIdx)
     {
@@ -3211,10 +3553,7 @@ void SModePage::addSequencerLane()
         // Click on sequencer slot = stop everything + play this segment
         if (!smodeService_) return;
         auto& mdl = smodeService_->getModel();
-
-        auto* reg = samplar::ServiceLocator::getRegistry();
-        if (!reg) return;
-        auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+        auto* midiSvc = midiService();
         if (!midiSvc) return;
 
         stopLoop();
@@ -3225,35 +3564,20 @@ void SModePage::addSequencerLane()
         auto* seg = mdl.getSegment(stemIdx, segIdx);
         if (!stem || !seg || seg->getLengthSamples() <= 0 || stem->mute) return;
 
-        double modelSr = mdl.getSampleRate();
-        if (modelSr <= 0.0) modelSr = 44100.0;
-
-        const auto& srcBuf = stem->audioBuffer;
-
-        int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-        int64_t endSmp   = juce::jlimit(startSmp,    (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-        int segLen = static_cast<int>(endSmp - startSmp);
-        if (segLen <= 0) return;
-
-        auto segBuf = std::make_shared<juce::AudioBuffer<float>>(srcBuf.getNumChannels(), segLen);
-        for (int ch = 0; ch < srcBuf.getNumChannels(); ++ch)
-            segBuf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(startSmp), segLen);
-
-        juce::Logger::writeToLog("[SModePage] sequencer slot play stem=" + juce::String(stemIdx)
-            + " (pitch bypass — slot waveform shows untransposed audio)");
-        // NO stemIndex passed → sequencer plays at native pitch, matching
-        // the slot's displayed waveform. Otherwise realtime signalsmith pitch
-        // is applied to playback while the waveform stays untransposed, so
-        // "what you see" ≠ "what you hear". The stem transport + segment
-        // direct-clicks still apply pitch (they don't have this visual lock).
-        midiSvc->playBufferDirect(segBuf, modelSr, 1.0f, false);
+        // Same engine path as every other playback (stem pitch, fades).
+        midiSvc->playSegment(stemIdx, segIdx, false);
+        juce::Logger::writeToLog("[SModePage] sequencer slot click: play stem=" + juce::String(stemIdx)
+                                 + " seg=" + juce::String(segIdx));
     };
 
-    addAndMakeVisible(lane.get());
+    seqContent_.addAndMakeVisible(lane.get());
     sequencerLanes_.push_back(std::move(lane));
 
     juce::Logger::writeToLog("[SModePage] Added sequencer lane " + juce::String(laneIdx));
+    seqCollapsed_ = false;            // a new lane must be visible
+    updateSeqCollapseButton();
     resized();
+    seqViewport_.setViewPosition(0, seqContent_.getHeight());   // scroll the new lane into view
     repaint();
 }
 
@@ -3261,7 +3585,7 @@ void SModePage::removeSequencerLane(int laneIndex)
 {
     if (laneIndex < 0 || laneIndex >= static_cast<int>(sequencerLanes_.size())) return;
 
-    removeChildComponent(sequencerLanes_[static_cast<size_t>(laneIndex)].get());
+    seqContent_.removeChildComponent(sequencerLanes_[static_cast<size_t>(laneIndex)].get());
     sequencerLanes_.erase(sequencerLanes_.begin() + laneIndex);
 
     // Re-index remaining lanes
@@ -3280,16 +3604,7 @@ void SModePage::playSequencerLane(int laneIndex)
 {
     if (laneIndex < 0 || laneIndex >= static_cast<int>(sequencerLanes_.size())) return;
     if (!smodeService_) return;
-
-    // Cancel any previous sequencer playback chain
-    if (seqPlayingFlag_) seqPlayingFlag_->store(false);
-    seqPlayingFlag_ = std::make_shared<std::atomic<bool>>(true);
-    activeSeqLane_ = laneIndex;
-
-    auto& model = smodeService_->getModel();
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+    auto* midiSvc = midiService();
     if (!midiSvc) return;
 
     if (transportPlaying_) stopTransport();
@@ -3298,267 +3613,19 @@ void SModePage::playSequencerLane(int laneIndex)
 
     auto* lane = sequencerLanes_[static_cast<size_t>(laneIndex)].get();
     lane->setPlayingSlot(-1);
-    const auto& slots = lane->getSlots();
-    if (slots.empty()) return;
+    if (lane->getSlots().empty()) return;
 
-    double modelSr = model.getSampleRate();
-    if (modelSr <= 0.0) modelSr = 44100.0;
-    double bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
-    double samplesPerBeat = (60.0 / bpm) * modelSr;
+    // B36: the clock runs on the audio thread - sample-accurate, synced to the
+    // DAW transport while it plays, free-running at the page BPM otherwise.
+    pushLanesToEngine(*midiSvc);
+    midiSvc->startSequencer(1u << laneIndex);
 
-    struct SlotPlay {
-        int slotIndex;   // -1 = silence gap
-        int gridCell;
-        std::shared_ptr<juce::AudioBuffer<float>> buffer;  // nullptr for gaps
-        int durationMs;
-        int stemIndex { -1 };  // For realtime SoundTouch pitch in voice path
-    };
-    std::vector<SlotPlay> schedule;
+    if (seqPlayingFlag_) seqPlayingFlag_->store(false);
+    seqPlayingFlag_ = std::make_shared<std::atomic<bool>>(true);
+    activeSeqLane_ = laneIndex;
 
-    // msPerCell = one beat duration
-    double msPerCell = 60000.0 / bpm;
-    int totalCells = 0;  // track for gap insertion
-
-    for (int i = 0; i < static_cast<int>(slots.size()); ++i)
-    {
-        const auto& slot = slots[static_cast<size_t>(i)];
-        if (slot.empty) continue;
-
-        auto* stem = model.getStem(slot.stemIndex);
-        auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-        if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-        // (Sequencer-schedule mix is pre-rendered on the message thread —
-        // realtime pitch via voice path doesn't apply here. The single-segment
-        // playback below uses the realtime path via stemIdx.)
-        const auto& srcBuf = stem->audioBuffer;
-
-        int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-        int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-
-        juce::Logger::writeToLog("[SModePage] playSegment stem=" + juce::String(slot.stemIndex)
-            + " (offline mix path, no realtime pitch)");
-
-        // Output duration in samples = cellSpan beats
-        int64_t cellDurSamples = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-        if (cellDurSamples <= 0) continue;
-
-        int numCh = srcBuf.getNumChannels();
-
-        // Apply trim: select portion of segment
-        int64_t segLen = segEnd - segStart;
-        int64_t trimSmpStart = segStart + static_cast<int64_t>(slot.trimStart * segLen);
-        int64_t trimSmpEnd = segStart + static_cast<int64_t>(slot.trimEnd * segLen);
-        trimSmpStart = juce::jlimit(segStart, segEnd, trimSmpStart);
-        trimSmpEnd = juce::jlimit(trimSmpStart + 1, segEnd, trimSmpEnd);
-        int64_t trimmedLen = trimSmpEnd - trimSmpStart;
-
-        // Speed-stretch: resample trimmed audio to fill cell duration
-        // speed=1 → trimmedLen as-is, padded/cropped to cellDur
-        // speed<1 → stretch (slow), speed>1 → compress (fast)
-        int outLen = static_cast<int>(cellDurSamples);
-        int inLen = static_cast<int>(trimmedLen);
-        auto buf = std::make_shared<juce::AudioBuffer<float>>(numCh, outLen);
-        buf->clear();
-
-        if (std::abs(slot.speed - 1.0f) > 0.01f && slot.speed > 0.0f)
-        {
-            // Resample: stretch or compress trimmed audio to fill cell
-            double resampleRatio = static_cast<double>(inLen) / static_cast<double>(outLen);
-            for (int ch = 0; ch < numCh; ++ch)
-            {
-                const float* rd = srcBuf.getReadPointer(ch, static_cast<int>(trimSmpStart));
-                float* wr = buf->getWritePointer(ch);
-                for (int j = 0; j < outLen; ++j)
-                {
-                    double srcPos = j * resampleRatio;
-                    int i0 = juce::jmin(static_cast<int>(srcPos), inLen - 1);
-                    int i1 = juce::jmin(i0 + 1, inLen - 1);
-                    float frac = static_cast<float>(srcPos - i0);
-                    wr[j] = rd[i0] * (1.0f - frac) + rd[i1] * frac;
-                }
-            }
-        }
-        else
-        {
-            // No speed change: copy trimmed audio, pad with silence if shorter than cell
-            int copyLen = static_cast<int>(juce::jmin(trimmedLen, cellDurSamples));
-            for (int ch = 0; ch < numCh; ++ch)
-                buf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(trimSmpStart), copyLen);
-        }
-
-        // Apply reverse effect
-        if (slot.reverse)
-        {
-            for (int ch = 0; ch < numCh; ++ch)
-            {
-                float* data = buf->getWritePointer(ch);
-                std::reverse(data, data + buf->getNumSamples());
-            }
-        }
-
-        // Apply pitch shift via resampling
-        if (std::abs(slot.pitchSemitones) > 0.1f)
-        {
-            double ratio = std::pow(2.0, slot.pitchSemitones / 12.0);
-            int origLen = buf->getNumSamples();
-            int newLen = static_cast<int>(origLen / ratio);
-            if (newLen > 0)
-            {
-                auto pitched = std::make_shared<juce::AudioBuffer<float>>(numCh, newLen);
-                pitched->clear();
-                for (int ch = 0; ch < numCh; ++ch)
-                {
-                    const float* src = buf->getReadPointer(ch);
-                    float* dst = pitched->getWritePointer(ch);
-                    for (int j = 0; j < newLen; ++j)
-                    {
-                        double srcPos = j * ratio;
-                        int i0 = static_cast<int>(srcPos);
-                        float fr = static_cast<float>(srcPos - i0);
-                        int i1 = juce::jmin(i0 + 1, origLen - 1);
-                        i0 = juce::jmin(i0, origLen - 1);
-                        dst[j] = src[i0] * (1.0f - fr) + src[i1] * fr;
-                    }
-                }
-                buf = pitched;
-            }
-        }
-
-        // Apply velocity (volume)
-        if (std::abs(slot.velocity - 1.0f) > 0.01f)
-            buf->applyGain(slot.velocity);
-
-        // Duration: cellSpan * msPerCell (integer cell timing)
-        int durMs = static_cast<int>(slot.cellSpan * msPerCell);
-        schedule.push_back({ i, slot.gridCell, buf, durMs, slot.stemIndex });
-    }
-
-    if (schedule.empty()) return;
-
-    // Sort by grid position so playback matches visual order
-    std::sort(schedule.begin(), schedule.end(),
-              [](const SlotPlay& a, const SlotPlay& b) { return a.gridCell < b.gridCell; });
-
-    // Insert silence gaps between slots so empty cells play as silence
-    {
-        std::vector<SlotPlay> withGaps;
-        int nextCell = 0;
-        for (const auto& sp : schedule)
-        {
-            if (sp.gridCell > nextCell)
-            {
-                // Gap: silence from nextCell to sp.gridCell
-                int gapCells = sp.gridCell - nextCell;
-                int gapMs = static_cast<int>(gapCells * msPerCell);
-                withGaps.push_back({ -1, nextCell, nullptr, gapMs });
-            }
-            withGaps.push_back(sp);
-            nextCell = sp.gridCell + static_cast<int>(sp.durationMs / msPerCell + 0.5);
-        }
-        schedule = std::move(withGaps);
-    }
-
-    auto schedulePtr = std::make_shared<std::vector<SlotPlay>>(std::move(schedule));
-    auto cancelFlag = seqPlayingFlag_;
-    auto playSlot = std::make_shared<std::function<void(int)>>();
-
-    // Progress fill + playhead — ticks every 30ms
-    // Signature: (slotIdx, totalMs, startTimeMs, gridCell, cellSpan, totalCells)
-    auto progressTimer2 = std::make_shared<std::function<void(int, int, int64_t, int, int, int)>>();
-    *progressTimer2 = [this, laneIndex, cancelFlag, progressTimer2](int slotIdx, int totalMs, int64_t startTimeMs, int gridCell, int cellSpan, int totalCells)
-    {
-        if (!cancelFlag->load())
-        {
-            if (laneIndex < static_cast<int>(sequencerLanes_.size()))
-                sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayheadPosition(-1.0f);
-            return;
-        }
-        if (laneIndex >= static_cast<int>(sequencerLanes_.size())) return;
-
-        int64_t now = juce::Time::currentTimeMillis();
-        int elapsed = static_cast<int>(now - startTimeMs);
-        float progress = totalMs > 0 ? juce::jlimit(0.0f, 1.0f, static_cast<float>(elapsed) / totalMs) : 1.0f;
-
-        // Update slot highlight
-        if (slotIdx >= 0)
-            sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayingSlot(slotIdx, progress);
-
-        // Update lane-wide playhead: position within the full grid
-        if (totalCells > 0)
-        {
-            float cellProgress = (static_cast<float>(gridCell) + progress * static_cast<float>(cellSpan))
-                                  / static_cast<float>(totalCells);
-            sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayheadPosition(cellProgress);
-        }
-
-        if (elapsed < totalMs && cancelFlag->load())
-        {
-            juce::Timer::callAfterDelay(30, [progressTimer2, slotIdx, totalMs, startTimeMs, gridCell, cellSpan, totalCells]()
-            {
-                (*progressTimer2)(slotIdx, totalMs, startTimeMs, gridCell, cellSpan, totalCells);
-            });
-        }
-    };
-
-    // Slot-by-slot playback with cancellation
-    int totalGridCells = lane->getNumBars() * 4;
-    *playSlot = [this, laneIndex, schedulePtr, modelSr, cancelFlag, playSlot, progressTimer2, totalGridCells](int idx)
-    {
-        if (!cancelFlag->load()) return;
-        if (idx >= static_cast<int>(schedulePtr->size())) return;
-        if (laneIndex >= static_cast<int>(sequencerLanes_.size())) return;
-
-        auto* reg2 = samplar::ServiceLocator::getRegistry();
-        if (!reg2) return;
-        auto* ms = dynamic_cast<samplar::MidiMappingService*>(reg2->get("midi.mapping"));
-        if (!ms) return;
-
-        const auto& sp = (*schedulePtr)[static_cast<size_t>(idx)];
-        int cellSpan = juce::jmax(1, static_cast<int>(std::round(sp.durationMs / (60000.0 / (detectedBpm_ > 0 ? detectedBpm_ : 120.0)))));
-
-        if (sp.slotIndex >= 0 && sp.buffer)
-        {
-            ms->stopAllVoices();
-            // Sequencer playback: NO stemIndex passed — keeps audio in sync
-            // with the slot's displayed waveform (which is untransposed).
-            ms->playBufferDirect(sp.buffer, modelSr, 1.0f, false);
-            sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayingSlot(sp.slotIndex);
-        }
-        else
-        {
-            // Silence gap — stop voices, clear highlight
-            ms->stopAllVoices();
-            sequencerLanes_[static_cast<size_t>(laneIndex)]->setPlayingSlot(-1);
-        }
-
-        // Always run playhead timer (for both slots and gaps)
-        int64_t startMs2 = juce::Time::currentTimeMillis();
-        (*progressTimer2)(sp.slotIndex, sp.durationMs, startMs2, sp.gridCell, cellSpan, totalGridCells);
-
-        // Chain to next slot/gap after this one's duration
-        if (idx + 1 < static_cast<int>(schedulePtr->size()))
-        {
-            juce::Timer::callAfterDelay(sp.durationMs, [playSlot, cancelFlag, nextIdx = idx + 1]()
-            {
-                if (!cancelFlag->load()) return;
-                (*playSlot)(nextIdx);
-            });
-        }
-        else
-        {
-            // Loop: restart from slot 0
-            juce::Timer::callAfterDelay(sp.durationMs, [playSlot, cancelFlag]()
-            {
-                if (!cancelFlag->load()) return;
-                (*playSlot)(0);
-            });
-        }
-    };
-
-    (*playSlot)(0);
     juce::Logger::writeToLog("[SModePage] Playing seq lane " + juce::String(laneIndex)
-                             + " (" + juce::String((int)schedulePtr->size()) + " slots)");
+                             + " (" + juce::String((int) lane->getSlots().size()) + " slots, audio-thread clock)");
 }
 // ── Smart Fill ────────────────────────────────────────────────────────────
 void SModePage::smartFill()
@@ -3572,6 +3639,8 @@ void SModePage::smartFill()
     // If no lanes exist, create one per stem with only that stem's dot active.
     // If lanes exist, re-fill each lane using its active dots (shuffle).
     bool needCreate = sequencerLanes_.empty();
+    seqCollapsed_ = false;   // Smart Fill result must be visible
+    updateSeqCollapseButton();
 
     if (needCreate)
     {
@@ -3601,403 +3670,118 @@ void SModePage::smartFill()
 void SModePage::playAllLanesSimultaneous()
 {
     if (sequencerLanes_.empty() || !smodeService_) return;
-
-    auto& model = smodeService_->getModel();
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
+    auto* midiSvc = midiService();
     if (!midiSvc) return;
 
     if (transportPlaying_) stopTransport();
     stopLoop();
+    midiSvc->stopAllVoices();
+
+    // Every lane on the audio-thread clock; each lane loops on its own length,
+    // muted lanes stay silent.
+    pushLanesToEngine(*midiSvc);
+    const int n = juce::jmin(static_cast<int>(sequencerLanes_.size()), samplar::engine::kMaxLanes);
+    const uint32_t mask = (n >= 32) ? 0xFFFFFFFFu : ((1u << n) - 1u);
+    midiSvc->startSequencer(mask);
+
     if (seqPlayingFlag_) seqPlayingFlag_->store(false);
     seqPlayingFlag_ = std::make_shared<std::atomic<bool>>(true);
     activeSeqLane_ = -2;  // -2 = Play All mode
-    midiSvc->stopAllVoices();
 
-    double modelSr = model.getSampleRate();
-    if (modelSr <= 0.0) modelSr = 44100.0;
-    double bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
-    double samplesPerBeat = (60.0 / bpm) * modelSr;
-
-    // Find max totalCells across all lanes and numChannels
-    int maxCells = 0;
-    int numCh = 2;
-    for (auto& lane : sequencerLanes_)
-    {
-        int laneCells = lane->getNumBars() * 4;
-        maxCells = juce::jmax(maxCells, laneCells);
-        for (const auto& slot : lane->getSlots())
-        {
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            if (stem) { numCh = stem->audioBuffer.getNumChannels(); break; }
-        }
-    }
-    if (maxCells <= 0) return;
-
-    int64_t totalSamples = static_cast<int64_t>(maxCells * samplesPerBeat);
-    auto mixBuf = std::make_shared<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSamples));
-    mixBuf->clear();
-
-    // Mix all lanes at their grid positions with trim/speed/velocity
-    for (auto& lane : sequencerLanes_)
-    {
-        if (lane->isMuted()) continue;  // Skip muted lanes
-        for (const auto& slot : lane->getSlots())
-        {
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-            // Play-All mix is pre-rendered offline → cannot use realtime
-            // SoundTouch (mix sums multiple stems into one buffer). TODO:
-            // either pre-mix-with-pitch on message thread, or replace this
-            // path with a multi-voice playBufferDirect using stemIdx per slot.
-            const auto& srcBuf = stem->audioBuffer;
-
-            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-            int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-            int64_t segLen = segEnd - segStart;
-
-            juce::Logger::writeToLog("[SModePage] mixAllLanes stem=" + juce::String(slot.stemIndex)
-                + " (offline mix — pitch not applied)");
-
-            // Grid position in samples
-            int64_t writePos = static_cast<int64_t>(slot.gridCell * samplesPerBeat);
-            int64_t cellDur = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-
-            // Apply trim
-            int64_t trimStart = segStart + static_cast<int64_t>(slot.trimStart * segLen);
-            int64_t trimEnd = segStart + static_cast<int64_t>(slot.trimEnd * segLen);
-            trimStart = juce::jlimit(segStart, segEnd, trimStart);
-            trimEnd = juce::jlimit(trimStart + 1, segEnd, trimEnd);
-            int inLen = static_cast<int>(trimEnd - trimStart);
-            int outLen = static_cast<int>(cellDur);
-
-            if (outLen <= 0 || writePos + outLen > totalSamples) continue;
-            int chCopy = juce::jmin(numCh, srcBuf.getNumChannels());
-
-            if (std::abs(slot.speed - 1.0f) > 0.01f && slot.speed > 0.0f)
-            {
-                // Speed-stretch: resample trimmed audio to fill cell
-                double ratio = static_cast<double>(inLen) / static_cast<double>(outLen);
-                for (int ch = 0; ch < chCopy; ++ch)
-                {
-                    const float* rd = srcBuf.getReadPointer(ch, static_cast<int>(trimStart));
-                    float* wr = mixBuf->getWritePointer(ch, static_cast<int>(writePos));
-                    for (int j = 0; j < outLen; ++j)
-                    {
-                        double sp = j * ratio;
-                        int i0 = juce::jmin(static_cast<int>(sp), inLen - 1);
-                        int i1 = juce::jmin(i0 + 1, inLen - 1);
-                        float f = static_cast<float>(sp - i0);
-                        wr[j] += (rd[i0] * (1.0f - f) + rd[i1] * f) * slot.velocity;
-                    }
-                }
-            }
-            else
-            {
-                int copyLen = juce::jmin(inLen, outLen);
-                for (int ch = 0; ch < chCopy; ++ch)
-                    mixBuf->addFrom(ch, static_cast<int>(writePos), srcBuf, ch,
-                                     static_cast<int>(trimStart), copyLen, slot.velocity);
-            }
-        }
-    }
-
-    midiSvc->playBufferDirect(mixBuf, modelSr, 1.0f);
-
-    // Playhead animation across all lanes
-    auto cancelFlag = seqPlayingFlag_;
-    int totalMs = static_cast<int>(maxCells * 60000.0 / bpm);
-    int64_t startMs = juce::Time::currentTimeMillis();
-
-    auto playheadTick = std::make_shared<std::function<void()>>();
-    auto startMsPtr = std::make_shared<int64_t>(startMs);
-    *playheadTick = [this, cancelFlag, startMsPtr, totalMs, modelSr, mixBuf, playheadTick]()
-    {
-        if (!cancelFlag->load())
-        {
-            for (auto& lane : sequencerLanes_)
-                lane->setPlayheadPosition(-1.0f);
-            return;
-        }
-
-        int64_t now = juce::Time::currentTimeMillis();
-        int elapsed = static_cast<int>(now - *startMsPtr);
-        float progress = totalMs > 0 ? juce::jlimit(0.0f, 1.0f, static_cast<float>(elapsed) / totalMs) : 1.0f;
-
-        for (auto& lane : sequencerLanes_)
-            lane->setPlayheadPosition(progress);
-
-        if (elapsed < totalMs)
-        {
-            juce::Timer::callAfterDelay(30, [playheadTick]() { (*playheadTick)(); });
-        }
-        else
-        {
-            // Loop: replay the buffer and reset the timer
-            auto* reg3 = samplar::ServiceLocator::getRegistry();
-            if (reg3)
-            {
-                auto* ms2 = dynamic_cast<samplar::MidiMappingService*>(reg3->get("midi.mapping"));
-                if (ms2)
-                {
-                    ms2->stopAllVoices();
-                    ms2->playBufferDirect(mixBuf, modelSr, 1.0f);
-                }
-            }
-            *startMsPtr = juce::Time::currentTimeMillis();
-            juce::Timer::callAfterDelay(30, [playheadTick]() { (*playheadTick)(); });
-        }
-    };
-
-    juce::Timer::callAfterDelay(30, [playheadTick]() { (*playheadTick)(); });
-
-    juce::Logger::writeToLog("[SModePage] Playing all " + juce::String((int)sequencerLanes_.size())
-                             + " lanes simultaneously (" + juce::String(maxCells) + " cells)");
-}
-
-// ── Play Lanes Chained (sequential) ──────────────────────────────────────
-void SModePage::playLanesChained()
-{
-    if (sequencerLanes_.empty() || !smodeService_) return;
-
-    auto& model = smodeService_->getModel();
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-    if (!midiSvc) return;
-
-    if (transportPlaying_) stopTransport();
-    midiSvc->stopAllVoices();
-
-    double modelSr = model.getSampleRate();
-    if (modelSr <= 0.0) modelSr = 44100.0;
-
-    // Concatenate all lanes sequentially
-    int64_t totalSamples = 0;
-    int numCh = 2;
-
-    for (auto& lane : sequencerLanes_)
-    {
-        for (const auto& slot : lane->getSlots())
-        {
-            if (slot.empty) continue;
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (seg && seg->getLengthSamples() > 0)
-                totalSamples += seg->getLengthSamples();
-
-            auto* stem = model.getStem(slot.stemIndex);
-            if (stem && numCh == 2) numCh = stem->audioBuffer.getNumChannels();
-        }
-    }
-
-    if (totalSamples <= 0) return;
-
-    auto chainBuf = std::make_shared<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSamples));
-    chainBuf->clear();
-    int writePos = 0;
-
-    for (auto& lane : sequencerLanes_)
-    {
-        for (const auto& slot : lane->getSlots())
-        {
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-            // Chained mix is pre-rendered (multi-stem concat) → realtime
-            // pitch via voice path doesn't apply. TODO if pitch needed here.
-            const auto& srcBuf = stem->audioBuffer;
-
-            int64_t startSmp = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-            int64_t endSmp   = juce::jlimit(startSmp,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-            int segLen = static_cast<int>(endSmp - startSmp);
-            if (segLen <= 0 || writePos + segLen > chainBuf->getNumSamples()) continue;
-
-            juce::Logger::writeToLog("[SModePage] chainMix stem=" + juce::String(slot.stemIndex)
-                + " (offline concat — pitch not applied)");
-
-            float vel = slot.velocity;
-            int chToCopy = juce::jmin(numCh, srcBuf.getNumChannels());
-            for (int ch = 0; ch < chToCopy; ++ch)
-                chainBuf->addFrom(ch, writePos, srcBuf, ch, static_cast<int>(startSmp), segLen, vel);
-
-            writePos += segLen;
-        }
-    }
-
-    midiSvc->playBufferDirect(chainBuf, modelSr, 1.0f);
-    juce::Logger::writeToLog("[SModePage] Playing " + juce::String((int)sequencerLanes_.size())
-                             + " lanes chained (" + juce::String((int)totalSamples) + " samples)");
+    juce::Logger::writeToLog("[SModePage] Playing all " + juce::String(n) + " lanes simultaneously (audio-thread clock)");
 }
 
 // ── Stop All Sequencer Playback ──────────────────────────────────────────
 void SModePage::stopAllSequencerPlayback()
 {
-    // Cancel the callAfterDelay chain
+    if (auto* midiSvc = midiService())
+        midiSvc->stopSequencer();
+
+    resetSequencerUi();
+    stopLoop();   // releases MIDI / audition voices too
+    if (transportPlaying_) stopTransport();
+
+    juce::Logger::writeToLog("[SModePage] Stopped all sequencer playback");
+}
+
+void SModePage::resetSequencerUi()
+{
     if (seqPlayingFlag_) seqPlayingFlag_->store(false);
     seqPlayingFlag_.reset();
     activeSeqLane_ = -1;
 
-    stopLoop();
-    if (transportPlaying_) stopTransport();
-
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (!reg) return;
-    auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-    if (midiSvc) midiSvc->stopAllVoices();
-
-    // Reset Play All button
     playAllSeqBtn_.setButtonText("Play All");
     playAllSeqBtn_.setColour(juce::TextButton::buttonColourId, juce::Colour(0xff2d6d3a));
 
-    // Clear all slot highlights and playhead
     for (auto& lane : sequencerLanes_)
     {
         lane->setPlayingSlot(-1);
         lane->setPlayheadPosition(-1.0f);
     }
-
-    juce::Logger::writeToLog("[SModePage] Stopped all sequencer playback");
 }
 
-// ── Drag Sequencer as WAV ────────────────────────────────────────────────
-void SModePage::dragSequencerAsWav()
+samplar::MidiMappingService* SModePage::midiService() const
 {
-    if (sequencerLanes_.empty() || !smodeService_) return;
+    // This instance's registry (review A2), captured at construction.
+    return registry_ != nullptr ? dynamic_cast<samplar::MidiMappingService*>(registry_->get("midi.mapping")) : nullptr;
+}
 
-    auto& model = smodeService_->getModel();
-    double modelSr = model.getSampleRate();
-    if (modelSr <= 0.0) modelSr = 44100.0;
-    double bpm = detectedBpm_ > 0.0 ? detectedBpm_ : 120.0;
-    double samplesPerBeat = (60.0 / bpm) * modelSr;
-
-    // Build chained buffer from all lanes
-    int64_t totalSamples = 0;
-    int numCh = 2;
-
-    for (auto& lane : sequencerLanes_)
+void SModePage::pushLanesToEngine(samplar::MidiMappingService& midiSvc)
+{
+    std::vector<samplar::MidiMappingService::LaneInput> lanes;
+    lanes.reserve(sequencerLanes_.size());
+    std::map<const SequencerLaneComponent*, std::shared_ptr<std::atomic<int>>> liveCells;
+    for (int i = 0; i < static_cast<int>(sequencerLanes_.size()); ++i)
     {
-        for (const auto& slot : lane->getSlots())
+        const auto* lane = sequencerLanes_[static_cast<size_t>(i)].get();
+        if (lane == nullptr) continue;
+        samplar::MidiMappingService::LaneInput in;
+        in.slots   = lane->getSlots();
+        in.numBars = lane->getNumBars();
+        in.cellsPerBeat = lane->getCellsPerBeat();   // B18: x8 / x16 lanes
+        in.muted   = lane->isMuted();
+        lanes.push_back(std::move(in));
+
+        auto it = laneIndexCells_.find(lane);
+        if (it != laneIndexCells_.end())
         {
-            if (slot.empty) continue;
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (!seg || seg->getLengthSamples() <= 0) continue;
-
-            // Cell-based duration: cellSpan beats
-            totalSamples += static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-
-            auto* stem = model.getStem(slot.stemIndex);
-            if (stem) numCh = stem->audioBuffer.getNumChannels();
+            it->second->store(static_cast<int>(lanes.size()) - 1);
+            liveCells.insert(*it);
         }
     }
+    laneIndexCells_.swap(liveCells);   // forget removed lanes
 
-    if (totalSamples <= 0) return;
+    midiSvc.setSequencerBpm(detectedBpm_ > 0.0 ? detectedBpm_ : 120.0);
+    midiSvc.setSequencerLanes(lanes);   // no-op when nothing changed
 
-    // Copy to buffer on message thread
-    auto wavBuf = std::make_shared<juce::AudioBuffer<float>>(numCh, static_cast<int>(totalSamples));
-    wavBuf->clear();
-    int writePos = 0;
+    const int n = juce::jmin(static_cast<int>(lanes.size()), samplar::engine::kMaxLanes);
+    renderTarget_->svc.store(&midiSvc);
+    renderTarget_->allMask.store(n <= 0 ? 0u : ((1u << n) - 1u));
+}
 
-    for (auto& lane : sequencerLanes_)
+void SModePage::syncSequencerUi(samplar::MidiMappingService& midiSvc)
+{
+    pushLanesToEngine(midiSvc);
+
+    const bool running = midiSvc.isSequencerRunning();
+    if (seqPlayingFlag_ && seqPlayingFlag_->load() && !running)
     {
-        // Sort by grid position for correct export order
-        auto sortedSlots = lane->getSlots();
-        std::sort(sortedSlots.begin(), sortedSlots.end(),
-                  [](const PatternSlot& a, const PatternSlot& b) { return a.gridCell < b.gridCell; });
-        for (const auto& slot : sortedSlots)
-        {
-            if (slot.empty) continue;
-            auto* stem = model.getStem(slot.stemIndex);
-            auto* seg = model.getSegment(slot.stemIndex, slot.segmentIndex);
-            if (!stem || !seg || seg->getLengthSamples() <= 0) continue;
-
-            const auto& srcBuf = stem->audioBuffer;
-            int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), seg->startSample);
-            int64_t segEnd = juce::jlimit(segStart, (int64_t)srcBuf.getNumSamples(), seg->endSample);
-
-            // Cell-based with trim + speed
-            int64_t cellDur = static_cast<int64_t>(slot.cellSpan * samplesPerBeat);
-            int64_t segLen2 = segEnd - segStart;
-            int64_t trimStart2 = segStart + static_cast<int64_t>(slot.trimStart * segLen2);
-            int64_t trimEnd2 = segStart + static_cast<int64_t>(slot.trimEnd * segLen2);
-            trimStart2 = juce::jlimit(segStart, segEnd, trimStart2);
-            trimEnd2 = juce::jlimit(trimStart2 + 1, segEnd, trimEnd2);
-            int64_t trimmedLen2 = trimEnd2 - trimStart2;
-
-            int len = static_cast<int>(cellDur);
-            if (len <= 0 || writePos + len > wavBuf->getNumSamples()) continue;
-
-            int chCopy = juce::jmin(numCh, srcBuf.getNumChannels());
-
-            if (std::abs(slot.speed - 1.0f) > 0.01f && slot.speed > 0.0f)
-            {
-                // Speed-stretch: resample trimmed audio to fill cell
-                int inLen2 = static_cast<int>(trimmedLen2);
-                double ratio2 = static_cast<double>(inLen2) / static_cast<double>(len);
-                for (int ch = 0; ch < chCopy; ++ch)
-                {
-                    const float* rd = srcBuf.getReadPointer(ch, static_cast<int>(trimStart2));
-                    float* wr = wavBuf->getWritePointer(ch, writePos);
-                    for (int j = 0; j < len; ++j)
-                    {
-                        double sp = j * ratio2;
-                        int i0 = juce::jmin(static_cast<int>(sp), inLen2 - 1);
-                        int i1 = juce::jmin(i0 + 1, inLen2 - 1);
-                        float f = static_cast<float>(sp - i0);
-                        wr[j] += (rd[i0] * (1.0f - f) + rd[i1] * f) * slot.velocity;
-                    }
-                }
-            }
-            else
-            {
-                int copyLen = static_cast<int>(juce::jmin(trimmedLen2, cellDur));
-                for (int ch = 0; ch < chCopy; ++ch)
-                    wavBuf->addFrom(ch, writePos, srcBuf, ch, static_cast<int>(trimStart2), copyLen, slot.velocity);
-            }
-
-            // Match playback: apply the same per-voice micro-fade to each slot
-            // so the exported WAV has no click at slot boundaries.
-            samplar::applyMicroFadeRange(*wavBuf, writePos, len, modelSr);
-
-            writePos += len;
-        }
+        // The engine stopped it (DAW transport stopped / bypass / all sound off).
+        juce::Logger::writeToLog("[SModePage] sequencer stopped by the engine - resetting lane UI");
+        resetSequencerUi();
+        return;
     }
+    if (!running) return;
 
-    double sr = modelSr;
-    std::thread([this, wavBuf, sr, numCh]()
+    for (int i = 0; i < static_cast<int>(sequencerLanes_.size()); ++i)
     {
-        auto tmpFile = juce::File::getSpecialLocation(juce::File::tempDirectory)
-                           .getChildFile("SAMPLAR_Sequencer_Export.wav");
-
-        juce::WavAudioFormat wavFmt;
-        if (auto os = std::unique_ptr<juce::FileOutputStream>(tmpFile.createOutputStream()))
-        {
-            auto* writer = wavFmt.createWriterFor(os.get(), sr,
-                                                  static_cast<unsigned int>(numCh), 24, {}, 0);
-            if (writer)
-            {
-                os.release();
-                std::unique_ptr<juce::AudioFormatWriter> w(writer);
-                w->writeFromAudioSampleBuffer(*wavBuf, 0, wavBuf->getNumSamples());
-                w.reset();
-
-                juce::String path = tmpFile.getFullPathName();
-                juce::MessageManager::callAsync([this, path]()
-                {
-                    juce::StringArray files;
-                    files.add(path);
-                    juce::DragAndDropContainer::performExternalDragDropOfFiles(files, true, this);
-                    juce::Logger::writeToLog("[SModePage] Sequencer WAV drag ready: " + path);
-                });
-            }
-        }
-    }).detach();
+        int slot = -1;
+        float progress = 0.0f, head = -1.0f;
+        midiSvc.getSequencerLaneState(i, slot, progress, head);
+        auto& lane = *sequencerLanes_[static_cast<size_t>(i)];
+        lane.setPlayingSlot(slot, progress);
+        lane.setPlayheadPosition(head);
+    }
 }
 
 // ── Undo/Redo helpers ──────────────────────────────────────────────────────
@@ -4045,12 +3829,20 @@ void SModePage::flashUndoStatus(const juce::String& text)
 juce::var SModePage::captureUiExtraState() const
 {
     auto* obj = new juce::DynamicObject();
-    obj->setProperty("v", 1);
+    obj->setProperty("v", 2);
     obj->setProperty("gridLocked", gridLocked_);
     obj->setProperty("lockedBpm",  lockedBpm_);
+    obj->setProperty("lockSemis",  lockSemis_);
+    obj->setProperty("displayBpm", detectedBpm_);
     obj->setProperty("gridDivision", currentGridDivision_);
     obj->setProperty("loopEnabled", loopBtn_.getToggleState());
     obj->setProperty("linkAll", linkAllActive_);
+    if (smodeService_ != nullptr)
+        obj->setProperty("gridOffset", smodeService_->getModel().getGridOffsetSeconds());
+
+    juce::Array<juce::var> removed;   // B23: "Remove Channel" is undoable
+    for (int r : removedStems_) removed.add(r);
+    obj->setProperty("removed", removed);
 
     juce::Array<juce::var> laneArr;
     for (const auto& lane : sequencerLanes_)
@@ -4063,25 +3855,63 @@ void SModePage::restoreUiExtraState(const juce::var& v)
 {
     auto* obj = v.getDynamicObject();
     if (obj == nullptr) return;
+    juce::Logger::writeToLog("[SModePage] restoreUiExtraState (undo / redo)");
 
+    // Tolerant reader (N-18): the JSON comes from project files; "1e999" parses
+    // to inf. Non-finite / out-of-range values fall back instead of reaching
+    // the engine or the grid.
+    auto bpmOrZero = [](double b) { return std::isfinite(b) && b > 0.0 ? juce::jlimit(20.0, 999.0, b) : 0.0; };
     gridLocked_          = (bool)   obj->getProperty("gridLocked");
-    lockedBpm_           = (double) obj->getProperty("lockedBpm");
-    currentGridDivision_ = (int)    obj->getProperty("gridDivision");
+    lockedBpm_           = bpmOrZero((double) obj->getProperty("lockedBpm"));
+    lockSemis_           = obj->hasProperty("lockSemis") ? juce::jlimit(-24, 24, (int) obj->getProperty("lockSemis")) : 0;
+    if (lockedBpm_ <= 0.0) lockSemis_ = 0;
+    if (obj->hasProperty("displayBpm")) detectedBpm_ = bpmOrZero((double) obj->getProperty("displayBpm"));
+    juce::Logger::writeToLog("[SModePage]   restored gridLocked=" + juce::String(gridLocked_ ? 1 : 0) + " lockedBpm="
+                             + juce::String(lockedBpm_, 2) + " lockSemis=" + juce::String(lockSemis_));
     bool loopEnabled     = (bool)   obj->getProperty("loopEnabled");
     linkAllActive_       = (bool)   obj->getProperty("linkAll");
 
+    // B24: every control mirrors the restored state, same look as its click handler.
     loopBtn_.setToggleState(loopEnabled, juce::dontSendNotification);
-    gridLockBtn_.setColour(juce::TextButton::buttonColourId,
-        gridLocked_ ? juce::Colour(0xffd47a00) : juce::Colour(0xff2d3d5d));
-    divisionCombo_.setSelectedId(currentGridDivision_, juce::dontSendNotification);
-    linkAllBtn_.setColour(juce::TextButton::buttonColourId,
-        linkAllActive_ ? juce::Colour(0xff2d6d3a) : juce::Colour(0xff3d3d3d));
+    if (auto* m = midiService()) m->setSModeTransportLooping(loopEnabled);
+    updateGridLockButton();
+    applyLockTranspose();
+    updateLinkAllButton();
+
+    const int division = (int) obj->getProperty("gridDivision");
+    if (division == 1 || division == 2 || division == 4 || division == 8 || division == 16)
+    {
+        currentGridDivision_ = division;
+        divisionCombo_.setSelectedId(division, juce::dontSendNotification);
+        for (auto& wf : stemWaveforms_)
+            if (wf) wf->setGridDivision(division);
+    }
+    if (obj->hasProperty("gridOffset"))
+    {
+        const double off = (double) obj->getProperty("gridOffset");
+        if (std::isfinite(off))
+            setGlobalGridOffset(juce::jlimit(0.0, 3600.0, off));
+        else
+            juce::Logger::writeToLog("[SModePage]   gridOffset not finite - ignored");
+    }
+
+    removedStems_.clear();
+    if (auto* arr = obj->getProperty("removed").getArray())
+        for (const auto& r : *arr)
+            if (const int s = (int) r; s >= 0 && s < samplar::MidiMappingService::MAX_STEMS)
+                removedStems_.insert(s);
+    applyRemovedStemVisibility();
 
     // Restore lanes — size match first, then delegate to each lane
     if (auto* laneArr = obj->getProperty("lanes").getArray())
     {
         const int target = laneArr->size();
-        while (static_cast<int>(sequencerLanes_.size()) < target) addSequencerLane();
+        while (static_cast<int>(sequencerLanes_.size()) < target)
+        {
+            const auto before = sequencerLanes_.size();
+            addSequencerLane();
+            if (sequencerLanes_.size() == before) break;
+        }
         while (static_cast<int>(sequencerLanes_.size()) > target)
             removeSequencerLane(static_cast<int>(sequencerLanes_.size()) - 1);
 
@@ -4093,6 +3923,262 @@ void SModePage::restoreUiExtraState(const juce::var& v)
     // Any layout-affecting changes mean a resized pass
     resized();
     repaint();
+}
+
+void SModePage::refreshAfterUndoRedo()
+{
+    if (smodeService_ == nullptr) return;
+    auto& model = smodeService_->getModel();
+    // The refresh must not push undo entries (that would wipe the redo stack).
+    model.beginSuppressPush();
+    if (! gridLocked_ && model.getDetectedTempo() > 0.0)
+        applyBpm(model.getDetectedTempo(), false);
+    else if (detectedBpm_ > 0.0)
+        bpmInput_.setText(juce::String(detectedBpm_, 2), juce::dontSendNotification);
+    model.endSuppressPush();
+    refreshLaneButtons();
+    for (auto& wf : stemWaveforms_) wf->repaint();
+    lastAutoChopValid_ = false;   // never re-chop over an undone / redone state
+    refreshInspector();
+    juce::Logger::writeToLog("[SModePage] UI refreshed after undo/redo (linkAll=" + juce::String(linkAllActive_ ? 1 : 0)
+                             + " lock=" + juce::String(gridLocked_ ? 1 : 0) + " semis=" + juce::String(lockSemis_)
+                             + " removed=" + juce::String((int) removedStems_.size()) + ")");
+}
+
+// -- Small UI sync helpers ----------------------------------------------------
+
+void SModePage::updateLinkAllButton()
+{
+    linkAllBtn_.setToggleState(linkAllActive_, juce::dontSendNotification);
+    linkAllBtn_.setColour(juce::TextButton::buttonColourId,
+                          linkAllActive_ ? juce::Colour(0xff2d6d3a) : juce::Colour(0xff2d2d3a));
+    linkAllBtn_.setColour(juce::TextButton::buttonOnColourId, juce::Colour(0xff2d6d3a));
+}
+
+void SModePage::updateMonoPolyLabel()
+{
+    auto* m = midiService();
+    const bool mono = m != nullptr && m->isMonophonic();
+    const bool gate = m != nullptr && m->isSampleGateMode();
+    monoPolyBtn_.setButtonText(juce::String(mono ? "MONO" : "POLY") + " " + juce::String(gate ? "GATE" : "1SH"));
+}
+
+void SModePage::refreshLaneButtons()
+{
+    for (auto& w : stemWaveforms_)
+        if (w) { w->refreshStemButtons(); w->refreshLinkButton(); }
+}
+
+void SModePage::applyRemovedStemVisibility()
+{
+    for (int st = 0; st < static_cast<int>(stemWaveforms_.size()); ++st)
+    {
+        const bool removed = removedStems_.count(st) > 0;
+        const bool show = ! removed && (focusedStem_ < 0 || focusedStem_ == st);
+        stemWaveforms_[(size_t) st]->setVisible(show);
+    }
+    if (focusedStem_ >= 0 && removedStems_.count(focusedStem_) > 0)
+    {
+        focusedStem_ = -1;
+        applyRemovedStemVisibility();
+        return;
+    }
+    resized();
+}
+
+void SModePage::setGlobalGridOffset(double seconds)
+{
+    if (smodeService_ != nullptr)
+        smodeService_->getModel().setGridOffsetSeconds(seconds);
+    for (auto& wf : stemWaveforms_)
+        if (wf) wf->setGridOffsetSeconds(seconds);
+}
+
+std::vector<std::pair<int, int>> SModePage::linkedSegmentsAt(int stemIdx, int segIdx) const
+{
+    std::vector<std::pair<int, int>> out;
+    if (smodeService_ == nullptr) return out;
+    const auto& model = smodeService_->getModel();
+    if (! (linkAllActive_ || model.isLinked(stemIdx))) return out;
+    const auto* src = model.getSegment(stemIdx, segIdx);
+    if (src == nullptr) return out;
+    const int64_t mid = (src->startSample + src->endSample) / 2;
+    for (int j = 0; j < model.getStemCount(); ++j)
+    {
+        if (j == stemIdx || ! (linkAllActive_ || model.isLinked(j))) continue;
+        if (removedStems_.count(j) > 0) continue;
+        const auto* st = model.getStem(j);
+        if (st == nullptr) continue;
+        for (int k = 0; k < (int) st->segments.size(); ++k)
+            if (st->segments[(size_t) k].startSample <= mid && mid < st->segments[(size_t) k].endSample)
+            { out.push_back({ j, k }); break; }
+    }
+    return out;
+}
+
+// -- Key detection (melody + bass, worker pool) -----------------------------
+
+void SModePage::setKeyText(const juce::String& text, const juce::String& tooltip)
+{
+    keyLabel_.setText(text, juce::dontSendNotification);
+    keyLabel_.setTooltip(tooltip);
+}
+
+void SModePage::runKeyDetection()
+{
+    if (smodeService_ == nullptr) return;
+    auto& model = smodeService_->getModel();
+    std::vector<std::shared_ptr<const juce::AudioBuffer<float>>> parts;
+    juce::StringArray used;
+    for (int i = 0; i < model.getStemCount(); ++i)
+    {
+        auto* st = model.getStem(i);
+        if (st == nullptr || st->audioBuffer.getNumSamples() == 0) continue;
+        const auto n = st->name.toLowerCase();
+        if (n.contains("melody") || n.contains("other") || n.contains("bass") || n.contains("piano") || n.contains("guitar"))
+        {
+            parts.push_back(model.getSharedStemAudio(i));   // shared, no copy (B33)
+            used.add(st->name);
+        }
+    }
+    if (parts.empty())
+    {
+        setKeyText("--", "Musical key: no Melody / Bass stem");
+        return;
+    }
+    setKeyText("...", "Musical key: detecting on " + used.joinIntoString(" + "));
+    const double sr = model.getSampleRate() > 0.0 ? model.getSampleRate() : 44100.0;
+    const uint64_t generation = model.getContentGeneration();
+    auto safeThis = juce::Component::SafePointer<SModePage>(this);
+    juce::Logger::writeToLog("[SModePage] key detection queued on: " + used.joinIntoString(" + "));
+    const std::atomic<bool>* cancelFlag = smodeService_->getJobCancelFlag();   // set on unload (A4)
+    const bool queued = smodeService_->runBackground([safeThis, parts, sr, generation, used, cancelFlag]()
+    {
+        if (cancelFlag->load()) return;
+        int len = 0;
+        for (const auto& b : parts) if (b != nullptr) len = juce::jmax(len, b->getNumSamples());
+        juce::AudioBuffer<float> mono(1, juce::jmax(1, len));
+        mono.clear();
+        for (const auto& b : parts)
+        {
+            if (b == nullptr) continue;
+            const float g = 1.0f / (float) juce::jmax(1, b->getNumChannels());
+            for (int ch = 0; ch < b->getNumChannels(); ++ch)
+                mono.addFrom(0, 0, *b, ch, 0, b->getNumSamples(), g);
+        }
+        const double t0 = juce::Time::getMillisecondCounterHiRes();
+        const auto res = samplar::KeyDetector::detect(mono, sr, samplar::AnalysisCancel(cancelFlag));
+        const double ms = juce::Time::getMillisecondCounterHiRes() - t0;
+        if (res.cancelled) return;   // unloading
+        juce::MessageManager::callAsync([safeThis, res, generation, used, ms]()
+        {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr || self->smodeService_ == nullptr) return;
+            juce::Logger::writeToLog("[SModePage] KeyDetector: " + res.getName() + " (" + res.getCamelot() + ") conf="
+                                     + juce::String(res.confidence, 2) + " in " + juce::String(ms, 0) + " ms");
+            if (generation != self->smodeService_->getModel().getContentGeneration())
+            {
+                juce::Logger::writeToLog("[SModePage] key result dropped (song changed)");
+                return;
+            }
+            if (! res.valid)
+            {
+                self->setKeyText("--", "Musical key: not detected (no tonal content in " + used.joinIntoString(" + ") + ")");
+                return;
+            }
+            const auto shortName = samplar::KeyDetector::pitchClassName(res.tonic)
+                                 + (res.mode == samplar::KeyDetector::Mode::Minor ? "m" : "");
+            self->setKeyText(shortName + "  " + res.getCamelot(),
+                             "Key: " + res.getName() + " (Camelot " + res.getCamelot() + "), confidence "
+                             + juce::String(juce::roundToInt(res.confidence * 100.0)) + "% - from "
+                             + used.joinIntoString(" + "));
+        });
+    });
+    if (! queued) setKeyText("--", "Musical key: analysis unavailable");
+}
+
+// -- Chop inspector -------------------------------------------------------------
+
+int SModePage::findInspectorSegment() const
+{
+    if (smodeService_ == nullptr || inspStem_ < 0) return -1;
+    const auto* st = smodeService_->getModel().getStem(inspStem_);
+    if (st == nullptr) return -1;
+    auto same = [this](const Segment& sg) { return sg.startSample == inspStart_ && sg.endSample == inspEnd_; };
+    if (inspSeg_ >= 0 && inspSeg_ < (int) st->segments.size() && same(st->segments[(size_t) inspSeg_]))
+        return inspSeg_;
+    for (int k = 0; k < (int) st->segments.size(); ++k)
+        if (same(st->segments[(size_t) k])) return k;
+    // Being resized right now: same index, still selected AND still overlapping
+    // the range we inspected. A different chop that moved into this index after
+    // a delete does not overlap it (N-24: the inspector never jumps to it).
+    if (inspSeg_ >= 0 && inspSeg_ < (int) st->segments.size())
+    {
+        const auto& sg = st->segments[(size_t) inspSeg_];
+        if (sg.selected && sg.startSample < inspEnd_ && sg.endSample > inspStart_)
+            return inspSeg_;
+    }
+    return -1;
+}
+
+void SModePage::selectChopForInspector(int stemIdx, int segIdx)
+{
+    const Segment* sg = (smodeService_ != nullptr && stemIdx >= 0) ? smodeService_->getModel().getSegment(stemIdx, segIdx) : nullptr;
+    if (sg == nullptr)
+    {
+        inspStem_ = inspSeg_ = -1;
+        if (chopInspector_.hasTarget()) chopInspector_.clearTarget();
+        return;
+    }
+    inspStem_ = stemIdx;
+    inspSeg_ = segIdx;
+    inspStart_ = sg->startSample;
+    inspEnd_ = sg->endSample;
+    juce::Logger::writeToLog("[SModePage] inspector -> stem=" + juce::String(stemIdx) + " seg=" + juce::String(segIdx));
+    refreshInspector();
+}
+
+void SModePage::refreshInspector()
+{
+    const int seg = findInspectorSegment();
+    if (seg < 0)
+    {
+        if (inspStem_ >= 0)
+            juce::Logger::writeToLog("[SModePage] inspector target gone (deleted / undone) - cleared");
+        inspStem_ = inspSeg_ = -1;
+        if (chopInspector_.hasTarget()) chopInspector_.clearTarget();
+        return;
+    }
+    const auto& model = smodeService_->getModel();
+    const auto* sg = model.getSegment(inspStem_, seg);
+    const auto* st = model.getStem(inspStem_);
+    inspSeg_ = seg;
+    inspStart_ = sg->startSample;
+    inspEnd_ = sg->endSample;
+
+    const auto& fx = sg->effects;
+    ChopInspectorStrip::Values v;
+    v.pitchSemis = juce::jlimit(-24, 24, fx.pitchSemitones);
+    v.gainDb     = ChopInspectorStrip::linearToGainDb(fx.volume);
+    v.pan        = juce::jlimit(-1.0f, 1.0f, fx.pan);
+    v.reverse    = fx.reverse;
+    v.trigger    = samplar::engine::getTriggerMode(fx);
+    v.attackMs   = samplar::engine::getAttackMs(fx);
+    v.releaseMs  = samplar::engine::getReleaseMs(fx);
+    const juce::String title = (st != nullptr ? st->name : juce::String("Stem")) + " #" + juce::String(seg + 1)
+                             + (sg->midiNote >= 0 ? "  " + samplar::MidiMappingService::noteNumberToName(sg->midiNote) : juce::String());
+
+    const auto& cur = chopInspector_.getValues();
+    const bool same = chopInspector_.hasTarget() && cur.pitchSemis == v.pitchSemis
+                   && std::abs(cur.gainDb - v.gainDb) < 0.05f && std::abs(cur.pan - v.pan) < 0.005f
+                   && cur.reverse == v.reverse && cur.trigger == v.trigger
+                   && std::abs(cur.attackMs - v.attackMs) < 0.5f && std::abs(cur.releaseMs - v.releaseMs) < 0.5f;
+    if (! same || lastInspectorTitle_ != title)
+    {
+        lastInspectorTitle_ = title;
+        chopInspector_.setTarget(title, v, samplar::engine::segmentFxHasEnvelope(),
+                                 samplar::engine::segmentFxHasTriggerMode());
+    }
 }
 
 // ============ FileDragAndDropTarget ============
@@ -4128,13 +4214,384 @@ void SModePage::filesDropped(const juce::StringArray& files, int /*x*/, int /*y*
     if (files.isEmpty()) return;
     juce::File f(files[0]);
     juce::Logger::writeToLog("[SModePage] File dropped: " + f.getFullPathName());
-    if (f.existsAsFile())
+    if (f.existsAsFile() && LoadAudioOverlay::isAcceptedAudioFile(f.getFullPathName()))
+        requestLoadFile(f, "page drop");   // B28: asks before replacing a loaded session
+}
+
+
+// -- Instance services / DAW sync / in-page notices (integration) -------------
+
+SModeService* SModePage::serviceFromContext() const
+{
+    return registry_ != nullptr ? dynamic_cast<SModeService*>(registry_->get("smode")) : nullptr;
+}
+
+void SModePage::setDawSync(bool on)
+{
+    // U-H2: the page's own bus (this instance's); the destructor unsubscribes
+    // from the same bus. The flag lives in this instance's engine front end,
+    // so it survives editor close and is saved with the project (schema 2).
+    if (auto* midiSvc = midiService())
+        midiSvc->setDawTempoSync(on);
+    dawSyncBtn_.setToggleState(on, juce::dontSendNotification);
+
+    if (hostTempoSub_ != 0)
     {
-        samplar::RecentSongs::push(f);
-        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
-        if (onRequestSeparation)
-            onRequestSeparation(f);
+        bus_.unsubscribe("host.tempo", hostTempoSub_);
+        hostTempoSub_ = 0;
     }
+    if (on)
+    {
+        // Subscribe FIRST so the immediate re-publish below is captured.
+        hostTempoSub_ = bus_.subscribe("host.tempo", [this](const juce::var& v) {
+            const double hostBpm = static_cast<double>(v);
+            juce::Logger::writeToLog("[SModePage] host.tempo received: " + juce::String(hostBpm, 3));
+            if (hostBpm <= 0.0) return;
+            // Same path as the BPM field, but a tempo change from the host is
+            // not an undoable user edit (B24).
+            applyBpm(hostBpm, false);
+        });
+        // Ask the audio thread to (re-)publish the current host BPM right now.
+        bus_.publish("host.tempo.request");
+    }
+    juce::Logger::writeToLog("[SModePage] DAW tempo sync " + juce::String(on ? "ON (host.tempo subscribed, re-publish requested)"
+                                                                          : "OFF"));
+}
+
+void SModePage::showMissingAudioNotice(const juce::String& message)
+{
+    juce::Logger::writeToLog("[SModePage] notice: missing audio - " + message);
+    // Drop placeholder "loading" lanes of the failed restore: the page shows
+    // the empty state (drop / LOAD still work) with the notice above it.
+    if (! audioLoaded_)
+    {
+        for (auto& w : stemWaveforms_)
+            if (w) removeChildComponent(w.get());
+        stemWaveforms_.clear();
+        loadAudioOverlay_.setVisible(true);
+        loadAudioOverlay_.setRecents(samplar::RecentSongs::get());
+    }
+    noticeBanner_.setNotice(SModeNoticeBanner::Kind::MissingAudio,
+                            message.isNotEmpty() ? message
+                                                 : juce::String("Audio missing: this project's song and stems were not found. Your chops are kept."),
+                            "Locate song...");
+    noticeBanner_.setVisible(true);
+    resized();
+    repaint();
+}
+
+void SModePage::showSeparationUnavailableNotice(const juce::String& detail)
+{
+    juce::Logger::writeToLog("[SModePage] notice: separation unavailable" + (detail.isNotEmpty() ? " - " + detail : juce::String()));
+    noticeBanner_.setNotice(SModeNoticeBanner::Kind::SeparationUnavailable,
+                            "Separation unavailable - please reinstall SAMPLAR."
+                                + (detail.isNotEmpty() ? " (" + detail + ")" : juce::String()),
+                            {});
+    noticeBanner_.setVisible(true);
+    resized();
+    repaint();
+}
+
+void SModePage::showSignInRequiredNotice()
+{
+    juce::Logger::writeToLog("[SModePage] notice: sign-in required (licence kept, plays offline)");
+    noticeBanner_.setNotice(SModeNoticeBanner::Kind::SignInRequired,
+                            "Your SAMPLAR sign-in has expired. SAMPLAR keeps working offline for now - "
+                            "sign in again to keep your licence verified.",
+                            "Sign in again");
+    noticeBanner_.setVisible(true);
+    resized();
+    repaint();
+}
+
+void SModePage::updateSignInNotice()
+{
+    auto* lic = registry_ != nullptr ? dynamic_cast<LicenseSystemService*>(registry_->get("license")) : nullptr;
+    // Only while Valid: otherwise the editor's sign-in gate already covers the UI.
+    const bool required = lic != nullptr
+                          && lic->getCurrentStatus() == LicenseSystemService::LicenseStatus::Valid
+                          && lic->isSignInRequired();
+    const bool showing = noticeBanner_.isVisible()
+                         && noticeBanner_.getKind() == SModeNoticeBanner::Kind::SignInRequired;
+    if (! required)
+    {
+        signInNoticeDismissed_ = false;
+        if (showing)
+        {
+            juce::Logger::writeToLog("[SModePage] sign-in requirement cleared -> notice hidden");
+            hideNotice();
+        }
+        return;
+    }
+    if (showing || signInNoticeDismissed_)
+        return;
+    if (noticeBanner_.isVisible())
+    {
+        juce::Logger::writeToLog("[SModePage] sign-in required, but another notice is showing - kept for later");
+        return;
+    }
+    showSignInRequiredNotice();
+}
+
+void SModePage::openSignInPanel()
+{
+    auto* lic = registry_ != nullptr ? dynamic_cast<LicenseSystemService*>(registry_->get("license")) : nullptr;
+    if (lic == nullptr)
+    {
+        juce::Logger::writeToLog("[SModePage] Sign in again: licence service missing - ignored");
+        return;
+    }
+    juce::Logger::writeToLog("[SModePage] Sign in again clicked -> in-window browser sign-in panel");
+    juce::Component::SafePointer<SModePage> safe(this);
+    LicenseActivationDialog::showInWindow(this, *lic, bus_, true, [safe](int result)
+    {
+        juce::Logger::writeToLog("[SModePage] sign-in panel closed (result " + juce::String(result) + ")");
+        if (safe != nullptr)
+            safe->updateSignInNotice();
+    });
+}
+
+void SModePage::hideNotice()
+{
+    if (! noticeBanner_.isVisible()) return;
+    juce::Logger::writeToLog("[SModePage] notice hidden");
+    noticeBanner_.setVisible(false);
+    resized();
+    repaint();
+    // A pending sign-in requirement comes back once the strip is free (unless
+    // the user dismissed it; no recursion: it only hides when not required).
+    updateSignInNotice();
+}
+
+void SModePage::locateMissingSong()
+{
+    auto* svc = serviceFromContext();
+    juce::File hint = juce::File::getSpecialLocation(juce::File::userMusicDirectory);
+    juce::String wanted;
+    if (svc != nullptr && svc->getSourceFile() != juce::File())
+    {
+        wanted = svc->getSourceFile().getFileName();
+        if (svc->getSourceFile().getParentDirectory().isDirectory())
+            hint = svc->getSourceFile().getParentDirectory();
+    }
+    juce::Logger::writeToLog("[SModePage] locateMissingSong: looking for '" + wanted + "' from " + hint.getFullPathName());
+    auto chooser = std::make_shared<juce::FileChooser>(
+        wanted.isNotEmpty() ? "Locate \"" + wanted + "\"" : juce::String("Locate the song of this project"),
+        hint, "*.wav;*.mp3;*.flac;*.aiff;*.aif;*.ogg");
+    juce::Component::SafePointer<SModePage> safe(this);
+    chooser->launchAsync(juce::FileBrowserComponent::openMode | juce::FileBrowserComponent::canSelectFiles,
+        [safe, chooser](const juce::FileChooser& fc)
+        {
+            if (safe == nullptr) return;
+            const auto results = fc.getResults();
+            if (results.isEmpty())
+            {
+                juce::Logger::writeToLog("[SModePage] locateMissingSong: cancelled");
+                return;
+            }
+            const auto song = results[0];
+            auto* service = safe->serviceFromContext();
+            const bool ok = service != nullptr && service->relinkMissingSource(song);
+            juce::Logger::writeToLog("[SModePage] locateMissingSong: " + song.getFullPathName()
+                                     + (ok ? " -> relinking (re-separating, chops kept)" : " -> relink refused"));
+            if (ok)
+            {
+                samplar::RecentSongs::push(song);
+                safe->hideNotice();
+            }
+        });
+}
+
+
+// ============================================================================
+// MIDI CC learn UI (right-click menu on CC-capable controls)
+// ============================================================================
+
+void SModePage::showMidiLearnMenu(const juce::String& target, const juce::String& label, juce::Component& anchor)
+{
+    auto* midiSvc = midiService();
+    juce::Logger::writeToLog("[SModePage] MIDI menu: target=" + target + " label=" + label
+                             + " service=" + (midiSvc != nullptr ? "ok" : "null"));
+    if (midiSvc == nullptr) return;
+
+    const auto bound = midiSvc->describeCcBindings(target);
+    const bool armed = midiSvc->getCcLearnTarget() == target;
+    const juce::String learnText = armed ? "MIDI Learn (move a control...)" : "MIDI Learn";
+    const juce::String clearText = bound.isEmpty() ? juce::String("Clear MIDI") : "Clear MIDI (" + bound + ")";
+    juce::PopupMenu m;
+    m.addSectionHeader("MIDI: " + label);
+    m.addItem(1, learnText, ! armed, armed);
+    if (armed)
+        m.addItem(3, "Cancel MIDI Learn");
+    m.addItem(2, clearText, bound.isNotEmpty());
+
+    lastMidiMenuItems_.clear();
+    lastMidiMenuItems_.add(learnText);
+    if (armed) lastMidiMenuItems_.add("Cancel MIDI Learn");
+    lastMidiMenuItems_.add(clearText + (bound.isEmpty() ? " [disabled]" : ""));
+
+    juce::Component::SafePointer<SModePage> safe(this);
+    m.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(&anchor).withDeletionCheck(*this),
+        [safe, target, label](int result)
+        {
+            if (safe == nullptr || result == 0) return;
+            juce::Logger::writeToLog("[SModePage] MIDI menu result=" + juce::String(result) + " target=" + target);
+            if (result == 1) safe->startMidiLearn(target, label);
+            else if (result == 2) safe->clearMidiLearn(target, label);
+            else if (result == 3)
+            {
+                if (auto* svc = safe->midiService()) svc->endCcLearn();
+                safe->pendingLearnTarget_ = {};
+                safe->flashUndoStatus("MIDI Learn cancelled");
+            }
+        });
+}
+
+void SModePage::startMidiLearn(const juce::String& target, const juce::String& label)
+{
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr) return;
+    // Stem pitch is built into the service (no UI callback, works with the
+    // editor closed); the inspector targets were registered in the ctor.
+    midiSvc->beginCcLearn(target, nullptr);
+    pendingLearnTarget_ = target;
+    pendingLearnLabel_  = label;
+    juce::Logger::writeToLog("[SModePage] MIDI learn armed: " + target);
+    flashUndoStatus("MIDI Learn: move a knob or fader on your MIDI controller (" + label + ")");
+}
+
+void SModePage::clearMidiLearn(const juce::String& target, const juce::String& label)
+{
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr) return;
+    const int removed = midiSvc->clearCcBindingsForTarget(target);
+    if (pendingLearnTarget_ == target) pendingLearnTarget_ = {};
+    juce::Logger::writeToLog("[SModePage] MIDI cleared: " + target + " (" + juce::String(removed) + " binding(s))");
+    flashUndoStatus("MIDI cleared: " + label);
+    if (auto* app = appState_) app->markDirty();
+    refreshMidiLearnInfo();
+}
+
+void SModePage::refreshMidiLearnInfo()
+{
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr) return;
+    lastCcGeneration_ = midiSvc->getCcBindingsGeneration();
+    for (int i = 0; i < (int) stemWaveforms_.size(); ++i)
+        if (stemWaveforms_[(size_t) i])
+            stemWaveforms_[(size_t) i]->setPitchMidiInfo(midiSvc->describeCcBindings(stemPitchCcTarget(i)));
+    for (const auto& param : ChopInspectorStrip::midiParams())
+        chopInspector_.setMidiInfo(param, midiSvc->describeCcBindings(inspectorCcTarget(param)));
+
+    // A learn this page armed has completed (bound) or was cancelled elsewhere.
+    if (pendingLearnTarget_.isNotEmpty() && midiSvc->getCcLearnTarget() != pendingLearnTarget_)
+    {
+        const auto bound = midiSvc->describeCcBindings(pendingLearnTarget_);
+        juce::Logger::writeToLog("[SModePage] MIDI learn finished: " + pendingLearnTarget_
+                                 + " -> " + (bound.isEmpty() ? juce::String("none") : bound));
+        if (bound.isNotEmpty())
+        {
+            flashUndoStatus("MIDI: " + pendingLearnLabel_ + " <- " + bound);
+            if (auto* app = appState_) app->markDirty();
+        }
+        pendingLearnTarget_ = {};
+    }
+}
+
+void SModePage::syncStemPitchKnobs()
+{
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr || ! audioLoaded_) return;
+    for (int i = 0; i < (int) stemWaveforms_.size(); ++i)
+        if (stemWaveforms_[(size_t) i])
+            stemWaveforms_[(size_t) i]->setPitchSemitones(midiSvc->getStemPitchSemitones(i));   // no-op when equal
+}
+
+void SModePage::applyInspectorCc(const juce::String& param, float value01)
+{
+    if (smodeService_ == nullptr || ! chopInspector_.hasTarget() || findInspectorSegment() < 0) return;
+    // One undo entry per CC gesture: a pause longer than 1 s starts a new one.
+    const auto now = juce::Time::getMillisecondCounter();
+    const bool newGesture = lastCcUndoMs_ == 0 || now - lastCcUndoMs_ > 1000;
+    if (chopInspector_.setFromController(param, value01, newGesture))
+    {
+        if (newGesture)
+            juce::Logger::writeToLog("[SModePage] MIDI CC edits chop " + juce::String(inspStem_) + ":"
+                                     + juce::String(inspSeg_) + " " + param + " (undo step pushed)");
+        lastCcUndoMs_ = now;
+    }
+}
+
+juce::String SModePage::debugMidiSelfTest(const juce::String& step)
+{
+    // UI self-test (VST3SmokeHost --ui-sweep): runs exactly the code the
+    // right-click menu items run. Returns "PASS ..." / "FAIL ..." / "MENU ...".
+    auto* midiSvc = midiService();
+    if (midiSvc == nullptr) return "FAIL no MidiMappingService";
+    juce::Logger::writeToLog("[SModePage] MIDI self-test step: " + step);
+    if (step == "menu_pitch" || step == "menu_insp")
+    {
+        juce::PopupMenu::dismissAllActiveMenus();
+        if (step == "menu_pitch")
+        {
+            if (stemWaveforms_.empty() || ! audioLoaded_ || ! stemWaveforms_[0]->onPitchMidiMenu) return "FAIL no stems";
+            stemWaveforms_[0]->onPitchMidiMenu(0);
+        }
+        else
+        {
+            auto* c = chopInspector_.getControl("gain");
+            if (c == nullptr || ! chopInspector_.hasTarget() || ! chopInspector_.onMidiMenu) return "FAIL inspector has no chop";
+            chopInspector_.onMidiMenu("gain", *c);
+        }
+        return "MENU " + lastMidiMenuItems_.joinIntoString(" | ");
+    }
+    if (step == "close")
+    {
+        juce::PopupMenu::dismissAllActiveMenus();
+        return "ok";
+    }
+    if (step == "learn_pitch")
+    {
+        if (stemWaveforms_.empty()) return "FAIL no stems";
+        startMidiLearn(stemPitchCcTarget(0), "self-test pitch");
+        midiSvc->debugInjectController(1, 74, 0.75f);           // -> +6 st
+        refreshMidiLearnInfo();
+        syncStemPitchKnobs();
+        const float semi = midiSvc->getStemPitchSemitones(0);
+        const float knob = stemWaveforms_[0]->getPitchSemitones();
+        const auto info = stemWaveforms_[0]->getPitchMidiInfo();
+        const bool ok = std::abs(semi - 6.0f) < 0.01f && std::abs(knob - 6.0f) < 0.01f
+                     && info == "CC 74 ch 1" && midiSvc->describeCcBindings(stemPitchCcTarget(0)) == "CC 74 ch 1";
+        midiSvc->debugInjectController(1, 74, 0.5f);            // back to 0 st
+        syncStemPitchKnobs();
+        return (ok ? "PASS" : "FAIL") + juce::String(" pitch learn: semi=") + juce::String(semi, 2)
+             + " knob=" + juce::String(knob, 2) + " info=" + info;
+    }
+    if (step == "learn_insp")
+    {
+        if (! chopInspector_.hasTarget() || findInspectorSegment() < 0) return "FAIL inspector has no chop";
+        startMidiLearn(inspectorCcTarget("gain"), "self-test gain");
+        midiSvc->debugInjectController(2, 7, 0.0f);              // gain -> -inf
+        refreshMidiLearnInfo();
+        const auto fx = smodeService_->getModel().getSegmentEffects(inspStem_, findInspectorSegment());
+        const auto info = chopInspector_.getMidiInfo("gain");
+        const bool ok = fx.volume <= 0.0001f && info == "CC 7 ch 2";
+        midiSvc->debugInjectController(2, 7, 1.0f);              // gain -> +6 dB
+        const auto fx2 = smodeService_->getModel().getSegmentEffects(inspStem_, findInspectorSegment());
+        const bool ok2 = fx2.volume > 1.9f;
+        return ((ok && ok2) ? "PASS" : "FAIL") + juce::String(" inspector learn: vol0=") + juce::String(fx.volume, 3)
+             + " vol1=" + juce::String(fx2.volume, 3) + " info=" + info;
+    }
+    if (step == "clear")
+    {
+        clearMidiLearn(stemPitchCcTarget(0), "self-test pitch");
+        clearMidiLearn(inspectorCcTarget("gain"), "self-test gain");
+        const bool ok = stemWaveforms_.empty() || stemWaveforms_[0]->getPitchMidiInfo().isEmpty();
+        const bool ok2 = chopInspector_.getMidiInfo("gain").isEmpty() && midiSvc->getCcBindings().empty();
+        return (ok && ok2) ? juce::String("PASS cleared")
+                           : "FAIL clear: bindings=" + juce::String((int) midiSvc->getCcBindings().size());
+    }
+    return "FAIL unknown step " + step;
 }
 
 } // namespace samplar

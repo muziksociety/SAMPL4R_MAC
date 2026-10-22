@@ -1,4 +1,6 @@
 ﻿#include "SequencerLaneComponent.h"
+#include "LaneGridRescale.h"
+#include <climits>
 #include <random>
 
 namespace samplar {
@@ -59,9 +61,23 @@ SequencerLaneComponent::SequencerLaneComponent(SModeSegmentModel& model, int lan
         int idx = subdivCombo_.getSelectedId() - 1;
         if (idx >= 0 && idx < 5)
         {
-            if (subdivValues[idx] != slotsPerBar_)
-                model_.pushUndoState("Lane subdivision");
+            if (subdivValues[idx] == slotsPerBar_) return;
+            model_.pushUndoState("Lane subdivision");
+            const int oldCellsPerBar = getCellsPerBar();
             slotsPerBar_ = subdivValues[idx];
+            juce::Logger::writeToLog("[SequencerLane] lane " + juce::String(laneIndex_) + " subdivision x"
+                                     + juce::String(slotsPerBar_) + " -> " + juce::String(getCellsPerBar())
+                                     + " cells/bar (was " + juce::String(oldCellsPerBar) + ")");
+            if (oldCellsPerBar != getCellsPerBar())
+            {
+                // Undo was pushed above, so a merge on a coarser grid is undoable.
+                const int lost = rescaleSlotsToGrid(oldCellsPerBar, "subdivision change");
+                if (lost > 0 && onStatusMessage)
+                    onStatusMessage(juce::String(lost) + " slot(s) merged on the coarser grid (Ctrl+Z to undo)");
+                buildSlotComponents();
+                resized();
+                repaint();
+            }
         }
     };
 
@@ -91,7 +107,7 @@ SequencerLaneComponent::SequencerLaneComponent(SModeSegmentModel& model, int lan
             {
                 if (slots_.empty()) return;
                 model_.pushUndoState("Lane slice");
-                int totalCells = numBars_ * 4;
+                int totalCells = getTotalCells();
                 if (totalCells <= 0) return;
 
                 std::mt19937 rng(static_cast<unsigned>(juce::Time::currentTimeMillis()));
@@ -247,7 +263,7 @@ void SequencerLaneComponent::shuffle()
     slots_ = PatternGenerator::generate(available, patternType_, numBars_, slotsPerBar_);
 
     // Assign gridCell and cellSpan for the integer cell grid
-    int totalCells = numBars_ * 4;
+    int totalCells = getTotalCells();
     int cellsPerSlot = juce::jmax(1, totalCells / juce::jmax(1, static_cast<int>(slots_.size())));
     for (int i = 0; i < static_cast<int>(slots_.size()); ++i)
     {
@@ -333,13 +349,14 @@ void SequencerLaneComponent::buildSlotComponents()
             double sr = model_.getSampleRate();
             if (sr <= 0.0) sr = 44100.0;
             sc->setTempoInfo(bpm_, sr);
-            int totalCells = numBars_ * 4;
+            int totalCells = getTotalCells();
             float cellW = (totalCells > 0 && slotArea_.getWidth() > 0)
                 ? static_cast<float>(slotArea_.getWidth()) / static_cast<float>(totalCells)
                 : 20.0f;
             sc->setCellWidth(cellW);
             sc->setTotalCells(totalCells);
-            sc->setMaxCellSpan(4);
+            sc->setMaxCellSpan(getCellsPerBar());
+            sc->setServiceRegistry(registry_);
             sc->setSlotData(slot, &model_, col);
         }
 
@@ -385,7 +402,7 @@ void SequencerLaneComponent::buildSlotComponents()
             if (fromIdx < 0 || fromIdx >= static_cast<int>(slots_.size())) return;
 
             auto& slot = slots_[static_cast<size_t>(fromIdx)];
-            int totalCells = numBars_ * 4;
+            int totalCells = getTotalCells();
 
             int newCell = juce::jlimit(0, totalCells - slot.cellSpan, targetCell);
             if (newCell == slot.gridCell) return;
@@ -422,7 +439,7 @@ void SequencerLaneComponent::buildSlotComponents()
             if (fromIdx < 0 || fromIdx >= static_cast<int>(slots_.size())) return;
 
             auto& slot = slots_[static_cast<size_t>(fromIdx)];
-            int totalCells = numBars_ * 4;
+            int totalCells = getTotalCells();
 
             newGridCell = juce::jlimit(0, totalCells - 1, newGridCell);
             newCellSpan = juce::jlimit(1, totalCells - newGridCell, newCellSpan);
@@ -466,7 +483,7 @@ void SequencerLaneComponent::buildSlotComponents()
             if (fromIdx < 0 || fromIdx >= static_cast<int>(slots_.size())) return;
 
             auto& slot = slots_[static_cast<size_t>(fromIdx)];
-            int totalCells = numBars_ * 4;
+            int totalCells = getTotalCells();
 
             // New span: inverse of speed (0.5x = 2x cells, 2x = 0.5x cells)
             int newSpan = juce::jlimit(1, totalCells - slot.gridCell,
@@ -570,7 +587,7 @@ void SequencerLaneComponent::fillWithSegments(const std::vector<std::pair<int,in
 
     // Fill the grid with randomly-sized slots using the provided segments
     slots_.clear();
-    int totalCells = numBars_ * 4;
+    int totalCells = getTotalCells();
 
     std::mt19937 rng(static_cast<unsigned>(juce::Time::currentTimeMillis()));
     const int possibleSpans[] = { 1, 1, 1, 2, 2, 3, 4 };
@@ -627,22 +644,16 @@ void SequencerLaneComponent::paint(juce::Graphics& g)
     g.setColour(juce::Colour(0xff3a3a5a));
     g.drawRoundedRectangle(bounds.reduced(0.5f), 4.0f, 1.0f);
 
-    // Lane label
+    // Lane label "SEQ n" at the left of the single control row
     g.setColour(juce::Colours::white.withAlpha(0.4f));
     g.setFont(juce::FontOptions(9.0f));
-    // SEQ label at top-left (dots live in the bottom control row)
     g.drawText("SEQ " + juce::String(laneIndex_ + 1),
-               getLocalBounds().reduced(4, 2), juce::Justification::topLeft);
+               juce::Rectangle<int>(8, getHeight() - 4 - kControlRowHeight, kSeqLabelW - 4, kControlRowHeight),
+               juce::Justification::centredLeft);
 
-    // Stem dots — bottom-anchored to match the relocated control row
-    int dotStartX = 8;
-    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
+    // Stem dots — in the control row, right of the label
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
-    {
-        auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
-                                             dotY, kDotSize, kDotSize);
-        paintDot(g, i, dotArea);
-    }
+        paintDot(g, i, getDotArea(i));
 
     // ── Grid divider lines in slot area ──
     if (!slotArea_.isEmpty() && numBars_ > 0)
@@ -652,6 +663,16 @@ void SequencerLaneComponent::paint(juce::Graphics& g)
         float top = static_cast<float>(slotArea_.getY());
         float bot = static_cast<float>(slotArea_.getBottom());
         float left = static_cast<float>(slotArea_.getX());
+
+        // Sub-beat cells (x8 / x16 lanes): faint lines between the beat lines.
+        const int cpb = getCellsPerBeat();
+        if (cpb > 1 && pixelsPerBeat / (float) cpb >= 3.0f)
+        {
+            g.setColour(juce::Colours::white.withAlpha(0.05f));
+            for (int c = 0; c < totalBeatsInPattern * cpb; ++c)
+                if (c % cpb != 0)
+                    g.fillRect(left + (float) c * pixelsPerBeat / (float) cpb, top, 1.0f, bot - top);
+        }
 
         // Draw ALL grid lines (bar + beat)
         for (int beat = 0; beat <= totalBeatsInPattern; ++beat)
@@ -700,7 +721,7 @@ void SequencerLaneComponent::paintOverChildren(juce::Graphics& g)
     // where the copy will land BEFORE they release.
     if (!slotArea_.isEmpty() && numBars_ > 0)
     {
-        const int   totalCells = numBars_ * 4;
+        const int   totalCells = getTotalCells();
         const float cellW      = (totalCells > 0)
             ? static_cast<float>(slotArea_.getWidth()) / static_cast<float>(totalCells)
             : 20.0f;
@@ -794,15 +815,18 @@ void SequencerLaneComponent::paintDot(juce::Graphics& g, int dotIndex,
     }
 }
 
+juce::Rectangle<int> SequencerLaneComponent::getDotArea(int i) const
+{
+    const int x = 8 + kSeqLabelW + i * (kDotSize + kDotGap);
+    const int y = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
+    return { x, y, kDotSize, kDotSize };
+}
+
 void SequencerLaneComponent::mouseDown(const juce::MouseEvent& e)
 {
-    int dotStartX = 8;
-    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
     {
-        auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
-                                             dotY, kDotSize, kDotSize);
-        if (dotArea.expanded(2).contains(e.getPosition()))
+        if (getDotArea(i).expanded(2).contains(e.getPosition()))
         {
             stemDots_[static_cast<size_t>(i)].active = !stemDots_[static_cast<size_t>(i)].active;
             repaint();
@@ -814,13 +838,9 @@ void SequencerLaneComponent::mouseDown(const juce::MouseEvent& e)
 void SequencerLaneComponent::mouseMove(const juce::MouseEvent& e)
 {
     // Check if hovering over a stem dot
-    int dotStartX = 8;
-    int dotY = getHeight() - 4 - kControlRowHeight + (kControlRowHeight - kDotSize) / 2;
     for (int i = 0; i < static_cast<int>(stemDots_.size()); ++i)
     {
-        auto dotArea = juce::Rectangle<int>(dotStartX + i * (kDotSize + kDotGap),
-                                             dotY, kDotSize, kDotSize);
-        if (dotArea.expanded(3).contains(e.getPosition()))
+        if (getDotArea(i).expanded(3).contains(e.getPosition()))
         {
             if (onStemHovered) onStemHovered(i);
             return;
@@ -836,21 +856,21 @@ void SequencerLaneComponent::mouseExit(const juce::MouseEvent&)
 
 void SequencerLaneComponent::resized()
 {
+    // One control row (chrome 34 px instead of 60): the old top utility row
+    // (CLEAR | WAV drag | X) now sits at the right end of the bottom row.
     auto area = getLocalBounds().reduced(4);
-    // Top-right utility row: CLEAR | WAV drag | X (sit above the grid).
-    auto topRow = area.removeFromTop(kControlRowHeight);
-    removeBtn_.setBounds(topRow.removeFromRight(22));
-    topRow.removeFromRight(2);
-    dragWavArea_.setBounds(topRow.removeFromRight(70));
-    topRow.removeFromRight(2);
-    clearBtn_.setBounds(topRow.removeFromRight(45));
-    area.removeFromTop(4);
-
-    // Bottom control row: stem dots + play/stop/M + action + pattern + bars + subdiv.
     auto controlRow = area.removeFromBottom(kControlRowHeight);
 
-    // Dots area
-    int dotsWidth = static_cast<int>(stemDots_.size()) * (kDotSize + kDotGap) + 8;
+    // Right utility cluster
+    removeBtn_.setBounds(controlRow.removeFromRight(22));
+    controlRow.removeFromRight(2);
+    dragWavArea_.setBounds(controlRow.removeFromRight(70));
+    controlRow.removeFromRight(2);
+    clearBtn_.setBounds(controlRow.removeFromRight(45));
+    controlRow.removeFromRight(8);
+
+    // Left: "SEQ n" label + stem dots (both painted)
+    int dotsWidth = kSeqLabelW + static_cast<int>(stemDots_.size()) * (kDotSize + kDotGap) + 8;
     controlRow.removeFromLeft(dotsWidth);
 
     // Left group: Play | Stop | Mute
@@ -883,7 +903,7 @@ void SequencerLaneComponent::resized()
     // ── Fixed grid layout: totalCells = numBars * 4, each cell = equal pixel width ──
     if (!slotComponents_.empty() && !slots_.empty())
     {
-        int totalCells = numBars_ * 4;
+        int totalCells = getTotalCells();
         if (totalCells <= 0) totalCells = 16;
         float cellWidth = static_cast<float>(area.getWidth()) / static_cast<float>(totalCells);
 
@@ -907,6 +927,7 @@ void SequencerLaneComponent::resized()
 static juce::var slotToVar(const PatternSlot& s)
 {
     auto* obj = new juce::DynamicObject();
+    obj->setProperty("speed", s.speed);
     obj->setProperty("stemIndex", s.stemIndex);
     obj->setProperty("segmentIndex", s.segmentIndex);
     obj->setProperty("role", (int) s.role);
@@ -939,6 +960,19 @@ static PatternSlot slotFromVar(const juce::var& v)
         s.trimEnd        = (float)(double) obj->getProperty("trimEnd");
         s.cellSpan       = (int)   obj->getProperty("cellSpan");
         s.gridCell       = (int)   obj->getProperty("gridCell");
+        s.speed          = obj->hasProperty("speed") ? (float)(double) obj->getProperty("speed") : 1.0f;
+        if (! (s.speed > 0.0f) || ! std::isfinite(s.speed)) s.speed = 1.0f;
+        // Tolerant reader (untrusted project data): finite, in range.
+        auto fin = [](float v, float lo, float hi, float def) { return std::isfinite(v) ? juce::jlimit(lo, hi, v) : def; };
+        s.speed          = juce::jlimit(1.0f / 512.0f, 512.0f, s.speed);   // span ratio, cells up to 256
+        s.velocity       = fin(s.velocity, 0.0f, 1.0f, 1.0f);
+        s.pitchSemitones = fin(s.pitchSemitones, -48.0f, 48.0f, 0.0f);
+        s.probability    = fin(s.probability, 0.0f, 1.0f, 1.0f);
+        s.trimStart      = fin(s.trimStart, 0.0f, 1.0f, 0.0f);
+        s.trimEnd        = fin(s.trimEnd, 0.0f, 1.0f, 1.0f);
+        if (s.trimEnd <= s.trimStart) { s.trimStart = 0.0f; s.trimEnd = 1.0f; }
+        s.cellSpan       = juce::jmax(1, s.cellSpan);
+        s.gridCell       = juce::jmax(0, s.gridCell);
     }
     return s;
 }
@@ -949,6 +983,7 @@ juce::var SequencerLaneComponent::captureState() const
     obj->setProperty("patternType", (int) patternType_);
     obj->setProperty("numBars",     numBars_);
     obj->setProperty("slotsPerBar", slotsPerBar_);
+    obj->setProperty("cellsPerBar", getCellsPerBar());   // B18: unit of gridCell / cellSpan
     obj->setProperty("muted",       muted_);
     obj->setProperty("bpm",         bpm_);
 
@@ -964,16 +999,56 @@ void SequencerLaneComponent::restoreState(const juce::var& v)
     auto* obj = v.getDynamicObject();
     if (obj == nullptr) return;
 
-    patternType_ = (PatternGenerator::PatternType)(int) obj->getProperty("patternType");
-    numBars_     = (int) obj->getProperty("numBars");
-    slotsPerBar_ = (int) obj->getProperty("slotsPerBar");
+    // Tolerant reader: project files / undo states are untrusted. Anything out
+    // of range snaps to the nearest valid value instead of reaching the grid.
+    {
+        const int numPatterns = (int) PatternGenerator::getAllPatterns().size();
+        const int pt = (int) obj->getProperty("patternType");
+        patternType_ = (PatternGenerator::PatternType) juce::jlimit(0, juce::jmax(0, numPatterns - 1), pt);
+    }
+    auto snapTo = [](int v, std::initializer_list<int> allowed, int fallback)
+    {
+        if (v <= 0) return fallback;
+        int best = fallback, bestDist = INT_MAX;
+        for (int a : allowed)
+            if (std::abs(a - v) < bestDist) { bestDist = std::abs(a - v); best = a; }
+        return best;
+    };
+    numBars_     = snapTo((int) obj->getProperty("numBars"), { 2, 4, 8, 16 }, 4);
+    slotsPerBar_ = snapTo((int) obj->getProperty("slotsPerBar"), { 1, 2, 4, 8, 16 }, 1);
     muted_       = (bool) obj->getProperty("muted");
-    bpm_         = (double) obj->getProperty("bpm");
+    {
+        const double b = (double) obj->getProperty("bpm");
+        bpm_ = std::isfinite(b) && b > 0.0 ? juce::jlimit(20.0, 999.0, b) : 120.0;
+    }
 
     slots_.clear();
     if (auto* slotArr = obj->getProperty("slots").getArray())
         for (auto& sv : *slotArr)
             slots_.push_back(slotFromVar(sv));
+
+    // States saved before B18 always used 4 cells per bar (pre-B18 migration:
+    // an upscale, which is lossless - LaneGridRescale.h).
+    int savedCellsPerBar = obj->hasProperty("cellsPerBar") ? (int) obj->getProperty("cellsPerBar") : 4;
+    if (savedCellsPerBar != 4 && savedCellsPerBar != 8 && savedCellsPerBar != 16)
+    {
+        juce::Logger::writeToLog("[SequencerLane] lane " + juce::String(laneIndex_) + " restore: invalid cellsPerBar "
+                                 + juce::String(savedCellsPerBar) + " -> treated as 4");
+        savedCellsPerBar = 4;
+    }
+    if (savedCellsPerBar != getCellsPerBar())
+        rescaleSlotsToGrid(savedCellsPerBar, obj->hasProperty("cellsPerBar") ? "restore" : "restore (pre-B18 lane)");
+    else
+    {
+        // Same grid: still make the slot list consistent (sorted, in range,
+        // no overlap) - a hand-edited or old file must not break the lane.
+        LaneRescaleReport rep;
+        slots_ = rescaleLaneSlots(slots_, 1, 1, getTotalCells(), rep);
+        if (rep.merged + rep.outOfRange + rep.shortened > 0)
+            juce::Logger::writeToLog("[SequencerLane] lane " + juce::String(laneIndex_) + " restore: normalised slots, merged="
+                                     + juce::String(rep.merged) + " outOfRange=" + juce::String(rep.outOfRange)
+                                     + " shortened=" + juce::String(rep.shortened));
+    }
 
     // Sync combo boxes with restored state (no notification to avoid re-firing handlers).
     {
@@ -1001,6 +1076,23 @@ void SequencerLaneComponent::restoreState(const juce::var& v)
     buildSlotComponents();
     resized();
     repaint();
+}
+
+int SequencerLaneComponent::rescaleSlotsToGrid(int fromCellsPerBar, const char* why)
+{
+    const int to = getCellsPerBar();
+    if (fromCellsPerBar <= 0 || to == fromCellsPerBar) return 0;
+    LaneRescaleReport rep;
+    const auto before = slots_.size();
+    slots_ = rescaleLaneSlots(slots_, fromCellsPerBar, to, getTotalCells(), rep);
+    juce::Logger::writeToLog("[SequencerLane] lane " + juce::String(laneIndex_) + " rescaled (" + juce::String(why) + ") "
+                             + juce::String((int) before) + " slots from " + juce::String(fromCellsPerBar)
+                             + " to " + juce::String(to) + " cells/bar -> kept " + juce::String(rep.kept)
+                             + " merged=" + juce::String(rep.merged) + " emptyMerged=" + juce::String(rep.emptyMerged)
+                             + " outOfRange=" + juce::String(rep.outOfRange) + " shortened=" + juce::String(rep.shortened));
+    for (const auto& d : rep.details)
+        juce::Logger::writeToLog("[SequencerLane]   " + d);
+    return rep.merged + rep.outOfRange;
 }
 
 } // namespace samplar

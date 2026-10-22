@@ -355,21 +355,8 @@
 
 ## 🧪 **TEST CREDENTIALS**
 
-### Debug License (Built into SAMPLAR)
-```
-Email:    panchovilla@gmail.com
-Password: panchovilla..
-License:  SAMPLAR-DEBUG-PANCHO
-Type:     ENT (Enterprise)
-```
-
-### Test User
-```
-Email:    test@example.com
-Password: test123
-License:  SAMPLAR-TEST-12345
-Type:     PRO
-```
+Test accounts, passwords and licence keys are not kept in this repository.
+Use a real account with a SAMPL4R licence (see `src/security/README.md`).
 
 ---
 

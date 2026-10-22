@@ -42,8 +42,10 @@ public:
     void recordFailedAttempt(const std::string& username, const std::string& hardwareId);
     bool isUserLockedOut(const std::string& username, const std::string& hardwareId) const;
 
-    // Migration support: get all hardware IDs stored in cache (for hardware ID migration)
-    std::vector<std::string> getAllCachedHardwareIds() const;
+    // Folder holding license_cache.json (%APPDATA%\Samplar, or
+    // SAMPLAR_CACHE_DIR_OVERRIDE). Created if missing. Also used by ClockGuard
+    // and SecureSessionManager so everything licence-related lives together.
+    static juce::File cacheDirectory();
 
 private:
     juce::File getCacheDirectory() const;

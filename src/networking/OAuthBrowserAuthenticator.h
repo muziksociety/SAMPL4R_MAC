@@ -1,46 +1,53 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_core/juce_core.h>
 #include <juce_events/juce_events.h>
 
+#include <atomic>
 #include <functional>
 #include <memory>
-#include <atomic>
+#include <string>
+#include <vector>
 
 namespace samplar {
 
+class CancellableHttpPost;
+
 /**
- * OAuth Browser Authenticator
+ * OAuth browser sign-in (Authorization Code flow with PKCE, RFC 8252 / 7636).
+ * Ported from SM5 (894f80ec, 042b7812).
  *
- * Implements secure OAuth-style browser authentication flow:
- * 1. Starts local HTTP server on random port
- * 2. Opens browser to server login page with callback URL
- * 3. Server redirects back to localhost with ONLY auth code (no sensitive data in URL)
- * 4. Client exchanges auth code for license data via secure server-to-server call
- * 5. Returns license info to the app
+ * 1. Listens on 127.0.0.1 (loopback only) for the redirect.
+ * 2. Opens the browser on /auth/app-login with state + PKCE challenge.
+ * 3. The server redirects back with ONLY ?code=&state= (no secrets in the URL).
+ * 4. The code (+ PKCE verifier + nonce) is exchanged over HTTPS at
+ *    /auth/token-exchange for the licence data and its server signature.
+ * 5. The result is delivered on the message thread.
  *
- * Security: Sensitive data (tokens, license keys) never appear in browser URL.
+ * Lifetime: owned by LicenseSystemService. cancelAuthentication() (also run by
+ * the destructor) aborts the network call and JOINS the thread.
  */
 class OAuthBrowserAuthenticator : public juce::Thread
 {
 public:
-    // Authentication result
     struct AuthResult
     {
         bool success = false;
         std::string errorMessage;
 
-        // License data from server
-        std::string accessToken;
+        // License data from /auth/token-exchange
+        std::string accessToken;     // sign-in token, used for /auth/revalidate
         std::string licenseKey;
         std::string email;
         std::string licenseType;
         std::string expiresAt;
         std::string hardwareId;
-        std::string signature;
         std::string issuedAt;
+        std::string licensePayload;  // exact server-signed text (payload v2)
+        std::string signatureV2;     // base64 RSA-PSS/SHA-256 over licensePayload
+        std::string requestNonce;    // nonce we sent; must come back inside licensePayload
 
-        // Full license info as juce::var for caching
+        // Plain licence fields for caching (never trusted for activation on their own)
         juce::var licenseInfo;
     };
 
@@ -49,62 +56,59 @@ public:
     OAuthBrowserAuthenticator();
     ~OAuthBrowserAuthenticator() override;
 
-    /**
-     * Start the OAuth authentication flow.
-     *
-     * @param serverBaseUrl  Base URL of the license server (e.g., "https://samplemonsta.com")
-     * @param hardwareId     The machine's hardware ID for license binding
-     * @param callback       Called when authentication completes (on message thread)
-     */
+    /** Start the flow. `callback` runs on the message thread; it must not
+        capture anything that can die before it runs without a liveness guard. */
     void startAuthentication(const std::string& serverBaseUrl,
-                            const std::string& hardwareId,
-                            CompletionCallback callback);
+                             const std::string& hardwareId,
+                             CompletionCallback callback);
 
-    /**
-     * Cancel an ongoing authentication.
-     */
+    /** Abort and JOIN (the browser wait, the token exchange). Shutdown /
+        destructor only. Every wait in run() is cancellable, so this returns
+        within ~0.1 s; it never force-kills the thread. */
     void cancelAuthentication();
 
-    /**
-     * Check if authentication is in progress.
-     */
+    /** Ask the running sign-in to stop, without waiting (UI "Cancel"). It
+        finishes on its own and reports "Sign-in cancelled". */
+    void requestCancel();
+
     bool isAuthenticating() const { return isRunning_; }
+
+    /** requestCancel() was called for the current run (it may still be closing). */
+    bool isCancelRequested() const { return shouldStop_; }
+
+    /** How long the user has to finish signing in (account creation and
+        password resets take a while; Render can cold-start). */
+    static constexpr int kAuthTimeoutMs = 5 * 60 * 1000;
 
 private:
     void run() override;
 
-    // HTTP callback server
+    // Deliver the result on the message thread without capturing `this`.
+    void postResult(const AuthResult& result);
+
     bool startCallbackServer();
     void stopCallbackServer();
     std::string waitForCallback(int timeoutMs);
 
-    // Exchange authorization code for license data (secure server-to-server call)
     AuthResult exchangeCodeForToken(const std::string& authCode);
 
-    // Generate random state token for CSRF protection
-    std::string generateStateToken();
-
-    // URL encoding helper
+    // 32 CSPRNG bytes as 64 hex chars (state and PKCE verifier).
+    static std::string generateRandomToken();
     static std::string urlEncode(const std::string& value);
 
-    // Configuration
     std::string serverBaseUrl_;
     std::string hardwareId_;
+    std::string hardwareIdV2_;                 // auth thread only after start
     std::string stateToken_;
+    std::string codeVerifier_;                 // PKCE: never in the browser URL
     int callbackPort_ = 0;
 
-    // Callback
     CompletionCallback completionCallback_;
+    std::shared_ptr<CancellableHttpPost> http_;   // fresh per run; cancel() aborts the exchange
 
-    // Server socket
     std::unique_ptr<juce::StreamingSocket> serverSocket_;
     std::atomic<bool> isRunning_{false};
     std::atomic<bool> shouldStop_{false};
-    std::atomic<bool> callbackReceived_{false};
-    juce::String callbackData_;
-
-    // Timeout (60 seconds for user to log in)
-    static constexpr int AUTH_TIMEOUT_MS = 60000;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OAuthBrowserAuthenticator)
 };

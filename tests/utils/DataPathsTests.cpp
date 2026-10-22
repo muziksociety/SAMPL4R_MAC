@@ -1,0 +1,70 @@
+#include <juce_core/juce_core.h>
+
+#include "utils/DataPaths.h"
+#include "TestHelpers.h"
+
+namespace samplar {
+
+class DataPathsTests : public juce::UnitTest
+{
+public:
+    DataPathsTests() : juce::UnitTest ("DataPaths", "SAMPLAR") {}
+
+    void runTest() override
+    {
+        test::ScopedTempDir bundle ("SamplarTests_bundle");
+        const auto root = bundle.get();
+
+        beginTest ("override (VST3 bundle) wins and data/ + models/ hang off it");
+        {
+            root.getChildFile ("data").createDirectory();
+            root.getChildFile ("models").createDirectory();
+            DataPaths::setAppDirectory (root);
+            expectEquals (DataPaths::getAppDirectory().getFullPathName(), root.getFullPathName());
+            expectEquals (DataPaths::getDataDirectory().getFullPathName(), root.getChildFile ("data").getFullPathName());
+            expectEquals (DataPaths::getModelsDirectory().getFullPathName(), root.getChildFile ("models").getFullPathName());
+            DataPaths::clearAppDirectory();
+        }
+
+        beginTest ("an override that does not exist is ignored (falls back, never returns the bogus dir)");
+        {
+            const auto missing = root.getChildFile ("does_not_exist");
+            DataPaths::setAppDirectory (missing);
+            expect (DataPaths::getAppDirectory() != missing);
+            DataPaths::clearAppDirectory();
+        }
+
+        beginTest ("without override: exe dir (if it has data/ or models/), else CWD with data/, else exe dir");
+        {
+            DataPaths::clearAppDirectory();
+            const auto exeDir = juce::File::getSpecialLocation (juce::File::currentExecutableFile).getParentDirectory();
+            const bool exeHasResources = exeDir.getChildFile ("data").isDirectory() || exeDir.getChildFile ("models").isDirectory();
+
+            const auto previousCwd = juce::File::getCurrentWorkingDirectory();
+            root.setAsCurrentWorkingDirectory();   // root has data/
+            const auto resolved = DataPaths::getAppDirectory();
+            previousCwd.setAsCurrentWorkingDirectory();
+
+            if (exeHasResources)
+                expectEquals (resolved.getFullPathName(), exeDir.getFullPathName());
+            else
+                expectEquals (resolved.getFullPathName(), root.getFullPathName(), "CWD fallback");
+
+            if (! exeHasResources && ! previousCwd.getChildFile ("data").isDirectory())
+                expectEquals (DataPaths::getAppDirectory().getFullPathName(), exeDir.getFullPathName(), "last resort: exe dir");
+        }
+
+        beginTest ("user data directory is <userAppData>/Samplar and exists");
+        {
+            const auto dir = DataPaths::getUserDataDirectory();
+            expectEquals (dir.getFileName(), juce::String ("Samplar"));
+            expect (dir.isDirectory());
+            expectEquals (dir.getParentDirectory().getFullPathName(),
+                          juce::File::getSpecialLocation (juce::File::userApplicationDataDirectory).getFullPathName());
+        }
+    }
+};
+
+static DataPathsTests dataPathsTests;
+
+} // namespace samplar

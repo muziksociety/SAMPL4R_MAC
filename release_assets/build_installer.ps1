@@ -47,13 +47,14 @@ function Log-Err($m)   { Write-Host "[ERR]     $m" -ForegroundColor Red }
 # ---------------------------------------------------------------
 # Resolve version
 # ---------------------------------------------------------------
+# Single source of truth: CMakeLists.txt `project(samplar VERSION x.y.z)`.
+# (The same value is compiled into the plugin, so installer and binary
+# can never disagree.)
 if (-not $Version) {
-    try {
-        Push-Location $RepoRoot
-        $tag = git describe --tags --abbrev=0 2>$null
-        Pop-Location
-        if ($LASTEXITCODE -eq 0 -and $tag) { $Version = $tag -replace '^v','' } else { $Version = 'dev' }
-    } catch { $Version = 'dev' }
+    $cmakeText = Get-Content -Raw -LiteralPath (Join-Path $RepoRoot 'CMakeLists.txt')
+    $m = [regex]::Match($cmakeText, 'project\(\s*samplar\s+VERSION\s+([0-9]+\.[0-9]+\.[0-9]+)')
+    if ($m.Success) { $Version = $m.Groups[1].Value }
+    else { Log-Err "Could not parse project(samplar VERSION x.y.z) from CMakeLists.txt"; exit 1 }
 }
 Log-Info "Build version : $Version"
 Log-Info "Repo root     : $RepoRoot"
@@ -80,6 +81,44 @@ if (-not (Test-Path $Vst3Bundle)) {
     throw "VST3 bundle not found at $Vst3Bundle - did the build succeed?"
 }
 Log-Ok "VST3 bundle: $Vst3Bundle"
+
+# ---------------------------------------------------------------
+# Preflight: HARD FAIL if any runtime DLL / model is missing, has the wrong
+# bits, or a stale model would ship. (GPU stem separation = ORT 1.19.2
+# DirectML build + DirectML 1.15.1 + htdemucs_body.onnx, same bits as SM5.)
+# ---------------------------------------------------------------
+$BinDir = Join-Path $Vst3Bundle 'Contents\x86_64-win'
+$Required = @(
+    @{ Path = 'SAMPLAR.vst3';               Sha = $null },
+    @{ Path = 'onnxruntime.dll';            Sha = '410de3464172dae2945a4663f274e34c59965bc8233b0411de16baab56dda1a7' },
+    @{ Path = 'DirectML.dll';               Sha = 'f3b672b9fe6d8228ae978e74217a9bb1d6605643550be166eab15f1c09eddb86' },
+    @{ Path = 'models\htdemucs_body.onnx';  Sha = '236be9938a4ef30dd388817b87d6144a5fd7f197b3f6961a9092f9b6d0c6f2c5' },
+    @{ Path = 'models\beat_this.onnx';      Sha = $null },
+    @{ Path = 'data\samplar_bundle.marker'; Sha = $null },
+    @{ Path = '..\Resources\licenses\DirectML-LICENSE.txt';  Sha = $null },
+    @{ Path = '..\Resources\licenses\onnxruntime-LICENSE.txt'; Sha = $null }
+)
+$Forbidden = @('models\htdemucs.onnx', 'onnxruntime_providers_shared.dll', 'tools', 'BACKGROUNDS', 'Samples')
+$preflightErrors = @()
+foreach ($r in $Required) {
+    $f = Join-Path $BinDir $r.Path
+    if (-not (Test-Path -LiteralPath $f)) { $preflightErrors += "missing: $($r.Path)"; continue }
+    $len = (Get-Item -LiteralPath $f).Length
+    if ($len -le 0) { $preflightErrors += "empty: $($r.Path)"; continue }
+    if ($r.Sha) {
+        $h = (Get-FileHash -Algorithm SHA256 -LiteralPath $f).Hash.ToLower()
+        if ($h -ne $r.Sha) { $preflightErrors += "wrong bits: $($r.Path) sha256=$h (expected $($r.Sha))"; continue }
+    }
+    Log-Ok ("preflight: {0} ({1:N1} MB)" -f $r.Path, ($len / 1MB))
+}
+foreach ($p in $Forbidden) {
+    if (Test-Path -LiteralPath (Join-Path $BinDir $p)) { $preflightErrors += "must not ship: $p" }
+}
+if ($preflightErrors.Count -gt 0) {
+    foreach ($e in $preflightErrors) { Log-Err "preflight: $e" }
+    throw "Bundle preflight failed ($($preflightErrors.Count) problem(s)) - fix the VST3 staging before building the installer."
+}
+Log-Ok "Bundle preflight passed (GPU runtime + single separation model)"
 
 # ---------------------------------------------------------------
 # Ensure VC++ Redist is cached

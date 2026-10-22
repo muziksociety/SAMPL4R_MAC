@@ -6,7 +6,6 @@
 #include "AudioDeviceService.h"
 #include "../utils/Tracing.h"
 #include "../utils/FontWarmer.h"
-#include "../services/ProcessingCoordinatorService.h"
 // SAMPLAR fork: GeneratorService, VariationService, MentorRegistration, CustomCategoryManager removed
 #include "../services/LicenseSystemService.h"
 #include "../services/UpdateCheckService.h"
@@ -166,9 +165,6 @@ void App::initialise (const String& /*commandLine*/)
         serviceRegistry->registerService("audio", std::make_unique<samplar::AudioDeviceService>());
         juce::Logger::writeToLog("???? [App] AudioDeviceService registered successfully");
 
-        juce::Logger::writeToLog("???? [App] Registering ProcessingCoordinatorService");
-        serviceRegistry->registerService("processing.coordinator", std::make_unique<samplar::ProcessingCoordinatorService>(eventBus_));
-        juce::Logger::writeToLog("???? [App] ProcessingCoordinatorService registered successfully");
 
         // SAMPLAR fork: variation services and MentorService removed (stems-to-pads only)
 
@@ -202,6 +198,9 @@ void App::initialise (const String& /*commandLine*/)
             if (audioSvc && midiSvc)
             {
                 auto& devMgr = audioSvc->deviceManager();
+                // Licence gate on the standalone audio path + exports (N-18).
+                if (auto* lic = dynamic_cast<samplar::LicenseSystemService*>(serviceRegistry->get("license")))
+                    midiSvc->setAudioGate(&lic->audioAllowedFlag());
                 midiSvc->connectToDeviceManager(&devMgr);
                 juce::Logger::writeToLog("[App] MidiMappingService connected to AudioDeviceManager");
 

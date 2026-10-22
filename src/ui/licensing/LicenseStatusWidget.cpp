@@ -8,7 +8,9 @@
 namespace samplar {
 
 namespace {
-constexpr auto kSupportUrl = "https://support.samplemonsta.com/licensing";
+// Account portal (licences, devices) and the SAMPLAR purchase page.
+constexpr auto kAccountUrl = LicenseSystemService::kAccountLicensesUrl;
+constexpr auto kRenewUrl   = LicenseSystemService::kBuyUrl;
 }
 
 LicenseStatusWidget::LicenseStatusWidget(LicenseSystemService* service, EventBus* bus)
@@ -201,7 +203,11 @@ void LicenseStatusWidget::updateLicenseStatus()
 
     renewButton_.setVisible(status == LicenseSystemService::LicenseStatus::Expired
                              || status == LicenseSystemService::LicenseStatus::GracePeriodExpired);
-    activateButton_.setButtonText(status == LicenseSystemService::LicenseStatus::Valid ? "Revalidate" : "Activate");
+    // Valid but the server rejected the sign-in token (token_*): the licence
+    // still plays inside its offline window; offer a sign-in, not a re-check.
+    const bool signInRequired = licenseService_->isSignInRequired();
+    activateButton_.setButtonText(status != LicenseSystemService::LicenseStatus::Valid ? "Activate"
+                                  : signInRequired ? "Sign in" : "Revalidate");
 
     if (previousStatus != status)
     {
@@ -223,19 +229,31 @@ void LicenseStatusWidget::buttonClicked(juce::Button* button)
 {
     if (button == &activateButton_)
     {
-        if (licenseService_ != nullptr && eventBus_ != nullptr)
+        if (licenseService_ == nullptr || eventBus_ == nullptr)
+            return;
+
+        if (licenseService_->getCurrentStatus() == LicenseSystemService::LicenseStatus::Valid
+            && ! licenseService_->isSignInRequired())
         {
-            LicenseActivationDialog::showModal(*licenseService_, *eventBus_);
-            updateLicenseStatus();
+            // "Revalidate": silent background re-check, result via license.status.
+            juce::Logger::writeToLog("[LicenseStatusWidget] Revalidate clicked -> recheckNow");
+            licenseService_->recheckNow();
+            return;
         }
+
+        // In-window sign-in panel (no modal loop: this widget also lives in the plugin).
+        juce::Logger::writeToLog("[LicenseStatusWidget] Activate / Sign in clicked -> in-window sign-in");
+        juce::Component::SafePointer<LicenseStatusWidget> safeThis(this);
+        LicenseActivationDialog::showInWindow(this, *licenseService_, *eventBus_, true,
+            [safeThis](int) { if (safeThis != nullptr) safeThis->updateLicenseStatus(); });
     }
     else if (button == &renewButton_)
     {
-        showLicenseExpiredDialog();
+        juce::URL(kRenewUrl).launchInDefaultBrowser();
     }
     else if (button == &supportButton_)
     {
-        juce::URL(kSupportUrl).launchInDefaultBrowser();
+        juce::URL(kAccountUrl).launchInDefaultBrowser();
     }
 }
 
@@ -309,7 +327,7 @@ juce::String LicenseStatusWidget::getStatusText(LicenseSystemService::LicenseSta
         case Status::GracePeriodExpired: return "Grace period expired";
         case Status::ActivationLimitExceeded: return "Activation limit exceeded";
         case Status::HardwareMismatch: return "Hardware mismatch";
-        case Status::InvalidKey: return "Invalid license key";
+        case Status::InvalidKey: return "Not signed in";
         case Status::UserLockedOut: return "User locked out";
         case Status::NetworkError: return "Network error";
         case Status::NotInitialised:

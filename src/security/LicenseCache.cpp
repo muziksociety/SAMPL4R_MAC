@@ -74,7 +74,7 @@ std::optional<LicenseCache::CacheEntry> LicenseCache::retrieveLicense(const std:
 {
     std::scoped_lock lock(cacheMutex_);
     juce::Logger::writeToLog("[LicenseCache] retrieveLicense called with hardwareId: " +
-        juce::String(hardwareId.substr(0, 16)) + "...");
+        juce::String(hardwareId.substr(0, 8)) + "...");
 
     auto entry = loadCache();
     if (!entry.has_value())
@@ -83,10 +83,14 @@ std::optional<LicenseCache::CacheEntry> LicenseCache::retrieveLicense(const std:
         return std::nullopt;
     }
 
+    // Masked (D13): only the key's product prefix ("SAMPL4R" / "ACCOUNT"), never
+    // the rest - an ACCOUNT:<email> key would otherwise leak the email.
     juce::Logger::writeToLog("[LicenseCache] Cache loaded, stored hardwareId: " +
-        juce::String(entry->hardwareId.substr(0, 16)) + "...");
+        juce::String(entry->hardwareId.substr(0, 8)) + "...");
     juce::Logger::writeToLog("[LicenseCache] Cache loaded, licenseKey: " +
-        juce::String(entry->licenseKey.empty() ? "(empty)" : entry->licenseKey.substr(0, 12) + "..."));
+        (entry->licenseKey.empty() ? juce::String("(empty)")
+                                   : juce::String(entry->licenseKey).upToFirstOccurrenceOf("-", false, false)
+                                                                    .upToFirstOccurrenceOf(":", false, false) + "-..."));
 
     if (entry->hardwareId != hardwareId)
     {
@@ -236,6 +240,11 @@ bool LicenseCache::isUserLockedOut(const std::string& username, const std::strin
 
 juce::File LicenseCache::getCacheDirectory() const
 {
+    return cacheDirectory();
+}
+
+juce::File LicenseCache::cacheDirectory()
+{
     auto overridePath = juce::SystemStats::getEnvironmentVariable("SAMPLAR_CACHE_DIR_OVERRIDE", {});
     juce::File dir = overridePath.isNotEmpty()
                          ? juce::File(overridePath)
@@ -350,16 +359,21 @@ juce::var LicenseCache::encryptData(const juce::var& data) const
 
 juce::var LicenseCache::decryptData(const juce::var& encryptedData) const
 {
-    if (!encryptedData.isObject())
-        return encryptedData;
-
-    auto* obj = encryptedData.getDynamicObject();
+    // Only the encrypted layout is accepted. A plaintext blob (no "enc" flag)
+    // would let anyone hand-write licence data; SAMPLAR never shipped one.
+    auto* obj = encryptedData.isObject() ? encryptedData.getDynamicObject() : nullptr;
     if (obj == nullptr)
-        return encryptedData;
+    {
+        juce::Logger::writeToLog("[LicenseCache] cache blob is not an encrypted object - rejected");
+        return {};
+    }
 
     auto flag = obj->getProperty(kEncryptedId);
     if (flag.isVoid() || !static_cast<bool>(flag))
-        return encryptedData;
+    {
+        juce::Logger::writeToLog("[LicenseCache] plaintext cache blob - rejected");
+        return {};
+    }
 
     const auto cipherBlock = fromBase64(obj->getProperty(kDataId).toString());
     if (cipherBlock.getSize() == 0)
@@ -502,29 +516,6 @@ juce::MemoryBlock LicenseCache::deriveKeyMaterial() const
     });
 
     return keyMaterial_;
-}
-
-std::vector<std::string> LicenseCache::getAllCachedHardwareIds() const
-{
-    std::scoped_lock lock(cacheMutex_);
-    std::vector<std::string> result;
-
-    juce::Logger::writeToLog("[LicenseCache] getAllCachedHardwareIds: Scanning for cached hardware IDs...");
-
-    // Load the cache file directly without hardware ID validation
-    auto entry = loadCache();
-    if (entry.has_value() && !entry->hardwareId.empty())
-    {
-        juce::Logger::writeToLog("[LicenseCache] Found cached hardware ID: " +
-            juce::String(entry->hardwareId.substr(0, 16)) + "...");
-        result.push_back(entry->hardwareId);
-    }
-    else
-    {
-        juce::Logger::writeToLog("[LicenseCache] No cached hardware ID found");
-    }
-
-    return result;
 }
 
 } // namespace samplar

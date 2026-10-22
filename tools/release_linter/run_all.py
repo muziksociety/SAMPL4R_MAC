@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
-SM5 Release Linter — Unified runner.
+SAMPLAR Release Linter - Unified runner.
 
-Executes all 5 checks, collects their JSON reports, and emits:
+Executes all 8 checks, collects their JSON reports, and emits:
   - combined_report.json      (single machine-readable report)
   - release_linter.dot        (Obsidian-style vault map, Graphviz DOT)
   - release_linter.html       (self-contained HTML summary, no server needed)
@@ -28,66 +28,36 @@ from pathlib import Path
 LINTER_DIR = Path(__file__).resolve().parent
 REPO_ROOT = LINTER_DIR.parents[1]
 
+# "bundle": True -> the check takes --bundle (the VST3 bundle under test).
 CHECKS = [
-    {
-        "id": "sources",
-        "title": "Source/CMake drift",
-        "script": LINTER_DIR / "check_sources.py",
-        "summary": "Detects .cpp files missing from CMakeLists.txt target_sources",
-    },
-    {
-        "id": "engines",
-        "title": "Engine registry sync",
-        "script": LINTER_DIR / "check_engines.py",
-        "summary": "Detects IVariationEngine subclasses missing from backend or UI",
-    },
-    {
-        "id": "installer",
-        "title": "Installer manifest sync",
-        "script": LINTER_DIR / "check_installer.py",
-        "summary": "Detects runtime resources referenced in code but not shipped by installer",
-    },
-    {
-        "id": "events",
-        "title": "Event bus topic sync",
-        "script": LINTER_DIR / "check_events.py",
-        "summary": "Detects topics with publishers but no subscribers (or vice versa)",
-    },
-    {
-        "id": "services",
-        "title": "IService registration sync",
-        "script": LINTER_DIR / "check_services.py",
-        "summary": "Detects IService subclasses that are never registered",
-    },
-    {
-        "id": "runtime_deps",
-        "title": "Runtime DLL dependency walker",
-        "script": LINTER_DIR / "check_runtime_deps.py",
-        "summary": "Verifies every DLL the exe imports is shipped or a fresh-Windows system DLL",
-    },
-    {
-        "id": "hardcoded_paths",
-        "title": "Hardcoded dev-path scanner",
-        "script": LINTER_DIR / "check_hardcoded_paths.py",
-        "summary": "Detects absolute dev-machine paths in source or baked into the exe",
-    },
-    {
-        "id": "staging_sync",
-        "title": "Staging directory sync",
-        "script": LINTER_DIR / "check_staging_sync.py",
-        "summary": "Verifies SM5_Portable/ binaries match the build output (prevents shipping stale exes)",
-    },
+    {"id": "sources", "title": "Source/CMake drift", "script": LINTER_DIR / "check_sources.py",
+     "summary": "Sources not compiled by CMakeLists.txt / cmake/extra_*.cmake, or referenced but missing", "bundle": False},
+    {"id": "smode", "title": "S-Mode service/event wiring", "script": LINTER_DIR / "check_smode.py",
+     "summary": "Registry lookups resolve, S-Mode services registered, S-Mode event chain has pub+sub", "bundle": False},
+    {"id": "installer", "title": "Installer + bundle layout", "script": LINTER_DIR / "check_installer.py",
+     "summary": "samplar.iss guards/excludes + bundle payload (runtime bits, models, licences, nothing forbidden)", "bundle": True},
+    {"id": "events", "title": "EventBus topic sync", "script": LINTER_DIR / "check_events.py",
+     "summary": "Topics with publishers but no subscribers (or vice versa)", "bundle": False},
+    {"id": "services", "title": "IService registration sync", "script": LINTER_DIR / "check_services.py",
+     "summary": "IService subclasses not registered in the VST3 nor owned by another service", "bundle": False},
+    {"id": "runtime_deps", "title": "Runtime DLL dependency walker", "script": LINTER_DIR / "check_runtime_deps.py",
+     "summary": "Every DLL SAMPLAR.vst3 / onnxruntime / DirectML import (incl. delay-load) is system, VC redist or shipped", "bundle": True},
+    {"id": "hardcoded_paths", "title": "Hardcoded dev-path scanner", "script": LINTER_DIR / "check_hardcoded_paths.py",
+     "summary": "Absolute dev-machine paths in src/ or baked into the shipped binary", "bundle": True},
+    {"id": "staging_sync", "title": "Bundle/installer staleness", "script": LINTER_DIR / "check_staging_sync.py",
+     "summary": "Bundle older than sources, staged resources out of date, stale installer output", "bundle": True},
 ]
 
 
-def run_one(check: dict, out_dir: Path) -> dict:
+def run_one(check: dict, out_dir: Path, bundle: Path | None) -> dict:
     """Run a single check and return {status, exit_code, report}."""
     json_path = out_dir / f"{check['id']}.json"
-    proc = subprocess.run(
-        [sys.executable, str(check["script"]), "--quiet", "--json", str(json_path)],
-        capture_output=True,
-        text=True,
-    )
+    if json_path.exists():
+        json_path.unlink()
+    cmd = [sys.executable, str(check["script"]), "--quiet", "--json", str(json_path)]
+    if bundle is not None and check.get("bundle"):
+        cmd += ["--bundle", str(bundle)]
+    proc = subprocess.run(cmd, capture_output=True, text=True, cwd=str(LINTER_DIR))
     report: dict = {}
     if json_path.exists():
         try:
@@ -124,12 +94,12 @@ def count_findings(result: dict) -> int:
 def render_dot(results: list[dict], path: Path) -> None:
     """Emit an Obsidian-style vault map as Graphviz DOT."""
     lines = [
-        "digraph sm5_release {",
+        "digraph samplar_release {",
         '  rankdir=LR;',
-        '  graph [label="SM5 Release Linter — Vault Map", labelloc=t, fontsize=20, fontname="Helvetica", bgcolor="#1e1e1e", fontcolor="#ffffff"];',
+        '  graph [label="SAMPLAR Release Linter - Vault Map", labelloc=t, fontsize=20, fontname="Helvetica", bgcolor="#1e1e1e", fontcolor="#ffffff"];',
         '  node [shape=box, style="rounded,filled", fontname="Helvetica", fontcolor="#ffffff"];',
         '  edge [color="#888888", fontcolor="#aaaaaa"];',
-        '  root [label="SM5 Release", shape=doublecircle, fillcolor="#4a90e2"];',
+        '  root [label="SAMPLAR Release", shape=doublecircle, fillcolor="#4a90e2"];',
     ]
     for result in results:
         node_id = result["id"]
@@ -170,7 +140,7 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
     """
     Emit an interactive, Obsidian-style force-directed graph using vis-network
     (loaded from CDN). Nodes: root + 5 checks + findings + scanned entities.
-    Edges: containment. Physics enabled — drag nodes, zoom, hover highlights.
+    Edges: containment. Physics enabled - drag nodes, zoom, hover highlights.
     """
     COLORS = {
         "root":    {"bg": "#4a90e2", "border": "#2c5d8f"},
@@ -187,12 +157,12 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
     # Root node
     nodes.append({
         "id": "root",
-        "label": "SM5 Release",
+        "label": "SAMPLAR Release",
         "shape": "dot",
         "size": 38,
         "color": COLORS["root"],
         "font": {"color": "#ffffff", "size": 20, "face": "Inter, sans-serif"},
-        "title": f"Overall: {combined['overall_status'].upper()} — {combined['total_findings']} findings",
+        "title": f"Overall: {combined['overall_status'].upper()} - {combined['total_findings']} findings",
     })
 
     for r in results:
@@ -211,26 +181,26 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
             "size": 26,
             "color": color,
             "font": {"color": "#ffffff", "size": 15, "multi": True, "face": "Inter, sans-serif"},
-            "title": f"{r['title']}: {status.upper()} — {r['summary']}",
+            "title": f"{r['title']}: {status.upper()} - {r['summary']}",
         })
         edges.append({"from": "root", "to": check_id, "color": {"color": "#666"}, "width": 2})
 
         report = r.get("report", {})
 
         # Emit scanned-entity nodes so the graph has structure even when clean
-        if r["id"] == "engines":
-            for engine in report.get("results", []):
-                eid = f"engine_{engine['name']}"
-                ok = engine.get("status") == "OK"
+        if r["id"] == "smode":
+            for t in report.get("topics", []):
+                ok = t.get("published") and t.get("subscribed")
+                tid = f"smode_{t['topic']}"
                 nodes.append({
-                    "id": eid,
-                    "label": engine["name"],
+                    "id": tid,
+                    "label": t["topic"],
                     "shape": "box",
                     "color": COLORS["clean"] if ok else COLORS["drift"],
                     "font": {"color": "#ffffff", "size": 11},
-                    "title": f"Backend: {engine.get('backend')} · UI surfaces: {len(engine.get('ui_surfaces', []))}",
+                    "title": f"pub={t.get('published')} sub={t.get('subscribed')}",
                 })
-                edges.append({"from": check_id, "to": eid, "color": {"color": "#555"}, "width": 1})
+                edges.append({"from": check_id, "to": tid, "color": {"color": "#555"}, "width": 1})
         elif r["id"] == "services":
             for svc in report.get("results", []):
                 sid = f"svc_{svc['name']}"
@@ -243,7 +213,7 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
                     "shape": "box",
                     "color": status_col,
                     "font": {"color": "#ffffff", "size": 11},
-                    "title": f"{svc['status']} · app={svc['standalone']} plugin={svc['plugin']}",
+                    "title": f"{svc['status']} - vst3={svc['plugin'] or '-'} standalone={svc['standalone'] or '-'}",
                 })
                 edges.append({"from": check_id, "to": sid, "color": {"color": "#555"}, "width": 1})
         elif r["id"] == "events":
@@ -290,7 +260,7 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
 <html lang="en">
 <head>
 <meta charset="UTF-8">
-<title>SM5 Release Linter — Vault Map</title>
+<title>SAMPLAR Release Linter - Vault Map</title>
 <script type="text/javascript" src="https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js"></script>
 <style>
   html, body {{ margin: 0; padding: 0; height: 100%; background: #1a1a1a; color: #eee;
@@ -317,9 +287,9 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
 </head>
 <body>
   <div id="header">
-    <h1>SM5 Release Linter — Vault Map</h1>
+    <h1>SAMPLAR Release Linter - Vault Map</h1>
     <span class="badge {overall_class}">{combined['overall_status'].upper()}</span>
-    <span class="meta">{n_findings} findings · {n_checks} checks · {gen_time}</span>
+    <span class="meta">{n_findings} findings - {n_checks} checks - {gen_time}</span>
   </div>
 
   <div id="graph"></div>
@@ -332,7 +302,7 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
     <div class="item"><div class="dot" style="background:#7f8c8d"></div>Owned / allowlisted</div>
   </div>
 
-  <div id="help">drag to pan · scroll to zoom · click to focus · hover for details</div>
+  <div id="help">drag to pan - scroll to zoom - click to focus - hover for details</div>
 
   <script>
     const nodes = new vis.DataSet({nodes_json});
@@ -387,15 +357,18 @@ def render_html(results: list[dict], combined: dict, path: Path) -> None:
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SM5 release linter — unified runner")
+    ap = argparse.ArgumentParser(description="SAMPLAR release linter - unified runner")
     ap.add_argument("--out-dir", type=Path, default=LINTER_DIR / "reports",
                     help="Directory to write combined reports")
+    ap.add_argument("--bundle", type=Path, default=None,
+                    help="SAMPLAR.vst3 bundle to check (default: build/SamplarPlugin_artefacts/Release/VST3/SAMPLAR.vst3)")
     args = ap.parse_args()
 
     out_dir: Path = args.out_dir
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    results = [run_one(c, out_dir) for c in CHECKS]
+    bundle = args.bundle.resolve() if args.bundle else None   # checks run with cwd = linter dir
+    results = [run_one(c, out_dir, bundle) for c in CHECKS]
 
     total_findings = sum(count_findings(r) for r in results)
     all_clean = all(r["status"] == "clean" for r in results)
@@ -420,14 +393,30 @@ def main() -> int:
 
     # Console summary
     print("=" * 70)
-    print("SM5 RELEASE LINTER — Unified Report")
+    print("SAMPLAR RELEASE LINTER - Unified Report")
     print("=" * 70)
     for r in results:
         n = count_findings(r)
         marker = "OK " if r["status"] == "clean" else ("!! " if r["status"] == "drift" else "?? ")
         print(f"  {marker}{r['title']:<35} {r['status']:<8} ({n} finding(s))")
+    for r in results:
+        if r["status"] == "clean":
+            continue
+        rep = r.get("report", {})
+        items = []
+        for key in ("orphans", "phantoms", "published_only", "subscribed_only", "missing"):
+            items += [f"{key}: {x}" for x in rep.get(key, []) if isinstance(rep.get(key), list)]
+        items += [f"{f.get('file')}: {f.get('match')}" for f in rep.get("source_findings", []) + rep.get("binary_findings", [])]
+        if r["status"] == "error":
+            items.append("tool error: " + (r.get("stderr") or "").strip()[-300:])
+        print()
+        print(f"  [{r['id']}]")
+        for it in items[:12]:
+            print(f"     - {it}")
+        if len(items) > 12:
+            print(f"     ... {len(items) - 12} more (see {r['id']}.json)")
     print()
-    print(f"OVERALL: {overall.upper()}  —  {total_findings} total finding(s)")
+    print(f"OVERALL: {overall.upper()}  -  {total_findings} total finding(s)")
     print()
     print(f"  JSON: {combined_path}")
     print(f"  DOT:  {dot_path}")
