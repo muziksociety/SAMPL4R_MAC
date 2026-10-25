@@ -20,7 +20,9 @@ namespace samplar {
 namespace {
 
 // SAMPL4R production license server (live Render deployment).
-constexpr auto kDefaultLicenseServerUrl = "https://license-server-n5it.onrender.com";
+// Public domain of the license server (same backend as the internal Render
+// host, which may change - clients must never use the onrender.com URL).
+constexpr auto kDefaultLicenseServerUrl = "https://samplemonsta.com";
 constexpr int kWorkerJoinTimeoutMs = 5000;       // the worker's only wait is a cancellable HTTP call
 constexpr juce::int64 kHourMs = 60LL * 60 * 1000;
 constexpr juce::int64 kClockAdvanceEveryMs = 15LL * 60 * 1000;
