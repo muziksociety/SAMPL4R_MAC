@@ -66,7 +66,7 @@ The old HMAC token (`SignedTokenVerifier`, `SamplarVerificationKey.h`) was remov
 
 ## Machine release
 
-There is no client "deactivate" endpoint. **Sign out** clears the local licence and session, then opens `https://samplemonsta.com/portal/licenses`, where the user releases the machine slot.
+There is no client "deactivate" endpoint. **Sign out** clears the local licence and session, then opens `https://www.samplemonsta.com/portal/licenses`, where the user releases the machine slot.
 
 ## Logging
 

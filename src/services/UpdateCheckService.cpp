@@ -121,7 +121,7 @@ void UpdateCheckService::performCheck(const std::string& hwId)
                              + juce::String(hwId.empty() ? "(empty)" : hwId.substr(0, 8) + "..."));
 
     // 3. Build the URL
-    juce::String baseUrl = "https://samplemonsta.com/api/update/check";
+    juce::String baseUrl = "https://www.samplemonsta.com/api/update/check";
     juce::URL url(baseUrl);
     url = url.withParameter("current_version", currentVersion)
              .withParameter("product", "samplar")

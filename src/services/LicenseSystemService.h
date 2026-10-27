@@ -142,10 +142,10 @@ public:
     bool isAudioAllowed() const noexcept { return audioAllowed_.load(std::memory_order_relaxed); }
     const std::atomic<bool>& audioAllowedFlag() const noexcept { return audioAllowed_; }
 
-    static constexpr const char* kAccountLicensesUrl = "https://samplemonsta.com/portal/licenses";
-    static constexpr const char* kBuyUrl             = "https://samplemonsta.com/auth/buy/SAMPL4R";
-    static constexpr const char* kCreateAccountUrl   = "https://samplemonsta.com/auth/register";
-    static constexpr const char* kForgotPasswordUrl  = "https://samplemonsta.com/auth/forgot-password";
+    static constexpr const char* kAccountLicensesUrl = "https://www.samplemonsta.com/portal/licenses";
+    static constexpr const char* kBuyUrl             = "https://www.samplemonsta.com/auth/buy/SAMPL4R";
+    static constexpr const char* kCreateAccountUrl   = "https://www.samplemonsta.com/auth/register";
+    static constexpr const char* kForgotPasswordUrl  = "https://www.samplemonsta.com/auth/forgot-password";
 
     static constexpr int kRecheckAfterHours = 6;          // silent /auth/revalidate at launch + while running
     static constexpr int kShortOfflineHours = 72;         // dated expiry, or PROMO / PROMO2 / TRL
