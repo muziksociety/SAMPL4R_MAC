@@ -516,3 +516,4 @@ All agents MUST read `mistakes.md` before starting work. It contains:
 **Key Lesson**: NEVER implement features with UI components without frontend-design.json containing ASCII mockups.
 
 Issues for MASTERMIND: use the mastermind-relay skill.
+MASTERMIND relay address: samplar-mac
