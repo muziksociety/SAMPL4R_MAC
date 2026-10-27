@@ -514,3 +514,5 @@ All agents MUST read `mistakes.md` before starting work. It contains:
 - Success patterns to follow
 
 **Key Lesson**: NEVER implement features with UI components without frontend-design.json containing ASCII mockups.
+
+Issues for MASTERMIND: use the mastermind-relay skill.
