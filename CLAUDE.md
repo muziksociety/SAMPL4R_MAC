@@ -544,3 +544,4 @@ When spawning subagents (Agent/Task tool), the routing block is automatically in
 | `ctx upgrade` | Call the `ctx_upgrade` MCP tool, run the returned shell command, display as checklist |
 
 Issues for MASTERMIND: use the mastermind-relay skill.
+MASTERMIND relay address: samplar-win
