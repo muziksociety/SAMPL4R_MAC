@@ -16,9 +16,9 @@
 #include "../ui/licensing/LicenseActivationDialog.h"
 #include "../utils/LogPaths.h"               // Writable log directory for Program Files installs
 
+#include <signal.h>
 #ifdef _WIN32
 #include <windows.h>
-#include <signal.h>
 #include <eh.h>
 #endif
 
@@ -28,8 +28,24 @@ namespace samplar {
 
 const juce::String App::getApplicationVersion() { return SAMPLAR_VERSION; }
 
+// POSIX signal handler — portable across Windows and macOS. Logs the signal,
+// flushes the logger, and exits. Used for SIGSEGV/SIGABRT/etc on both platforms.
+void signalHandler(int sig) {
+    juce::Logger::writeToLog("[CRASH] Signal caught: " + juce::String(sig));
+    juce::Logger::writeToLog("[CRASH] Application will terminate");
+
+    if (auto* logger = juce::Logger::getCurrentLogger()) {
+        delete logger;
+        juce::Logger::setCurrentLogger(nullptr);
+    }
+
+    exit(sig);
+}
+
 #ifdef _WIN32
-// Windows crash handler
+// Windows-only SEH crash handler — catches structured exceptions that POSIX
+// signals don't cover (access violations, divide-by-zero, etc.). Installed
+// via SetUnhandledExceptionFilter below.
 LONG WINAPI crashHandler(EXCEPTION_POINTERS* exceptionInfo) {
     juce::Logger::writeToLog("[CRASH][CRASH][CRASH][CRASH] [CRASH] Windows exception caught!");
     juce::Logger::writeToLog("[ERROR] Exception code: 0x" + juce::String::toHexString((int)exceptionInfo->ExceptionRecord->ExceptionCode));
@@ -57,19 +73,6 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS* exceptionInfo) {
     }
 
     return EXCEPTION_EXECUTE_HANDLER;
-}
-
-void signalHandler(int signal) {
-    juce::Logger::writeToLog("???????????? [CRASH] Signal caught: " + juce::String(signal));
-    juce::Logger::writeToLog("???????????? [CRASH] Application will terminate");
-
-    // Force flush the log
-    if (auto* logger = juce::Logger::getCurrentLogger()) {
-        delete logger;
-        juce::Logger::setCurrentLogger(nullptr);
-    }
-
-    exit(signal);
 }
 #endif
 
@@ -141,18 +144,19 @@ void App::initialise (const String& /*commandLine*/)
     juce::Logger::writeToLog("???? [App] initialise() ENTER");
     juce::Logger::writeToLog("???? [App] Working directory: " + juce::File::getCurrentWorkingDirectory().getFullPathName());
 
+    // Install crash handlers (POSIX signals on all platforms;
+    // SEH filter additionally on Windows for structured exceptions)
+    juce::Logger::writeToLog("[App] Installing crash handlers");
 #ifdef _WIN32
-    // Install crash handlers
-    juce::Logger::writeToLog("???? [App] Installing Windows crash handlers");
     SetUnhandledExceptionFilter(crashHandler);
+#endif
     signal(SIGABRT, signalHandler);
-    signal(SIGFPE, signalHandler);
-    signal(SIGILL, signalHandler);
-    signal(SIGINT, signalHandler);
+    signal(SIGFPE,  signalHandler);
+    signal(SIGILL,  signalHandler);
+    signal(SIGINT,  signalHandler);
     signal(SIGSEGV, signalHandler);
     signal(SIGTERM, signalHandler);
-    juce::Logger::writeToLog("???? [App] Crash handlers installed");
-#endif
+    juce::Logger::writeToLog("[App] Crash handlers installed");
 
     try {
         juce::Logger::writeToLog("???? [App] Creating ServiceRegistry");

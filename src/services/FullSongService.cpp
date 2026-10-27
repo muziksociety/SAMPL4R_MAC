@@ -180,8 +180,13 @@ juce::File FullSongService::locateOnnxModel(const juce::String& fileName) const
     cand = appDir.getChildFile("models").getChildFile(fileName);
     if (cand.existsAsFile()) return cand;
 
-    // 3) Inside the VST3 bundle (where the installer drops resources)
+    // 3) Inside the VST3 bundle (Windows layout — Inno installer target)
     cand = appDir.getChildFile("Contents/x86_64-win/models").getChildFile(fileName);
+    if (cand.existsAsFile()) return cand;
+
+    // 3b) Inside the .vst3/.component/.app bundle's standard macOS Resources/
+    // dir (where scripts/mac/stage_bundle.sh + the .pkg installer drop resources)
+    cand = appDir.getChildFile("Contents/Resources/models").getChildFile(fileName);
     if (cand.existsAsFile()) return cand;
 
     // 4) Next to the actual binary

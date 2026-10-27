@@ -103,8 +103,13 @@ private:
     std::atomic<bool> callbackReceived_{false};
     juce::String callbackData_;
 
-    // Timeout (60 seconds for user to log in)
-    static constexpr int AUTH_TIMEOUT_MS = 60000;
+    // Was 60s. There is no portable way to detect that the user closed the
+    // browser tab/window the OS opened for us (launchInDefaultBrowser hands
+    // off and we get no handle back). Shortened so an abandoned auth bails
+    // quickly and the user can retry from the dialog without waiting a full
+    // minute. Proper long-term fix is a JS heartbeat from the auth page back
+    // to our localhost listener on callbackPort_.
+    static constexpr int AUTH_TIMEOUT_MS = 20000;
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(OAuthBrowserAuthenticator)
 };

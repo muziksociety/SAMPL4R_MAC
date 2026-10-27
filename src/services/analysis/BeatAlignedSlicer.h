@@ -94,28 +94,30 @@ public:
     BeatAlignedSlicer();
     ~BeatAlignedSlicer() = default;
 
+    // Apple Clang rejects `= Config()` / `= TempoAnalyzer::Config()` as
+    // class-body default args; callers must pass these explicitly.
     /**
      * Slice audio using pre-computed tempo analysis
      */
     Result slice(const juce::AudioBuffer<float>& buffer,
                  double sampleRate,
                  const TempoAnalyzer::Result& tempoResult,
-                 const Config& config = Config());
+                 const Config& config);
 
     /**
      * Slice audio with internal tempo analysis
      */
     Result sliceWithAnalysis(const juce::AudioBuffer<float>& buffer,
                              double sampleRate,
-                             const Config& config = Config(),
-                             const TempoAnalyzer::Config& tempoConfig = TempoAnalyzer::Config());
+                             const Config& config,
+                             const TempoAnalyzer::Config& tempoConfig);
 
     /**
      * Slice an audio file
      */
     Result sliceFile(const juce::File& audioFile,
-                     const Config& config = Config(),
-                     const TempoAnalyzer::Config& tempoConfig = TempoAnalyzer::Config());
+                     const Config& config,
+                     const TempoAnalyzer::Config& tempoConfig);
 
     /**
      * Extract a slice as a new buffer

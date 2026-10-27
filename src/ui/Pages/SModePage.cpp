@@ -250,6 +250,8 @@ SModePage::SModePage(EventBus& bus)
 
 
     // ── Top-bar additions (Phase 1 visual build-out) ────────────────────
+    // Vertical sound bars strip on the left edge (Mac port addition)
+    addAndMakeVisible(audioMeterBars_);
     // Logo label
     addAndMakeVisible(logoLabel_);
     // SamplarLogo paints itself (gradient fill + cyan glow); no text/font setters.
@@ -2035,9 +2037,13 @@ void SModePage::resized()
     titleLabel_.setVisible(false);   // replaced by logoLabel_
     transportBtn_.setVisible(false); // replaced by playBtn_
 
-    auto topBar = area.removeFromTop(72).reduced(14, 10);
+    // Take the top 72px UNREDUCED so the meter strip can hug the left screen edge.
+    // The remainder is then reduced (14, 10) for the usual top-bar inner padding.
+    auto topBarRaw = area.removeFromTop(72);
+    audioMeterBars_.setBounds(topBarRaw.removeFromLeft(20));
+    auto topBar = topBarRaw.reduced(14, 10);
 
-    // Zone 1: Logo (130px)
+    // Zone 1: Logo (130px) — now sits to the right of the meter strip
     logoLabel_.setBounds(topBar.removeFromLeft(130));
 
     // Zone 2: Transport (260px) — PLAY (56×52) + record circle + snapshot circle

@@ -68,22 +68,25 @@ public:
     TempoAnalyzer();
     ~TempoAnalyzer() = default;
 
+    // Apple Clang rejects `= Config()` as a default arg in class-body
+    // declarations of methods on a class with a nested Config. All current
+    // callers pass Config explicitly, so the defaults are dropped.
     /**
      * Analyze tempo from audio file
      */
-    Result analyze(const juce::File& audioFile, const Config& config = Config());
+    Result analyze(const juce::File& audioFile, const Config& config);
 
     /**
      * Analyze tempo from audio buffer
      */
     Result analyze(const juce::AudioBuffer<float>& buffer, double sampleRate,
-                   const Config& config = Config());
+                   const Config& config);
 
     /**
      * Quick BPM-only analysis (faster, no beat positions)
      */
     float detectBPM(const juce::AudioBuffer<float>& buffer, double sampleRate,
-                    const Config& config = Config());
+                    const Config& config);
 
 private:
     //==========================================================================

@@ -396,3 +396,16 @@ models/
 third_party/beat_this/models/*.onnx
 third_party/beat_this/models/
 **/onnxruntime*.dll
+
+# Claude Code runtime state (per-machine, not source)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# Secrets / signing material — never commit
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision

@@ -16,12 +16,15 @@
 #include <functional>
 #include <cstdint>
 
-// Forward-declare signalsmith-stretch so we don't pull its header into our public API.
-// Must match the upstream declaration exactly:
-//   template<typename Sample=float, class RandomEngine=void> struct SignalsmithStretch;
-namespace signalsmith { namespace stretch {
-    template <typename Sample = float, class RandomEngine = void> struct SignalsmithStretch;
-} }
+// Originally this was a forward declaration to keep signalsmith-stretch.h
+// out of our public API. That fails on Apple Clang because:
+//   - With defaults  -> "template parameter redefines default argument"
+//     (upstream definition also declares defaults)
+//   - Without defaults -> "too few template arguments" at call sites that use
+//     SignalsmithStretch<float>
+// Including the full header eliminates both errors and is fine — the .h is
+// header-only and already pulled in by MidiMappingService.cpp anyway.
+#include "../../third_party/signalsmith-stretch/signalsmith-stretch.h"
 
 namespace samplar {
 

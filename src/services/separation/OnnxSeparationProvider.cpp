@@ -101,8 +101,16 @@ OnnxSeparationProvider::OnnxSeparationProvider (const juce::File& modelFile)
 
         activeEP_ = "CPU";
 
-        const auto modelPathW = modelFile.getFullPathName().toWideCharPointer();
-        session_ = std::make_unique<Ort::Session> (*env_, modelPathW, so);
+        // ORT uses wchar_t paths on Windows, char paths on POSIX (macOS/Linux).
+        // Keep a local owning string so the c_str()/wchar_t pointer stays valid
+        // for the duration of the Session ctor.
+#if defined(_WIN32)
+        const std::wstring modelPathStr = modelFile.getFullPathName().toWideCharPointer();
+        session_ = std::make_unique<Ort::Session> (*env_, modelPathStr.c_str(), so);
+#else
+        const std::string modelPathStr = modelFile.getFullPathName().toStdString();
+        session_ = std::make_unique<Ort::Session> (*env_, modelPathStr.c_str(), so);
+#endif
 
         memInfo_ = std::make_unique<Ort::MemoryInfo> (
             Ort::MemoryInfo::CreateCpu (OrtArenaAllocator, OrtMemTypeDefault));

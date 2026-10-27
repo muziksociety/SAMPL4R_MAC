@@ -58,7 +58,12 @@ public:
     // Lifecycle
     //==========================================================================
 
-    explicit SamplePreviewCache(juce::AudioFormatManager& formatManager, const Config& config = Config{});
+    // Apple Clang rejects `= Config{}` as a default arg here because it requires
+    // the enclosing class to be complete when the default member initializers
+    // of the nested Config are referenced. MSVC accepts it; we remove the
+    // default and provide a delegating overload for callers that want defaults.
+    explicit SamplePreviewCache(juce::AudioFormatManager& formatManager, const Config& config);
+    explicit SamplePreviewCache(juce::AudioFormatManager& formatManager);
     ~SamplePreviewCache() override;
 
     // Non-copyable

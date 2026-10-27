@@ -1,10 +1,25 @@
 # SAMPLAR build:
-#   Release / commercial:  cmake -B build -G "Visual Studio 17 2022" -A x64      (VST3 only — SamplarPlugin_VST3)
-#   Dev with standalone:   cmake -B build -G "Visual Studio 17 2022" -A x64 -DSAMPLAR_BUILD_STANDALONE=ON
+#   Windows release:  cmake -B build -G "Visual Studio 17 2022" -A x64           (VST3 — SamplarPlugin_VST3)
+#   Windows dev:      cmake -B build -G "Visual Studio 17 2022" -A x64 -DSAMPLAR_BUILD_STANDALONE=ON
+#   macOS release:    cmake -B build -G "Xcode"                                  (VST3 + AU + Standalone, universal2)
+#   macOS dev (Ninja):cmake -B build -G "Ninja" -DCMAKE_BUILD_TYPE=Release
 
 cmake_minimum_required(VERSION 3.20)
 
-project(samplar VERSION 1.0.0 LANGUAGES CXX)
+# macOS: default to universal2 (arm64 + x86_64) and macOS 11.0 minimum.
+# Must be set BEFORE project() for CMake to pick them up cleanly.
+# Override on the command line with e.g. -DCMAKE_OSX_ARCHITECTURES=arm64 for a faster dev build.
+if(APPLE)
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES OR "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "")
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+    endif()
+    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR "${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL "")
+        # 11.0 = Big Sur (first Apple Silicon release); matches ORT universal2 requirement.
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
+    endif()
+endif()
+
+project(samplar VERSION 1.0.0 LANGUAGES C CXX)
 
 option(SAMPLAR_BUILD_TESTS "Build SAMPLAR unit tests" OFF)
 option(SAMPLAR_BUILD_STANDALONE "Build the SamplarApp standalone target (dev only)" OFF)
@@ -90,7 +105,7 @@ FetchContent_MakeAvailable(nlohmann_json)
 # Loop Tempo Estimator (STFT + ODF based tempo detection from Audacity)
 # Used as secondary tempo detector alongside DWT for consensus voting
 set(LTE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/loop-tempo-estimator")
-if(EXISTS "${LTE_DIR}/CMakeLists.txt")
+if(EXISTS "${LTE_DIR}/CMakeLists.txt" AND EXISTS "${LTE_DIR}/pffft.cmake")
   message(STATUS "========================================")
   message(STATUS "Loop Tempo Estimator: ENABLED")
   message(STATUS "========================================")
@@ -99,6 +114,14 @@ if(EXISTS "${LTE_DIR}/CMakeLists.txt")
   set(BUILD_VAMP_PLUGIN OFF CACHE BOOL "Disable LTE vamp plugin" FORCE)
   add_subdirectory(${LTE_DIR} loop-tempo-estimator)
   set(LTE_FOUND TRUE)
+elseif(EXISTS "${LTE_DIR}/CMakeLists.txt")
+  # Partial checkout: LTE source is present but pffft.cmake helper is missing
+  # (audacity/loop-tempo-estimator upstream repo is no longer public — 404).
+  # Disable LTE rather than fail the build. Tempo detection falls back to the
+  # DWT primary detector. Restore pffft.cmake from an archived LTE checkout to
+  # re-enable.
+  message(STATUS "Loop Tempo Estimator: DISABLED (pffft.cmake missing)")
+  set(LTE_FOUND FALSE)
 else()
   message(STATUS "Loop Tempo Estimator not found at ${LTE_DIR}")
   set(LTE_FOUND FALSE)
@@ -181,43 +204,46 @@ if(WITH_BEAT_THIS)
   endif()
 endif()
 
+# ONNX Runtime is required UNCONDITIONALLY by src/services/separation/OnnxSeparationProvider.cpp
+# (Demucs stem separation). beat_this is an optional consumer; both link
+# against the same vendored ORT below.
+include(FetchContent)
+set(ORT_VERSION "1.20.1")
+if(WIN32)
+  set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip")
+elseif(APPLE)
+  set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-universal2-${ORT_VERSION}.tgz")
+else()
+  set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz")
+endif()
+
+FetchContent_Declare(
+  onnxruntime_prebuilt
+  URL ${ORT_URL}
+)
+FetchContent_MakeAvailable(onnxruntime_prebuilt)
+set(ORT_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}")
+message(STATUS "ONNX Runtime ${ORT_VERSION} at: ${ORT_ROOT}")
+
+if(WIN32)
+  set(ORT_LIB "${ORT_ROOT}/lib/onnxruntime.lib")
+  set(ORT_DLL "${ORT_ROOT}/lib/onnxruntime.dll")
+elseif(APPLE)
+  set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib")
+  set(ORT_DLL "${ORT_LIB}")
+else()
+  set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.so.${ORT_VERSION}")
+  set(ORT_DLL "${ORT_LIB}")
+endif()
+
+if(NOT EXISTS "${ORT_LIB}")
+  message(FATAL_ERROR "ONNX Runtime archive extracted but lib not at ${ORT_LIB}")
+endif()
+
 if(WITH_BEAT_THIS)
   message(STATUS "========================================")
   message(STATUS "Beat This! neural beat tracker: ENABLED")
   message(STATUS "========================================")
-
-  include(FetchContent)
-  set(ORT_VERSION "1.20.1")
-  if(WIN32)
-    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-win-x64-${ORT_VERSION}.zip")
-  elseif(APPLE)
-    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-osx-universal2-${ORT_VERSION}.tgz")
-  else()
-    set(ORT_URL "https://github.com/microsoft/onnxruntime/releases/download/v${ORT_VERSION}/onnxruntime-linux-x64-${ORT_VERSION}.tgz")
-  endif()
-
-  FetchContent_Declare(
-    onnxruntime_prebuilt
-    URL ${ORT_URL}
-  )
-  FetchContent_MakeAvailable(onnxruntime_prebuilt)
-  set(ORT_ROOT "${onnxruntime_prebuilt_SOURCE_DIR}")
-  message(STATUS "ONNX Runtime ${ORT_VERSION} at: ${ORT_ROOT}")
-
-  if(WIN32)
-    set(ORT_LIB "${ORT_ROOT}/lib/onnxruntime.lib")
-    set(ORT_DLL "${ORT_ROOT}/lib/onnxruntime.dll")
-  elseif(APPLE)
-    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.${ORT_VERSION}.dylib")
-    set(ORT_DLL "${ORT_LIB}")
-  else()
-    set(ORT_LIB "${ORT_ROOT}/lib/libonnxruntime.so.${ORT_VERSION}")
-    set(ORT_DLL "${ORT_LIB}")
-  endif()
-
-  if(NOT EXISTS "${ORT_LIB}")
-    message(FATAL_ERROR "ONNX Runtime archive extracted but lib not at ${ORT_LIB}")
-  endif()
 
   # Static library wrapping the vendored beat_this_cpp inference engine.
   set(BEAT_THIS_LIB_SOURCES
@@ -338,6 +364,8 @@ set(SAMPLAR_SOURCES
   src/ui/Theme/EngineColorManager.h
   src/ui/Components/SamplarAnimation.h
   src/ui/Components/SamplarAnimation.cpp
+  src/ui/Components/AudioMeterBars.h
+  src/ui/Components/AudioMeterBars.cpp
   src/ui/Components/MidiDragArea.h
   src/ui/Components/MidiDragArea.cpp
   src/ui/Components/WaveDragArea.h
@@ -637,14 +665,21 @@ endif()
 
 
 # -----------------------------------------------------------------------
-# SamplarPlugin — VST3 + Standalone plugin target (Phase 1 VST3 conversion)
+# SamplarPlugin — VST3 (all platforms) + AU + Standalone (macOS adds these)
 # -----------------------------------------------------------------------
+# Plugin format list: VST3 everywhere; AU + Standalone on macOS.
+# Windows keeps only VST3 to match the existing Inno installer pipeline.
+set(SAMPLAR_PLUGIN_FORMATS VST3)
+if(APPLE)
+    list(APPEND SAMPLAR_PLUGIN_FORMATS AU Standalone)
+endif()
+
 juce_add_plugin(SamplarPlugin
     PRODUCT_NAME "SAMPLAR"
     COMPANY_NAME "Muziksociety"
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
-    BUNDLE_ID "com.muziksociety.samplar.vst3"
+    BUNDLE_ID "com.muziksociety.samplar"
     VERSION "1.0.0"
     PLUGIN_MANUFACTURER_CODE Mzks
     PLUGIN_CODE Smpl
@@ -653,8 +688,11 @@ juce_add_plugin(SamplarPlugin
     NEEDS_MIDI_OUTPUT FALSE
     IS_MIDI_EFFECT FALSE
     EDITOR_WANTS_KEYBOARD_FOCUS TRUE
-    FORMATS VST3                       # VST3 only for now; standalone stays as SamplarApp
+    FORMATS ${SAMPLAR_PLUGIN_FORMATS}
     VST3_CATEGORIES "Instrument" "Sampler" "Drum"
+    AU_MAIN_TYPE "kAudioUnitType_MusicDevice"
+    HARDENED_RUNTIME_ENABLED FALSE     # ad-hoc signed; flip ON once a Developer ID cert is wired
+    MICROPHONE_PERMISSION_ENABLED FALSE
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
 )
@@ -681,6 +719,9 @@ target_compile_definitions(SamplarPlugin PRIVATE
 target_include_directories(SamplarPlugin PRIVATE
     src
     ${CMAKE_BINARY_DIR}/generated
+    ${ORT_ROOT}/include    # OnnxSeparationProvider.cpp needs onnxruntime_cxx_api.h
+                           # unconditionally — was previously only added via the
+                           # WITH_BEAT_THIS branch which is disabled on this clone.
 )
 
 if(WITH_SOUNDTOUCH AND SOUNDTOUCH_INCLUDE_DIR)
@@ -724,10 +765,14 @@ if(WITH_SOUNDTOUCH AND SOUNDTOUCH_TARGET)
     target_compile_definitions(SamplarPlugin PRIVATE WITH_SOUNDTOUCH=1)
 endif()
 
+# Link ORT into the plugin unconditionally — OnnxSeparationProvider.cpp uses
+# the C++ API directly (not just transitively through beat_this_engine).
+target_link_libraries(SamplarPlugin PRIVATE ${ORT_LIB})
+
 if(WITH_BEAT_THIS)
     target_link_libraries(SamplarPlugin PRIVATE beat_this_engine)
     target_compile_definitions(SamplarPlugin PRIVATE WITH_BEAT_THIS=1)
-    target_include_directories(SamplarPlugin PRIVATE ${BEAT_THIS_DIR}/src ${ORT_ROOT}/include)
+    target_include_directories(SamplarPlugin PRIVATE ${BEAT_THIS_DIR}/src)
 endif()
 
 if (SAMPLAR_ENABLE_DEV_FALLBACK)
@@ -846,10 +891,38 @@ file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "MakeDir $toolsDst\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "foreach ($p in @('portable_cache/ffmpeg/ffmpeg.exe','SAMPLAR_Portable/python/Scripts/ffmpeg.exe')) { $src = Join-Path $RepoRoot $p; if (Test-Path -LiteralPath $src) { CopyFile $src (Join-Path $toolsDst 'ffmpeg.exe'); break } }\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "exit 0\n")
 
-add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
-  COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
-  COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
-)
+if(WIN32)
+    add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
+      COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+      COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
+    )
+endif()
+
+# -----------------------------------------------------------------------
+# macOS bundle staging: copies libonnxruntime.dylib, models, BACKGROUNDS,
+# Samples, and ffmpeg INTO each plugin bundle's Contents/Resources/.
+# Layout (per format):
+#   SAMPLAR.vst3/Contents/Resources/
+#   SAMPLAR.component/Contents/Resources/
+#   SAMPLAR.app/Contents/Resources/
+# Driven by scripts/mac/stage_bundle.sh — failures are non-fatal so a DAW
+# holding the bundle open during incremental rebuilds doesn't kill the build.
+# -----------------------------------------------------------------------
+if(APPLE)
+    set(_SAMPLAR_MAC_STAGE_SCRIPT "${CMAKE_CURRENT_SOURCE_DIR}/scripts/mac/stage_bundle.sh")
+    foreach(_fmt VST3 AU Standalone)
+        set(_tgt "SamplarPlugin_${_fmt}")
+        if(TARGET ${_tgt})
+            add_custom_command(TARGET ${_tgt} POST_BUILD
+                COMMAND /bin/bash "${_SAMPLAR_MAC_STAGE_SCRIPT}"
+                        "$<TARGET_BUNDLE_DIR:${_tgt}>"
+                        "${CMAKE_CURRENT_SOURCE_DIR}"
+                        "${ORT_ROOT}"
+                COMMENT "Staging resources INTO ${_tgt} bundle"
+                VERBATIM)
+        endif()
+    endforeach()
+endif()
 # -----------------------------------------------------------------------
 
 juce_add_console_app(SamplarLicenseCleaner PRODUCT_NAME "SAMPLAR License Cleaner")

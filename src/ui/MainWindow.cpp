@@ -1812,8 +1812,8 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] RootComponent set as content");
 
         juce::Logger::writeToLog("???? [MainWindow] About to set window size");
-        setSize(1500, 1024);
-        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1500x1024");
+        setSize(1061, 724);
+        juce::Logger::writeToLog("???? [MainWindow] Window size set to 1061x724");
 
         juce::Logger::writeToLog("???? [MainWindow] About to attach EventBus");
         if (auto* root = dynamic_cast<RootComponent*>(getContentComponent()))
@@ -1821,7 +1821,7 @@ MainWindow::MainWindow(const String& name)
         juce::Logger::writeToLog("???? [MainWindow] EventBus attached");
 
         juce::Logger::writeToLog("???? [MainWindow] About to center window");
-        centreWithSize(1500, 1024);
+        centreWithSize(1061, 724);
         juce::Logger::writeToLog("???? [MainWindow] Window centered");
 
         juce::Logger::writeToLog("???? [MainWindow] About to make window visible");

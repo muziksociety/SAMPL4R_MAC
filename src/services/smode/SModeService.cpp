@@ -42,7 +42,8 @@ void SModeService::reset()
 {
     juce::Logger::writeToLog("🎵 [SModeService] === reset ===");
     model_.clear();
-    sourceFile_ = {};
+    sourceFile_ = juce::File{};  // explicit type — `= {}` is ambiguous on Apple Clang
+                                  // because juce::File has String, File, and File&& assignment overloads.
     active_ = false;
 }
 

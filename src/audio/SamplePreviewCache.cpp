@@ -6,6 +6,13 @@ namespace samplar {
 // Constructor / Destructor
 //==============================================================================
 
+// Delegating ctor — provides the implicit-defaults overload that used to be
+// `= Config{}` in the header (rejected by Apple Clang as a class-body default arg).
+SamplePreviewCache::SamplePreviewCache(juce::AudioFormatManager& formatManager)
+    : SamplePreviewCache(formatManager, Config{})
+{
+}
+
 SamplePreviewCache::SamplePreviewCache(juce::AudioFormatManager& formatManager, const Config& config)
     : juce::Thread("SamplePreviewCacheLoader")
     , config_(config)

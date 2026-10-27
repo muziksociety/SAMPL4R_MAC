@@ -37,19 +37,21 @@ public:
 
     DWTTempoDetector() = default;
 
+    // Apple Clang rejects `= Config()` as a class-body default arg; callers
+    // pass Config explicitly.
     /**
      * Detect BPM using DWT-based algorithm.
      * Returns BPM with confidence score.
      */
     Result detect(const juce::AudioBuffer<float>& buffer,
                   double sampleRate,
-                  const Config& config = Config());
+                  const Config& config);
 
     /**
      * Detect BPM from a file.
      */
     Result detect(const juce::File& audioFile,
-                  const Config& config = Config());
+                  const Config& config);
 
 private:
     juce::AudioFormatManager formatManager_;

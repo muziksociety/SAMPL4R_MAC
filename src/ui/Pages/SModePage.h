@@ -10,6 +10,7 @@
 #include "../Components/smode/SModeMidiLearnOverlay.h"
 #include "../Components/smode/SequencerLaneComponent.h"
 #include "../Style/SamplarLookAndFeel.h"
+#include "../Components/AudioMeterBars.h"
 #include <memory>
 #include <set>
 #include <vector>
@@ -504,6 +505,9 @@ private:
     void unloadCurrentAudio();
 
     // ── Top-bar additions (Phase 1 visual build-out) ────────────────────
+    // Vertical sound bars on the very left of the top bar (Mac port addition).
+    // Reactive to live audio peak via samplar::AudioMeterTap.
+    AudioMeterBars audioMeterBars_;
     // Logo
     SamplarLogo logoLabel_;
 

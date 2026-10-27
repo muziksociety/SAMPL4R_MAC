@@ -49,9 +49,9 @@ SamplarAudioProcessorEditor::SamplarAudioProcessorEditor(SamplarAudioProcessor& 
         addAndMakeVisible(*rootComponent_);
     }
 
-    setSize(1500, 1024);
+    setSize(1061, 724);   // half the area of the original 1500x1024 (each dim / sqrt(2))
     setResizable(true, true);
-    setResizeLimits(1200, 700, 2560, 1600);
+    setResizeLimits(600, 350, 2560, 1600);
 
     juce::Logger::writeToLog("[SamplarAudioProcessorEditor] === CONSTRUCTOR END ===");
 }

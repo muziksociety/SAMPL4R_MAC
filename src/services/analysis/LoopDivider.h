@@ -73,6 +73,8 @@ public:
     LoopDivider();
     ~LoopDivider() = default;
 
+    // Apple Clang rejects `= Config()` / `= TempoAnalyzer::Config()` as class-body
+    // default arguments. Callers must pass these explicitly on Mac builds.
     /**
      * Divide a loop using pre-computed tempo analysis
      * This is the preferred method when tempo has already been analyzed
@@ -80,7 +82,7 @@ public:
     Result divide(const juce::AudioBuffer<float>& buffer,
                   double sampleRate,
                   const TempoAnalyzer::Result& tempoResult,
-                  const Config& config = Config());
+                  const Config& config);
 
     /**
      * Divide a loop, running tempo analysis internally
@@ -88,15 +90,15 @@ public:
      */
     Result divideWithAnalysis(const juce::AudioBuffer<float>& buffer,
                                double sampleRate,
-                               const Config& config = Config(),
-                               const TempoAnalyzer::Config& tempoConfig = TempoAnalyzer::Config());
+                               const Config& config,
+                               const TempoAnalyzer::Config& tempoConfig);
 
     /**
      * Divide an audio file
      */
     Result divideFile(const juce::File& audioFile,
-                      const Config& config = Config(),
-                      const TempoAnalyzer::Config& tempoConfig = TempoAnalyzer::Config());
+                      const Config& config,
+                      const TempoAnalyzer::Config& tempoConfig);
 
     /**
      * Extract a segment as a new audio buffer

@@ -99,15 +99,17 @@ public:
     /**
      * Detect BPM using hybrid approach.
      */
+    // Apple Clang rejects `= Config()` as a class-body default arg; callers
+    // pass Config explicitly.
     Result detect(const juce::AudioBuffer<float>& buffer,
                   double sampleRate,
-                  const Config& config = Config());
+                  const Config& config);
 
     /**
      * Detect BPM from file.
      */
     Result detect(const juce::File& audioFile,
-                  const Config& config = Config());
+                  const Config& config);
 
 private:
     TempoAnalyzer fftDetector_;

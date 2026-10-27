@@ -10,6 +10,7 @@
 #include "../services/smode/SModeService.h"
 #include "../services/FullSongSeparationService.h"
 #include "../audio/PluginPreviewService.h"
+#include "../audio/AudioMeterTap.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 #include "../utils/LogPaths.h"
 #include "../utils/DataPaths.h"
@@ -120,8 +121,12 @@ void SamplarAudioProcessor::initServices()
             }
         }
 
-        // 1. Registry install path (handles custom install directories)
+        // 1. Registry install path (Windows only — Inno installer writes this).
+        // macOS has no equivalent system registry; the .pkg installer places
+        // resources inside the .vst3/.component bundle's Contents/Resources/
+        // and the bundle-relative lookup above already covers that case.
         juce::String regPath;
+#if JUCE_WINDOWS
         if (juce::WindowsRegistry::valueExists(
                 "HKEY_LOCAL_MACHINE\\Software\\SAMPLAR\\SAMPLAR\\InstallPath"))
         {
@@ -135,6 +140,7 @@ void SamplarAudioProcessor::initServices()
             regPath = juce::WindowsRegistry::getValue(
                 "HKEY_CURRENT_USER\\Software\\SAMPLAR\\SAMPLAR\\InstallPath");
         }
+#endif
 
         if (!resolvedDir.isDirectory() && regPath.isNotEmpty())
         {
@@ -477,6 +483,41 @@ void SamplarAudioProcessor::processBlock(juce::AudioBuffer<float>& buffer,
     // -- 2. Pull audio from MIDI-triggered voices into the output buffer ------
     juce::AudioSourceChannelInfo info(&buffer, 0, buffer.getNumSamples());
     midiMapping_->getNextAudioBlock(info);
+
+    // -- 2a. DEBUG audio peak meter — logs ~1x/sec so you can verify signal is
+    // flowing without local speakers (useful for RDP/cloud sessions). Lock-free
+    // hot path; the once-per-second juce::Logger call holds a mutex briefly but
+    // not often enough to cause audio dropouts. Remove this block if it ever does.
+    {
+        static std::atomic<float> peakAccum{0.0f};
+        static std::atomic<int>   samplesAccum{0};
+        float blockPeak = 0.0f;
+        float peakL = 0.0f, peakR = 0.0f;
+        for (int ch = 0; ch < buffer.getNumChannels(); ++ch) {
+            const float chPeak = buffer.getMagnitude(ch, 0, buffer.getNumSamples());
+            blockPeak = juce::jmax(blockPeak, chPeak);
+            if (ch == 0) peakL = chPeak;
+            else if (ch == 1) peakR = chPeak;
+        }
+        // Publish per-channel peak to the UI meter strip (AudioMeterBars).
+        AudioMeterTap::instance().publish(peakL, peakR > 0.0f ? peakR : peakL);
+        float prev = peakAccum.load(std::memory_order_relaxed);
+        while (blockPeak > prev
+               && !peakAccum.compare_exchange_weak(prev, blockPeak,
+                                                    std::memory_order_relaxed)) {}
+        const int added = samplesAccum.fetch_add(buffer.getNumSamples(),
+                                                  std::memory_order_relaxed)
+                          + buffer.getNumSamples();
+        const int logEveryNSamples = juce::jmax(1, (int) getSampleRate()); // ~1s
+        if (added >= logEveryNSamples) {
+            const float peak = peakAccum.exchange(0.0f, std::memory_order_relaxed);
+            samplesAccum.store(0, std::memory_order_relaxed);
+            juce::Logger::writeToLog(
+                "[AUDIO-METER] peak=" + juce::String(peak, 4)
+                + " (" + juce::String(juce::Decibels::gainToDecibels(peak, -120.0f), 1) + " dBFS) "
+                + (peak > 0.0001f ? "SIGNAL" : "silent"));
+        }
+    }
 
     // -- 2b. Handle pending tempo re-request ------------------------------------
     const bool wasReRequested = tempoReRequestPending_.exchange(false);
