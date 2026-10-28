@@ -1,8 +1,21 @@
 # SAMPLAR build:
 #   Release / commercial:  cmake -B build -G "Visual Studio 17 2022" -A x64      (VST3 only — SamplarPlugin_VST3)
 #   Dev with standalone:   cmake -B build -G "Visual Studio 17 2022" -A x64 -DSAMPLAR_BUILD_STANDALONE=ON
+#   macOS (VST3, universal2): scripts/mac/build.sh   (or: cmake -B build -G Ninja -DCMAKE_BUILD_TYPE=Release)
 
 cmake_minimum_required(VERSION 3.20)
+
+# macOS: default to universal2 (arm64 + x86_64) and macOS 11.0 (first Apple Silicon
+# release; the ORT osx-universal2 build needs it). Must be set BEFORE project().
+# Override with e.g. -DCMAKE_OSX_ARCHITECTURES=arm64 for a faster dev build.
+if(APPLE)
+    if(NOT DEFINED CMAKE_OSX_ARCHITECTURES OR "${CMAKE_OSX_ARCHITECTURES}" STREQUAL "")
+        set(CMAKE_OSX_ARCHITECTURES "arm64;x86_64" CACHE STRING "macOS architectures" FORCE)
+    endif()
+    if(NOT DEFINED CMAKE_OSX_DEPLOYMENT_TARGET OR "${CMAKE_OSX_DEPLOYMENT_TARGET}" STREQUAL "")
+        set(CMAKE_OSX_DEPLOYMENT_TARGET "11.0" CACHE STRING "Minimum macOS version" FORCE)
+    endif()
+endif()
 
 # C is enabled here for samplar_pffft: MSVC tolerated JUCE enabling it in its subdirectory, Clang/Ninja does not.
 project(samplar VERSION 1.0.1 LANGUAGES C CXX)
@@ -501,12 +514,23 @@ endif()
 # -----------------------------------------------------------------------
 # SamplarPlugin — VST3 + Standalone plugin target (Phase 1 VST3 conversion)
 # -----------------------------------------------------------------------
+# Apple bundle settings. No AU: there is no Apple developer account (MM-024).
+# Ad-hoc signed, so the hardened runtime stays off until a Developer ID is wired.
+set(SAMPLAR_PLUGIN_BUNDLE_ID "com.muziksociety.samplar.vst3")
+set(SAMPLAR_PLUGIN_APPLE_ARGS)
+if(APPLE)
+    set(SAMPLAR_PLUGIN_BUNDLE_ID "com.muziksociety.samplar")
+    set(SAMPLAR_PLUGIN_APPLE_ARGS
+        HARDENED_RUNTIME_ENABLED FALSE
+        MICROPHONE_PERMISSION_ENABLED FALSE)
+endif()
+
 juce_add_plugin(SamplarPlugin
     PRODUCT_NAME "SAMPLAR"
     COMPANY_NAME "Muziksociety"
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
-    BUNDLE_ID "com.muziksociety.samplar.vst3"
+    BUNDLE_ID "${SAMPLAR_PLUGIN_BUNDLE_ID}"
     VERSION "${SAMPLAR_VERSION_STRING}"
     PLUGIN_MANUFACTURER_CODE Mzks
     PLUGIN_CODE Smpl
@@ -519,6 +543,7 @@ juce_add_plugin(SamplarPlugin
     VST3_CATEGORIES "Instrument" "Sampler" "Drum"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
+    ${SAMPLAR_PLUGIN_APPLE_ARGS}
 )
 
 # Plugin sources: shared SAMPLAR_SOURCES plus plugin entry points (App.cpp is SamplarApp-only)
@@ -715,11 +740,28 @@ endif()
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${SAMPLAR_PFFFT_DIR}/LICENSE.txt' (Join-Path $licDst 'pffft-LICENSE.txt')\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "exit 0\n")
 
-if(WIN32)  # PowerShell staging is Windows-only; macOS bundle staging is not ported yet (MM-025 step 3)
+if(WIN32)  # PowerShell staging is Windows-only; macOS uses scripts/mac/stage_bundle.sh below
   add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
     COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
     COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
   )
+endif()
+
+# macOS bundle staging: same payload as the Windows script above, placed in
+# SAMPLAR.vst3/Contents/Resources/ (libonnxruntime dylib, models/, data/ marker,
+# licenses/). The script also rewrites the plugin's ORT reference to
+# @loader_path and ad-hoc signs the bundle. Failures are non-fatal.
+if(APPLE)
+  add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
+    COMMAND /bin/bash "${CMAKE_CURRENT_SOURCE_DIR}/scripts/mac/stage_bundle.sh"
+            "$<TARGET_BUNDLE_DIR:SamplarPlugin_VST3>"
+            "${CMAKE_CURRENT_SOURCE_DIR}"
+            "${ORT_DLL}"
+            "${SAMPLAR_SEP_MODEL_NAME}"
+            "${SAMPLAR_SEP_STALE_MODEL}"
+            "${SAMPLAR_PFFFT_DIR}/LICENSE.txt"
+    COMMENT "Staging resources INTO SAMPLAR.vst3 bundle (macOS)"
+    VERBATIM)
 endif()
 # -----------------------------------------------------------------------
 
