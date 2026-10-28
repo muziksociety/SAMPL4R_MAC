@@ -4,7 +4,8 @@
 
 cmake_minimum_required(VERSION 3.20)
 
-project(samplar VERSION 1.0.1 LANGUAGES CXX)
+# C is enabled here for samplar_pffft: MSVC tolerated JUCE enabling it in its subdirectory, Clang/Ninja does not.
+project(samplar VERSION 1.0.1 LANGUAGES C CXX)
 
 option(SAMPLAR_BUILD_TESTS "Build SAMPLAR unit tests" OFF)
 option(SAMPLAR_BUILD_STANDALONE "Build the SamplarApp standalone target (dev only)" OFF)
@@ -714,10 +715,12 @@ endif()
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "CopyFile '${SAMPLAR_PFFFT_DIR}/LICENSE.txt' (Join-Path $licDst 'pffft-LICENSE.txt')\n")
 file(APPEND "${_SAMPLAR_VST3_STAGE_SCRIPT}" "exit 0\n")
 
-add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
-  COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
-  COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
-)
+if(WIN32)  # PowerShell staging is Windows-only; macOS bundle staging is not ported yet (MM-025 step 3)
+  add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
+    COMMAND powershell -NoLogo -NoProfile -ExecutionPolicy Bypass -File "${_SAMPLAR_VST3_STAGE_SCRIPT}" -VstDir "$<TARGET_FILE_DIR:SamplarPlugin_VST3>" -RepoRoot "${CMAKE_CURRENT_SOURCE_DIR}"
+    COMMENT "Staging resources INTO Samplar.vst3 bundle (self-contained for Inno installer)"
+  )
+endif()
 # -----------------------------------------------------------------------
 
 # -----------------------------------------------------------------------

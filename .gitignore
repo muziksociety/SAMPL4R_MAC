@@ -97,6 +97,8 @@ _deps/
 !*.cmake.in
 
 # JUCE
+# Vendored JUCE 8.0.8 stays untracked: each machine supplies its own copy.
+/JUCE/
 JuceLibraryCode/
 Builds/
 
