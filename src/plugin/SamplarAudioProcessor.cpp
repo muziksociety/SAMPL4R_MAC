@@ -215,6 +215,27 @@ void SamplarAudioProcessor::initServices()
             }
         }
 
+#if JUCE_MAC
+        // 0 (macOS). currentApplicationFile is the .vst3 bundle itself, and
+        // scripts/mac/stage_bundle.sh puts models/ and data/ in Contents/Resources/.
+        if (!resolvedDir.isDirectory())
+        {
+            auto bundleResources = juce::File::getSpecialLocation(juce::File::currentApplicationFile)
+                                       .getChildFile("Contents/Resources");
+            if (hasResources(bundleResources))
+            {
+                resolvedDir = bundleResources;
+                juce::Logger::writeToLog("[SamplarAudioProcessor] VST3 mode: app directory from bundle Contents/Resources: "
+                                         + bundleResources.getFullPathName());
+            }
+            else
+            {
+                juce::Logger::writeToLog("[SamplarAudioProcessor] VST3 mode: no data/ in bundle Contents/Resources: "
+                                         + bundleResources.getFullPathName());
+            }
+        }
+#endif
+
         // 0.5. Portable pointer file (only when the bundle itself has no resources)
         //    Written by "Setup VST3.cmd" inside the portable .zip distribution.
         //    Path lives at %APPDATA%\Samplar\portable_root.txt and contains
