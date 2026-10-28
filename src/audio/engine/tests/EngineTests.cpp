@@ -66,7 +66,10 @@ static void* countedAlignedAlloc(std::size_t n, std::align_val_t a)
 #if defined(_MSC_VER)
     if (void* p = _aligned_malloc(n != 0 ? n : 1, (std::size_t) a)) return p;
 #else
-    if (void* p = std::aligned_alloc((std::size_t) a, n)) return p;
+    // std::aligned_alloc needs a non-zero size that is a multiple of the alignment.
+    const auto align = (std::size_t) a;
+    const auto size  = ((n != 0 ? n : 1) + align - 1) / align * align;
+    if (void* p = std::aligned_alloc (align, size)) return p;
 #endif
     throw std::bad_alloc();
 }
