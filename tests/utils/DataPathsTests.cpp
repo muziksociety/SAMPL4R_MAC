@@ -3,7 +3,28 @@
 #include "utils/DataPaths.h"
 #include "TestHelpers.h"
 
+#if ! JUCE_WINDOWS
+ #include <climits>
+ #include <cstdlib>
+#endif
+
 namespace samplar {
+
+namespace {
+// Canonical path for comparisons: the CWD comes back through getcwd(), which
+// resolves symlinks (e.g. /Users vs /Volumes/Macintosh_HD/Users on macOS).
+juce::String resolvedPath (const juce::File& f)
+{
+   #if JUCE_WINDOWS
+    return f.getFullPathName();
+   #else
+    char buf[PATH_MAX];
+    if (::realpath (f.getFullPathName().toRawUTF8(), buf) != nullptr)
+        return juce::String::fromUTF8 (buf);
+    return f.getFullPathName();
+   #endif
+}
+} // namespace
 
 class DataPathsTests : public juce::UnitTest
 {
@@ -46,12 +67,12 @@ public:
             previousCwd.setAsCurrentWorkingDirectory();
 
             if (exeHasResources)
-                expectEquals (resolved.getFullPathName(), exeDir.getFullPathName());
+                expectEquals (resolvedPath (resolved), resolvedPath (exeDir));
             else
-                expectEquals (resolved.getFullPathName(), root.getFullPathName(), "CWD fallback");
+                expectEquals (resolvedPath (resolved), resolvedPath (root), "CWD fallback");
 
             if (! exeHasResources && ! previousCwd.getChildFile ("data").isDirectory())
-                expectEquals (DataPaths::getAppDirectory().getFullPathName(), exeDir.getFullPathName(), "last resort: exe dir");
+                expectEquals (resolvedPath (DataPaths::getAppDirectory()), resolvedPath (exeDir), "last resort: exe dir");
         }
 
         beginTest ("user data directory is <userAppData>/Samplar and exists");

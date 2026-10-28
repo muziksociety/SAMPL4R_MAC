@@ -251,9 +251,16 @@ private:
 
     void testBoundedCommand()
     {
-        // ping -n 30 runs ~29 s: must be killed after the timeout.
+        // Long command (~29-30 s): must be killed after the timeout.
+       #if JUCE_WINDOWS
+        const std::string longCmd = "ping -n 30 127.0.0.1";
+        const std::string echoCmd = "cmd.exe /C echo samplar";
+       #else
+        const std::string longCmd = "sleep 30";      // runBoundedCommand wraps it in /bin/sh -c
+        const std::string echoCmd = "echo samplar";
+       #endif
         auto t0 = juce::Time::getMillisecondCounter();
-        auto r = HardwareFingerprintGenerator::runBoundedCommand ("ping -n 30 127.0.0.1", 300);
+        auto r = HardwareFingerprintGenerator::runBoundedCommand (longCmd, 300);
         auto elapsed = (int) (juce::Time::getMillisecondCounter() - t0);
         expect (r.started, "started");
         expect (r.timedOut, "timed out");
@@ -264,14 +271,14 @@ private:
         std::atomic<bool> cancel { false };
         std::thread canceller ([&cancel] { juce::Thread::sleep (200); cancel = true; });
         t0 = juce::Time::getMillisecondCounter();
-        r = HardwareFingerprintGenerator::runBoundedCommand ("ping -n 30 127.0.0.1", 20000, &cancel);
+        r = HardwareFingerprintGenerator::runBoundedCommand (longCmd, 20000, &cancel);
         elapsed = (int) (juce::Time::getMillisecondCounter() - t0);
         canceller.join();
         expect (r.cancelled && ! r.timedOut, "cancelled");
         expect (elapsed < 1500, "cancel noticed quickly (" + juce::String (elapsed) + " ms)");
 
         // A normal command still returns its output.
-        r = HardwareFingerprintGenerator::runBoundedCommand ("cmd.exe /C echo samplar", 5000);
+        r = HardwareFingerprintGenerator::runBoundedCommand (echoCmd, 5000);
         expect (! r.timedOut && ! r.cancelled);
         expectEquals (juce::String (r.output), juce::String ("samplar"));
     }
