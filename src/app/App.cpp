@@ -21,6 +21,11 @@
 #include <eh.h>
 #endif
 
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <unistd.h>
+#endif
+
 using namespace juce;
 
 namespace samplar {
@@ -69,6 +74,19 @@ void signalHandler(int signal) {
     }
 
     exit(signal);
+}
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+// POSIX crash handler (standalone only). Uses only async-signal-safe calls:
+// FileLogger has already flushed every earlier line, so the handler writes one
+// line to stderr, restores the default action and re-raises, which keeps the
+// macOS crash report.
+void posixSignalHandler(int sig) {
+    static const char msg[] = "[CRASH] SAMPLAR caught a fatal signal, terminating\n";
+    (void) ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
 }
 #endif
 
@@ -151,6 +169,11 @@ void App::initialise (const String& /*commandLine*/)
     signal(SIGSEGV, signalHandler);
     signal(SIGTERM, signalHandler);
     juce::Logger::writeToLog("???? [App] Crash handlers installed");
+#elif defined(__unix__) || defined(__APPLE__)
+    juce::Logger::writeToLog("[App] Installing POSIX crash handlers (SIGABRT SIGFPE SIGILL SIGSEGV SIGBUS)");
+    for (int sig : { SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGBUS })
+        ::signal(sig, posixSignalHandler);
+    juce::Logger::writeToLog("[App] POSIX crash handlers installed");
 #endif
 
     try {
