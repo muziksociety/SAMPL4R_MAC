@@ -41,15 +41,22 @@ public:
      * Detect BPM using DWT-based algorithm.
      * Returns BPM with confidence score.
      */
+    // Clang rejects `= Config()` as a default argument inside the enclosing class
+    // (NSDMIs not parsed yet), so the default-config forms are forwarding overloads.
     Result detect(const juce::AudioBuffer<float>& buffer,
                   double sampleRate,
-                  const Config& config = Config());
+                  const Config& config);
+    Result detect(const juce::AudioBuffer<float>& buffer, double sampleRate)
+    {
+        return detect(buffer, sampleRate, Config{});
+    }
 
     /**
      * Detect BPM from a file.
      */
     Result detect(const juce::File& audioFile,
-                  const Config& config = Config());
+                  const Config& config);
+    Result detect(const juce::File& audioFile) { return detect(audioFile, Config{}); }
 
 private:
     juce::AudioFormatManager formatManager_;

@@ -248,8 +248,10 @@ void SamplarAudioProcessor::initServices()
             }
         }
 
-        // 1. Registry install path (handles custom install directories)
+        // 1. Registry install path (handles custom install directories).
+        // Windows only: macOS has no registry; resources live in the bundle.
         juce::String regPath;
+#if JUCE_WINDOWS
         if (juce::WindowsRegistry::valueExists(
                 "HKEY_LOCAL_MACHINE\\Software\\SAMPLAR\\SAMPLAR\\InstallPath"))
         {
@@ -263,6 +265,7 @@ void SamplarAudioProcessor::initServices()
             regPath = juce::WindowsRegistry::getValue(
                 "HKEY_CURRENT_USER\\Software\\SAMPLAR\\SAMPLAR\\InstallPath");
         }
+#endif
 
         if (!resolvedDir.isDirectory() && regPath.isNotEmpty())
         {

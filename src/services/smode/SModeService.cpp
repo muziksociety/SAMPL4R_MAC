@@ -117,7 +117,7 @@ void SModeService::reset()
     sessionSeparationQueued_ = false;
     relinkConfirmFile_ = juce::File();
     model_.clear();
-    sourceFile_ = {};
+    sourceFile_ = juce::File();  // `= {}` is ambiguous on Clang (File / String assignment)
     active_ = false;
 }
 

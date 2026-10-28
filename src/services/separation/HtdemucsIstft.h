@@ -42,7 +42,9 @@ public:
         int   channels  = 2;
     };
 
-    explicit HtdemucsIstft (Config c = {});
+    // No `Config c = {}` default: Clang rejects it inside the enclosing class.
+    HtdemucsIstft() : HtdemucsIstft (Config {}) {}
+    explicit HtdemucsIstft (Config c);
 
     // Writes out = timeBranch + istft(spec). `frames` comes from the spec tensor shape.
     void process (const float* spec, int frames, const float* timeBranch, float* out);

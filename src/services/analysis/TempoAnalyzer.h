@@ -71,19 +71,30 @@ public:
     /**
      * Analyze tempo from audio file
      */
-    Result analyze(const juce::File& audioFile, const Config& config = Config());
+    // Clang rejects `= Config()` as a default argument inside the enclosing class
+    // (NSDMIs not parsed yet), so the default-config forms are forwarding overloads.
+    Result analyze(const juce::File& audioFile, const Config& config);
+    Result analyze(const juce::File& audioFile) { return analyze(audioFile, Config{}); }
 
     /**
      * Analyze tempo from audio buffer
      */
     Result analyze(const juce::AudioBuffer<float>& buffer, double sampleRate,
-                   const Config& config = Config());
+                   const Config& config);
+    Result analyze(const juce::AudioBuffer<float>& buffer, double sampleRate)
+    {
+        return analyze(buffer, sampleRate, Config{});
+    }
 
     /**
      * Quick BPM-only analysis (faster, no beat positions)
      */
     float detectBPM(const juce::AudioBuffer<float>& buffer, double sampleRate,
-                    const Config& config = Config());
+                    const Config& config);
+    float detectBPM(const juce::AudioBuffer<float>& buffer, double sampleRate)
+    {
+        return detectBPM(buffer, sampleRate, Config{});
+    }
 
 private:
     //==========================================================================
