@@ -433,3 +433,16 @@ graphify-out/20*/
 src/graphify-out/
 third_party/demucs.cpp/
 int_backup/
+
+# Claude Code runtime state (per-machine, not source)
+.claude/scheduled_tasks.lock
+.claude/settings.local.json
+
+# Secrets / signing material - never commit
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+*.mobileprovision
