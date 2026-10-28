@@ -142,6 +142,13 @@ if(TARGET SamplarPlugin_VST3)
     list(APPEND _samplar_lic_cmds COMMAND ${CMAKE_COMMAND} -E copy_if_different "${_src}" "${_SAMPLAR_LIC_DIR}/${_dst}")
   endforeach()
 
+  # macOS: this step runs after scripts/mac/stage_bundle.sh has codesigned the bundle, so a
+  # newly copied licence text breaks the seal. Re-sign ad hoc after the copies.
+  if(APPLE)
+    list(APPEND _samplar_lic_cmds
+      COMMAND /usr/bin/codesign --force --sign - --timestamp=none "$<TARGET_BUNDLE_DIR:SamplarPlugin_VST3>")
+  endif()
+
   add_custom_command(TARGET SamplarPlugin_VST3 POST_BUILD
     ${_samplar_lic_cmds}
     COMMENT "Staging third-party licence texts into SAMPLAR.vst3/Contents/Resources/licenses (+ stale data cleanup)"
