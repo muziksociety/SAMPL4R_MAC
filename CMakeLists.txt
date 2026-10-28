@@ -140,11 +140,29 @@ option(SAMPLAR_ENABLE_TRACING "Enable SAMPLAR Chrome-Trace event profiler" OFF)
 #   - 83 MB ONNX model copied next to the exe at install time
 # -----------------------------------------------------------------------
 set(BEAT_THIS_DIR "${CMAKE_CURRENT_LIST_DIR}/third_party/beat_this")
+# A Release build must never ship without the tracker, so a missing model is
+# fatal there. Debug builds keep the old behaviour (warn and disable).
+# Multi-config generators (Xcode, Visual Studio) pick the config at build time,
+# so they get a guard target that fails any non-Debug build instead.
+set(BEAT_THIS_MODEL_MISSING OFF)
 if(WITH_BEAT_THIS)
   if(NOT EXISTS "${BEAT_THIS_DIR}/models/beat_this.onnx")
+    get_property(_samplar_multi_config GLOBAL PROPERTY GENERATOR_IS_MULTI_CONFIG)
+    if(NOT _samplar_multi_config AND CMAKE_BUILD_TYPE MATCHES "^(Release|RelWithDebInfo|MinSizeRel)$")
+      message(FATAL_ERROR "WITH_BEAT_THIS=ON but ${BEAT_THIS_DIR}/models/beat_this.onnx not found. "
+                          "A ${CMAKE_BUILD_TYPE} build must ship the beat tracker: restore the model, "
+                          "or configure with -DWITH_BEAT_THIS=OFF on purpose.")
+    endif()
     message(WARNING "WITH_BEAT_THIS=ON but ${BEAT_THIS_DIR}/models/beat_this.onnx not found. Disabling.")
     set(WITH_BEAT_THIS OFF)
+    set(BEAT_THIS_MODEL_MISSING ON)
   endif()
+endif()
+if(BEAT_THIS_MODEL_MISSING)
+  add_custom_target(beat_this_model_guard
+    COMMAND ${CMAKE_COMMAND} -E echo "beat_this_model_guard: $<CONFIG> build requested WITH_BEAT_THIS but ${BEAT_THIS_DIR}/models/beat_this.onnx is missing"
+    COMMAND ${CMAKE_COMMAND} -E $<IF:$<CONFIG:Debug>,true,false>
+    VERBATIM)
 endif()
 
 # -----------------------------------------------------------------------
@@ -441,6 +459,9 @@ target_link_libraries(SamplarApp
 )
 
 # Beat This! integration on SamplarApp
+if(BEAT_THIS_MODEL_MISSING)
+  add_dependencies(SamplarApp beat_this_model_guard)
+endif()
 if(WITH_BEAT_THIS)
   target_link_libraries(SamplarApp PRIVATE beat_this_engine)
   target_compile_definitions(SamplarApp PRIVATE WITH_BEAT_THIS=1)
@@ -594,6 +615,9 @@ target_link_libraries(SamplarPlugin
         samplar_pffft
 )
 
+if(BEAT_THIS_MODEL_MISSING)
+    add_dependencies(SamplarPlugin beat_this_model_guard)
+endif()
 if(WITH_BEAT_THIS)
     target_link_libraries(SamplarPlugin PRIVATE beat_this_engine)
     target_compile_definitions(SamplarPlugin PRIVATE WITH_BEAT_THIS=1)
