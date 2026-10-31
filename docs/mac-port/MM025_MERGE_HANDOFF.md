@@ -52,15 +52,15 @@ git checkout --theirs -- .   # sync side wins every conflict
 git rm -r --cached JUCE      # drop vendored JUCE from the index
 # restore the samplar-mac relay address in CLAUDE.md
 git diff --stat sync/<tip>   # must show only CLAUDE.md
-scripts/mac/build.sh --tests # plus the bundle checks below
+scripts/mac/build.sh --tests --build-dir build_1031 # plus the bundle checks below; `build/` is pinned to the removed SDK 26.5
 git commit
 ```
 
 ## Gates before any Mac release
 
-1. **MM-005**: the SAMPL4R licensing v2 key is on the license server (Santi's step). Until then, do not instantiate the plugin against the live server and do not release. The Mac does not ship on licensing v1.
+1. ~~**MM-005**~~ cleared 2026-10-28: the SAMPL4R licensing v2 key is live on the license server, fingerprint 46cfe00569377025 = `kFingerprint` in this build. The Mac still does not ship on licensing v1.
 2. **MM-034**: decide how JUCE / `JUCE/extras/Build` is tracked or fetched (git-tracked JUCE lacks `extras/Build/` because of case-insensitive disks and the `build/` ignore), so a clean clone builds.
 3. samplar-win review (above) and the merge into Mac main, approved by MASTERMIND.
 4. Bundle checks on the release build: `lipo -archs` gives x86_64 arm64; `otool -L` shows no `_deps`; `codesign -v --strict --deep` passes; dlopen works on both archs; both models load with the bundled ORT.
-5. Developer ID signing and notarisation (the current build is ad-hoc signed only).
+5. Packaging: `scripts/mac/make_pkg.sh --build-dir <dir>` builds an unsigned .pkg with ad-hoc signed bundles (the release plan for now: no Apple developer account, same as Sample Monsta for Mac). `--identity`, `--installer-identity` and `--notary-profile` add Developer ID signing and notarisation once an account exists.
 6. Santi tests the build in a DAW. The release then goes through MASTERMIND (`release-request`). No release from this repo.

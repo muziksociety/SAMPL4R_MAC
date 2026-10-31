@@ -9,6 +9,11 @@
 #   scripts/mac/build.sh --xcode          # force the Xcode generator
 #   scripts/mac/build.sh --tests          # also build EngineTests + SamplarTests
 #   scripts/mac/build.sh --clean          # wipe the build dir first
+#   scripts/mac/build.sh --build-dir DIR  # use DIR instead of build/
+#
+# A build dir configured against an SDK that is no longer installed (Xcode
+# updated, e.g. a cache pinned to MacOSX26.5.sdk) is refused: rerun with --clean
+# or pick a fresh --build-dir.
 
 set -euo pipefail
 
@@ -27,8 +32,11 @@ GENERATOR=""
 TESTS="OFF"
 CLEAN=0
 
-for arg in "$@"; do
+while [[ $# -gt 0 ]]; do
+    arg="$1"; shift
     case "$arg" in
+        --build-dir)
+            BUILD_DIR="${1:?--build-dir needs a value}"; shift ;;
         --arm64)   ARCHS="arm64" ;;
         --x86_64)  ARCHS="x86_64" ;;
         --debug)   CONFIG="Debug" ;;
@@ -54,6 +62,19 @@ fi
 if [[ $CLEAN -eq 1 ]]; then
     echo "[build] cleaning $BUILD_DIR"
     rm -rf "$BUILD_DIR"
+fi
+
+# Refuse a cache whose framework paths point at an SDK that is gone.
+CACHE="$BUILD_DIR/CMakeCache.txt"
+if [[ -f "$CACHE" ]]; then
+    STALE_SDK="$(sed -nE 's/^juce_found_[A-Za-z]+:FILEPATH=(.*\.sdk)\/System\/.*/\1/p' "$CACHE" | sort -u | while read -r sdk; do
+        [[ -d "$sdk" ]] || echo "$sdk"
+    done | head -1)"
+    if [[ -n "$STALE_SDK" ]]; then
+        echo "[build] ERROR: $BUILD_DIR was configured against a missing SDK: $STALE_SDK" >&2
+        echo "[build]        rerun with --clean, or use a fresh --build-dir" >&2
+        exit 2
+    fi
 fi
 
 echo "[build] generator: $GENERATOR"
