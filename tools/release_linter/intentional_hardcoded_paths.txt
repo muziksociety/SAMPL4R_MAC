@@ -1,0 +1,12 @@
+# SAMPLAR Release Linter - hardcoded-path scrub list (check_hardcoded_paths.py)
+#
+# Each entry is REMOVED (case-insensitive) from a candidate string before it is
+# judged, so only the listed token is excused - never a whole line.
+#
+# Company name: HKCU\Software\MuzikSociety\Samplar\ix (ClockGuard), the VST3
+# vendor string "Muziksociety" and muziksociety@gmail.com. Not the dev user.
+MuzikSociety
+#
+# Opt-in DLL-load trace (only when SAMPLAR_DLL_LOAD_TRACE=1; src/utils/OnnxDelayLoad.cpp).
+# Fixed, user-independent path; audit D6 suggests %LOCALAPPDATA%\Samplar\logs instead.
+C:\Users\Public\samplar_dll_load.log

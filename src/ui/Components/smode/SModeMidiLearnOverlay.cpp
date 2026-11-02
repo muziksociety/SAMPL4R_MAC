@@ -1,12 +1,12 @@
-﻿#include "SModeMidiLearnOverlay.h"
+#include "SModeMidiLearnOverlay.h"
 #include "../../../app/ServiceLocator.h"
 #include "../../../app/ServiceRegistry.h"
 #include "../../../services/MidiMappingService.h"
 
 namespace samplar {
 
-SModeMidiLearnOverlay::SModeMidiLearnOverlay(EventBus& bus)
-    : bus_(bus)
+SModeMidiLearnOverlay::SModeMidiLearnOverlay(EventBus& bus, ServiceRegistry* registry)
+    : bus_(bus), registry_(registry)
 {
     setOpaque(false);
     setAlwaysOnTop(true);
@@ -49,7 +49,7 @@ void SModeMidiLearnOverlay::show(int stemIndex, int segIndex, const juce::String
     stemName_ = stemName;
 
     // Activate MIDI learn mode in the service
-    if (auto* registry = ServiceLocator::getRegistry())
+    if (auto* registry = registry_)
     {
         if (auto* midiSvc = dynamic_cast<MidiMappingService*>(registry->get("midi.mapping")))
             midiSvc->beginMidiLearnForSMode();
@@ -66,7 +66,7 @@ void SModeMidiLearnOverlay::show(int stemIndex, int segIndex, const juce::String
 void SModeMidiLearnOverlay::dismiss()
 {
     // Cancel learn mode if still active
-    if (auto* registry = ServiceLocator::getRegistry())
+    if (auto* registry = registry_)
     {
         if (auto* midiSvc = dynamic_cast<MidiMappingService*>(registry->get("midi.mapping")))
         {
@@ -86,7 +86,9 @@ void SModeMidiLearnOverlay::paint(juce::Graphics& g)
     g.fillAll(juce::Colours::black.withAlpha(0.7f));
 
     // Centered dialog panel
-    auto panelBounds = getLocalBounds().reduced(getWidth() / 4, getHeight() / 3);
+    // Fixed-size panel (text needs ~176 px): reduced(w/4, h/3) clipped the last line at 850x500.
+    auto panelBounds = getLocalBounds().withSizeKeepingCentre(juce::jmin(420, getWidth() - 40),
+                                                              juce::jmin(200, getHeight() - 40));
     g.setColour(juce::Colour(0xff1e1e3a));
     g.fillRoundedRectangle(panelBounds.toFloat(), 12.0f);
     g.setColour(juce::Colour(0xff5555aa));
@@ -104,7 +106,7 @@ void SModeMidiLearnOverlay::paint(juce::Graphics& g)
 
     // Main prompt
     g.setFont(juce::FontOptions(16.0f, juce::Font::bold));
-    g.drawText("Press a MIDI key to assign...", textArea.removeFromTop(24),
+    g.drawText("Press a MIDI key (or A..; on the keyboard)", textArea.removeFromTop(24),
                juce::Justification::centred);
 
     textArea.removeFromTop(12);

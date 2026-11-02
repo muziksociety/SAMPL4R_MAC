@@ -6,10 +6,12 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <string>
 #include <vector>
+#include <atomic>
+#include <memory>
+#include <mutex>
+#include <thread>
 
 namespace samplar {
-
-class LicenseSystemService;
 
 class UpdateCheckService : public IService, private juce::Timer {
 public:
@@ -42,9 +44,9 @@ public:
 
 private:
     void timerCallback() override;
-    void performCheck();
+    void performCheck(const std::string& hwId);   // worker thread; touches no other service
     void parseResponse(const juce::String& responseBody);
-    std::string getHardwareId() const;
+    std::string getHardwareId() const;            // message thread only
 
     EventBus& eventBus_;
     UpdateInfo updateInfo_;
@@ -52,6 +54,16 @@ private:
 
     std::unique_ptr<juce::PropertiesFile> propsFile_;
     static constexpr int startupDelayMs_ = 5000;
+
+    // D8: network check runs on a JOINABLE thread (joined in shutdown) so it
+    // never outlives the service / plugin DLL; posted callbacks check alive_.
+    std::unique_ptr<std::thread> checkThread_;
+    std::shared_ptr<std::atomic<bool>> alive_ { std::make_shared<std::atomic<bool>>(true) };
+
+    // The in-flight HTTP stream, so shutdown() can cancel() it instead of
+    // waiting out the connection timeout (plugin unload must stay fast).
+    std::mutex streamMutex_;
+    juce::WebInputStream* activeStream_ { nullptr };
 };
 
 } // namespace samplar

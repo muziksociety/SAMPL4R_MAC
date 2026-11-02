@@ -1,4 +1,5 @@
-﻿#include "WaveDragArea.h"
+#include "WaveDragArea.h"
+#include "../../utils/DataPaths.h"
 #include <juce_audio_formats/juce_audio_formats.h>
 
 namespace samplar {
@@ -106,6 +107,10 @@ void WaveDragArea::paint(juce::Graphics& g)
             labelText = "Rendering...";
             break;
     }
+
+    // Narrow areas (sequencer lane, 70 px): short label instead of "Drag a..."
+    if (juce::GlyphArrangement::getStringWidth(g.getCurrentFont(), labelText) > textBounds.getWidth())
+        labelText = (state_ == State::Preparing) ? juce::String("...") : juce::String("WAV");
 
     g.drawText(labelText, textBounds, juce::Justification::centredLeft, true);
 }
@@ -351,8 +356,8 @@ void WaveDragArea::renderAndPrepareWavFile()
     if (!buffer || buffer->getNumSamples() == 0)
     {
         juce::Logger::writeToLog("[WaveDragArea] ERROR: Render returned empty buffer");
-        juce::MessageManager::callAsync([this]() {
-            onPrepareComplete(false, {});
+        juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<WaveDragArea>(this)]() {
+            if (safeThis != nullptr) safeThis->onPrepareComplete(false, {});
         });
         return;
     }
@@ -364,10 +369,13 @@ void WaveDragArea::renderAndPrepareWavFile()
 
     progress_ = 0.8f;
 
-    // Create temp file
-    juce::File tempDir = juce::File::getSpecialLocation(juce::File::tempDirectory);
-    juce::File wavFile = tempDir.getChildFile("SAMPLAR_pattern_" +
-        juce::String(juce::Time::currentTimeMillis()) + ".wav");
+    // B29: persistent export folder + never-reused name (DAWs reference the
+    // dropped file in place; %TEMP% gets purged and names collided).
+    auto exportDir = samplar::DataPaths::getUserDataDirectory().getChildFile("exports");
+    if (! exportDir.isDirectory())
+        exportDir.createDirectory();
+    juce::File wavFile = exportDir.getNonexistentChildFile(
+        "SAMPLAR_pattern_" + juce::Time::getCurrentTime().formatted("%Y%m%d_%H%M%S"), ".wav", false);
 
     juce::Logger::writeToLog("[WaveDragArea] Writing to: " + wavFile.getFullPathName());
 
@@ -378,7 +386,7 @@ void WaveDragArea::renderAndPrepareWavFile()
             new juce::FileOutputStream(wavFile),
             outSampleRate,
             (unsigned int)buffer->getNumChannels(),
-            16,  // bits per sample
+            24,  // bits per sample (same as chop drag-outs, B29)
             {},  // metadata
             0    // quality
         )
@@ -387,8 +395,8 @@ void WaveDragArea::renderAndPrepareWavFile()
     if (!writer)
     {
         juce::Logger::writeToLog("[WaveDragArea] ERROR: Failed to create WAV writer");
-        juce::MessageManager::callAsync([this]() {
-            onPrepareComplete(false, {});
+        juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<WaveDragArea>(this)]() {
+            if (safeThis != nullptr) safeThis->onPrepareComplete(false, {});
         });
         return;
     }
@@ -399,8 +407,8 @@ void WaveDragArea::renderAndPrepareWavFile()
     if (!writer->writeFromAudioSampleBuffer(*buffer, 0, buffer->getNumSamples()))
     {
         juce::Logger::writeToLog("[WaveDragArea] ERROR: Write failed");
-        juce::MessageManager::callAsync([this]() {
-            onPrepareComplete(false, {});
+        juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<WaveDragArea>(this)]() {
+            if (safeThis != nullptr) safeThis->onPrepareComplete(false, {});
         });
         return;
     }
@@ -413,13 +421,15 @@ void WaveDragArea::renderAndPrepareWavFile()
     juce::Logger::writeToLog("[WaveDragArea] File size: " +
         juce::String(wavFile.getSize() / 1024) + " KB");
 
-    // Store the rendered buffer
-    sampleRate_ = outSampleRate;
-
     juce::String filePath = wavFile.getFullPathName();
-    juce::MessageManager::callAsync([this, filePath, buf = std::move(buffer)]() mutable {
-        renderedBuffer_ = std::move(buf);
-        onPrepareComplete(true, filePath);
+    // Posted callback may run after the component is destroyed (destructor
+    // joins the worker, but not the message queue) - guard with SafePointer.
+    juce::MessageManager::callAsync([safeThis = juce::Component::SafePointer<WaveDragArea>(this),
+                                     filePath, outSampleRate, buf = std::move(buffer)]() mutable {
+        if (safeThis == nullptr) return;
+        safeThis->sampleRate_ = outSampleRate;   // B31: members only touched on the message thread
+        safeThis->renderedBuffer_ = std::move(buf);
+        safeThis->onPrepareComplete(true, filePath);
     });
 }
 

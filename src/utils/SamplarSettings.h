@@ -21,6 +21,10 @@ namespace samplar {
  *       When ON, auto-detected BPM is rounded to nearest integer in the
  *       SModePage tempo-detection callback. Manual / host / tap-tempo
  *       entry paths bypass this and always keep full precision.
+ *   - "useGpuSeparation" (bool, default = true)
+ *       When ON, stem separation runs on a discrete GPU via DirectML when one is
+ *       available (falls back to the CPU automatically). OFF forces the CPU.
+ *       Read by FullSongService at the start of every separation.
  */
 class SamplarSettings
 {
@@ -49,6 +53,27 @@ public:
             }
         }
         juce::Logger::writeToLog(juce::String("[Settings] autoRoundBpm = ")
+                                 + (value ? "ON" : "OFF"));
+    }
+
+    // -- useGpuSeparation ----------------------------------------------
+    bool getUseGpuSeparation() const
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return props_ ? props_->getBoolValue("useGpuSeparation", true) : true;
+    }
+
+    void setUseGpuSeparation(bool value)
+    {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (props_)
+            {
+                props_->setValue("useGpuSeparation", value);
+                props_->saveIfNeeded();
+            }
+        }
+        juce::Logger::writeToLog(juce::String("[Settings] useGpuSeparation = ")
                                  + (value ? "ON" : "OFF"));
     }
 

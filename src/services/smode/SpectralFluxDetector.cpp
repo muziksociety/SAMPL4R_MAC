@@ -1,4 +1,6 @@
 ﻿#include "SpectralFluxDetector.h"
+#include "../analysis/AnalysisDsp.h"
+#include "../../audio/MicroFade.h"
 #include <juce_core/juce_core.h>
 #include <algorithm>
 #include <cmath>
@@ -32,37 +34,49 @@ std::vector<int64_t> SpectralFluxDetector::detect(const float* monoData,
     auto threshold = computeAdaptiveThreshold(flux);
     juce::Logger::writeToLog("[SpectralFluxDetector]   Stage 2: adaptive threshold computed");
 
+    // Stage 2b: floor relative to the strongest flux peak (C17: no absolute
+    // floor before -> spurious onsets in near-silent stems).
+    const float maxFlux = *std::max_element(flux.begin(), flux.end());
+    const float floorFlux = maxFlux * settings_.minPeakRelative;
+    for (auto& t : threshold) t = std::max(t, floorFlux);
+
     // Stage 3: Pick peaks above threshold
     auto peakFrames = pickPeaks(flux, threshold);
     juce::Logger::writeToLog("[SpectralFluxDetector]   Stage 3: " + juce::String((int)peakFrames.size())
-                             + " raw peaks detected");
+                             + " raw peaks detected (floor=" + juce::String(floorFlux, 4) + ")");
 
+    lastAttacks_.clear();
     if (peakFrames.empty()) return {};
 
-    // Convert frame indices to sample positions
-    std::vector<int64_t> rawOnsets;
-    rawOnsets.reserve(peakFrames.size());
+    // Stage 4: attack refinement inside the analysis window (C17)
+    std::vector<int64_t> attacks;
+    attacks.reserve(peakFrames.size());
+    int rejectedSilent = 0;
     for (int frame : peakFrames)
     {
-        int64_t samplePos = static_cast<int64_t>(frame) * settings_.hopSize;
-        samplePos = std::min(samplePos, static_cast<int64_t>(numSamples - 1));
-        rawOnsets.push_back(samplePos);
+        const int64_t a = refineAttack(monoData, numSamples, frame, sampleRate);
+        if (a < 0) { ++rejectedSilent; continue; }
+        attacks.push_back(a);
     }
+    std::sort(attacks.begin(), attacks.end());
+    attacks.erase(std::unique(attacks.begin(), attacks.end()), attacks.end());
+    attacks = enforceMinSpacing(attacks, sampleRate);
+    lastAttacks_ = attacks;
 
-    // Stage 4a: Backtrack refinement
-    std::vector<int64_t> refined;
-    refined.reserve(rawOnsets.size());
-    for (int64_t onset : rawOnsets)
-        refined.push_back(backtrack(monoData, numSamples, onset));
+    // Stage 5: boundary placement (pre-roll + zero-crossing snap)
+    std::vector<int64_t> boundaries;
+    boundaries.reserve(attacks.size());
+    for (int64_t a : attacks)
+        boundaries.push_back(placeBoundary(monoData, numSamples, a, sampleRate));
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
 
-    // Stage 4b: Minimum spacing filter
-    auto result = enforceMinSpacing(refined, sampleRate);
-
-    juce::Logger::writeToLog("[SpectralFluxDetector]   Stage 4: " + juce::String((int)result.size())
-                             + " onsets after backtrack + spacing filter");
+    juce::Logger::writeToLog("[SpectralFluxDetector]   Stage 4/5: " + juce::String((int) boundaries.size())
+                             + " onsets (attack-refined, " + juce::String(rejectedSilent)
+                             + " silent rejected, zcSnap=" + juce::String(settings_.snapToZeroCrossing ? 1 : 0) + ")");
     juce::Logger::writeToLog("[SpectralFluxDetector] === detect END ===");
 
-    return result;
+    return boundaries;
 }
 
 // ── Stage 1: Spectral Flux ──────────────────────────────────────────────────
@@ -168,40 +182,47 @@ std::vector<int> SpectralFluxDetector::pickPeaks(const std::vector<float>& flux,
     return peaks;
 }
 
-// ── Stage 4a: Backtrack Refinement ──────────────────────────────────────────
+// ── Stage 4: Attack refinement ──────────────────────────────────────────────
 
-int64_t SpectralFluxDetector::backtrack(const float* data, int numSamples,
-                                         int64_t peakSample) const
+int64_t SpectralFluxDetector::refineAttack(const float* data, int numSamples,
+                                           int frame, double sampleRate) const
 {
-    // Walk backwards from the detected peak to find where the signal
-    // first rises from a local minimum — the true onset point
-    const int maxBack = settings_.backtrackSamples;
-    int64_t bestPos = peakSample;
-    float minEnergy = std::numeric_limits<float>::max();
+    const int fftSize = 1 << settings_.fftOrder;
+    // The flux peak can come a frame late (noisy attacks keep raising flux
+    // while they move toward the window centre), so the search also covers
+    // one window before the frame start.
+    const int64_t lo = std::max<int64_t>(0, static_cast<int64_t>(frame) * settings_.hopSize
+                                             - fftSize - settings_.backtrackSamples);
+    const int64_t hi = std::min<int64_t>(numSamples - 1,
+                                         static_cast<int64_t>(frame) * settings_.hopSize + fftSize - 1);
 
-    int64_t startSearch = std::max((int64_t)0, peakSample - maxBack);
+    // Silence gate: ignore regions whose peak is below -80 dBFS.
+    float peak = 0.0f;
+    for (int64_t i = lo; i <= hi; ++i) peak = std::max(peak, std::abs(data[i]));
+    if (peak < 1.0e-4f) return -1;
 
-    // Use short RMS windows (32 samples) to find energy minimum before the peak
-    static constexpr int kMicroWindow = 32;
+    const int win = std::max(8, static_cast<int>(std::lround(settings_.attackWindowMs * 0.001 * sampleRate)));
+    const int64_t a = analysis::findAttackSample(data, numSamples, lo, hi, win,
+                                                  static_cast<int>(std::lround(0.010 * sampleRate)));
+    return a;
+}
 
-    for (int64_t pos = peakSample; pos >= startSearch; pos -= kMicroWindow)
+int64_t SpectralFluxDetector::placeBoundary(const float* data, int numSamples,
+                                            int64_t attack, double sampleRate) const
+{
+    double preRollMs = settings_.preRollMs;
+    if (preRollMs < 0.0)
+        preRollMs = microFadeEnabledFlag().load(std::memory_order_relaxed) ? kMicroFadeMs : 0.0;
+
+    int64_t pos = attack - static_cast<int64_t>(std::llround(preRollMs * 0.001 * sampleRate));
+    pos = juce::jlimit<int64_t>(0, std::max(0, numSamples - 1), pos);
+
+    if (settings_.snapToZeroCrossing)
     {
-        int len = std::min(kMicroWindow, static_cast<int>(numSamples - pos));
-        if (len <= 0) break;
-
-        float sumSq = 0.0f;
-        for (int i = 0; i < len; ++i)
-            sumSq += data[pos + i] * data[pos + i];
-        float energy = sumSq / static_cast<float>(len);
-
-        if (energy < minEnergy)
-        {
-            minEnergy = energy;
-            bestPos = pos;
-        }
+        const int back = std::max(1, static_cast<int>(std::lround(settings_.zeroCrossMaxMs * 0.001 * sampleRate)));
+        pos = analysis::snapToZeroCrossing(data, numSamples, pos, back, back / 4);
     }
-
-    return bestPos;
+    return pos;
 }
 
 // ── Stage 4b: Minimum Spacing Filter ────────────────────────────────────────

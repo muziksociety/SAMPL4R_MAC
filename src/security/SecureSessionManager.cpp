@@ -1,4 +1,5 @@
 ﻿#include "SecureSessionManager.h"
+#include "LicenseCache.h"
 
 #include <juce_core/juce_core.h>
 #include <juce_data_structures/juce_data_structures.h>
@@ -7,6 +8,8 @@
 #include <array>
 #include <cstdint>
 #include <cstring>
+#include <filesystem>
+#include <system_error>
 
 namespace samplar {
 
@@ -155,9 +158,10 @@ juce::String SecureSessionManager::encryptData(const juce::String& data) const
     if (data.isEmpty())
         return {};
 
+    // No key -> store nothing (never the token in clear text).
     const auto keyMaterial = ensureEncryptionKey();
     if (keyMaterial.isEmpty())
-        return data;
+        return {};
 
     auto derived = deriveKeyMaterial(keyMaterial);
     juce::BlowFish cipher(derived.getData(), static_cast<int>(derived.getSize()));
@@ -170,40 +174,97 @@ juce::String SecureSessionManager::encryptData(const juce::String& data) const
 
 juce::String SecureSessionManager::decryptData(const juce::String& encryptedData) const
 {
+    // Ciphertext only: anything that does not decrypt (plain text, another key,
+    // garbage) reads as "no value" - never passed through as-is.
     if (encryptedData.isEmpty())
         return {};
 
     const auto keyMaterial = ensureEncryptionKey();
     if (keyMaterial.isEmpty())
-        return encryptedData;
+        return {};
 
     auto cipherBlock = fromBase64(encryptedData);
-    if (cipherBlock.getSize() == 0)
-        return encryptedData;
+    if (cipherBlock.getSize() == 0 || (cipherBlock.getSize() % 8) != 0)
+        return {};
 
     auto derived = deriveKeyMaterial(keyMaterial);
     juce::BlowFish cipher(derived.getData(), static_cast<int>(derived.getSize()));
 
-    cipher.decrypt(cipherBlock);
-    return juce::String::fromUTF8(static_cast<const char*>(cipherBlock.getData()), static_cast<int>(cipherBlock.getSize()));
+    const int plainBytes = cipher.decrypt(cipherBlock.getData(), cipherBlock.getSize());   // -1 = bad padding
+    if (plainBytes <= 0)
+        return {};
+    return juce::String::fromUTF8(static_cast<const char*>(cipherBlock.getData()), plainBytes);
+}
+
+bool SecureSessionManager::isUsableKey(const juce::String& key)
+{
+    // A key we wrote is a juce::Uuid string: 32 hex digits. Anything else
+    // (empty, truncated, garbage) is replaced (review N-18).
+    return key.length() >= kMinKeyChars && key.containsOnly("0123456789abcdefABCDEF-");
 }
 
 juce::String SecureSessionManager::ensureEncryptionKey() const
 {
     const auto file = getEncryptionKeyFile();
-    if (file.existsAsFile())
-        return file.loadFileAsString().trim();
+    const bool existed = file.existsAsFile();
+    if (existed) {
+        const auto key = file.loadFileAsString().trim();
+        if (isUsableKey(key))
+            return key;
+        juce::Logger::writeToLog("[Session] encryption.key unusable (" + juce::String(key.length()) +
+                                 " chars) - regenerating (a stored sign-in token, if any, cannot be read)");
+    }
 
-    juce::Uuid uuid;
-    const auto key = uuid.toString();
-    file.replaceWithText(key);
-    return key;
+    // Written to a unique temp file first, then moved into place, so no reader
+    // (another plugin instance or process) ever sees a half-written key.
+    //  - no key yet: hard link = create-if-absent; if another process won the
+    //    race, ITS key is used (re-read below), so nobody encrypts with a key
+    //    that is then overwritten.
+    //  - unusable key: replaced with an atomic rename (MoveFileEx REPLACE_EXISTING).
+    const auto key = juce::Uuid().toString();
+    const auto temp = file.getSiblingFile("encryption.key.tmp-" + juce::Uuid().toString());
+    if (!temp.replaceWithText(key)) {
+        juce::Logger::writeToLog("[Session] ERROR: could not write " + temp.getFullPathName() + " - no encryption key");
+        return {};
+    }
+
+    std::error_code ec;
+    const std::filesystem::path tempPath(temp.getFullPathName().toWideCharPointer());
+    const std::filesystem::path keyPath(file.getFullPathName().toWideCharPointer());
+    if (!existed) {
+        std::filesystem::create_hard_link(tempPath, keyPath, ec);
+        if (ec && !file.existsAsFile()) {
+            // No hard links on this volume (FAT / some network drives): plain atomic rename.
+            juce::Logger::writeToLog("[Session] encryption.key hard link failed (" + juce::String(ec.message()) + ") - renaming instead");
+            ec.clear();
+            std::filesystem::rename(tempPath, keyPath, ec);
+        } else if (ec) {
+            juce::Logger::writeToLog("[Session] encryption.key already created by another instance - using it");
+        }
+        temp.deleteFile();
+    } else {
+        std::filesystem::rename(tempPath, keyPath, ec);
+        if (ec) {
+            juce::Logger::writeToLog("[Session] ERROR: encryption.key replace failed: " + juce::String(ec.message()));
+            temp.deleteFile();
+        }
+    }
+
+    // The key on disk is the one everybody uses.
+    const auto onDisk = file.loadFileAsString().trim();
+    if (!isUsableKey(onDisk)) {
+        juce::Logger::writeToLog("[Session] ERROR: encryption.key still unusable after regeneration - no encryption key");
+        return {};
+    }
+    juce::Logger::writeToLog(juce::String("[Session] encryption.key ") + (existed ? "regenerated" : "created") +
+                             (onDisk == key ? "" : " (by another instance)"));
+    return onDisk;
 }
 
 juce::File SecureSessionManager::getSessionFile(const std::string& hardwareId) const
 {
-    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                   .getChildFile("Samplar/sessions");
+    // Same root as license_cache.json (honours SAMPLAR_CACHE_DIR_OVERRIDE).
+    auto dir = LicenseCache::cacheDirectory().getChildFile("sessions");
     if (!dir.exists()) {
         dir.createDirectory();
     }
@@ -219,8 +280,7 @@ juce::File SecureSessionManager::getSessionFile(const std::string& hardwareId) c
 
 juce::File SecureSessionManager::getEncryptionKeyFile() const
 {
-    auto dir = juce::File::getSpecialLocation(juce::File::userApplicationDataDirectory)
-                   .getChildFile("Samplar/sessions");
+    auto dir = LicenseCache::cacheDirectory().getChildFile("sessions");
     if (!dir.exists()) {
         dir.createDirectory();
     }

@@ -1,0 +1,12 @@
+{
+  "approved_by": "user",
+  "date": "2026-10-20",
+  "source": "docs/revival/REVIVAL_REPORT.md section 9",
+  "decisions": {
+    "1_release_strategy": "hotfix 1.0.1 first (Phase 0)",
+    "2_licensing": "port SM5 licensing (RSA signed licences, PKCE, token-exchange, revalidate)",
+    "3_window": "redesign layout for smaller default window",
+    "4_gpu": "yes - DirectML path using SM5 onnxruntime + SM5 models",
+    "5_dead_code": "delete dead code"
+  }
+}

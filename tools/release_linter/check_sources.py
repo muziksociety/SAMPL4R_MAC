@@ -1,198 +1,121 @@
 #!/usr/bin/env python3
 """
-SM5 Release Linter — Check #1: CMake sources vs. filesystem drift.
+SAMPLAR Release Linter - Check #1: CMake sources vs. filesystem drift.
 
-Detects:
-  - ORPHAN:  .cpp file exists in src/ (or tools/) but is NOT referenced in CMakeLists.txt
-             → Will silently not be compiled; symbols will be missing at link time.
-  - PHANTOM: .cpp file referenced in CMakeLists.txt but does NOT exist on disk
-             → CMake configure will fail.
+Reads CMakeLists.txt AND every cmake/*.cmake (per-workstream target_sources,
+e.g. cmake/extra_analysis.cmake / extra_qa.cmake) with their set() variables
+resolved (${BEAT_THIS_DIR}, ${CMAKE_CURRENT_LIST_DIR}/.., ${_SAMPLAR_ROOT}, ...).
 
-Usage:
-    python tools/release_linter/check_sources.py
-    python tools/release_linter/check_sources.py --json report.json
-    python tools/release_linter/check_sources.py --graph graph.dot
+  - ORPHAN:  a .cpp/.c under a tracked dir that no CMake file references
+             -> silently not compiled (missing symbols / dead code).
+  - PHANTOM: a referenced .cpp/.c that does not exist -> configure fails.
 
-Exit codes:
-    0 = clean
-    1 = drift detected
-    2 = tool error
+Tracked dirs: src/, tests/, the tracked tools (license_cleaner, vst3_smoke_host,
+separation_probe) and the vendored sources CMake builds (third_party/beat_this/src,
+third_party/pffft/src).
+
+Exit codes: 0 clean, 1 drift, 2 tool error.
 """
 from __future__ import annotations
+
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-CMAKE_FILE = REPO_ROOT / "CMakeLists.txt"
-ALLOWLIST_FILE = Path(__file__).resolve().parent / "intentional_orphans.txt"
+from linter_common import REPO_ROOT, cmake_files, cmake_source_refs, common_args, load_allowlist, rel
 
-# Directories that should be fully tracked by CMake
-TRACKED_DIRS = ["src", "tools/license_cleaner"]
-
-# Subpaths to ignore (generated, vendored, tests, etc.)
-IGNORE_SUBSTRINGS = [
-    "/build/",
-    "/JUCE/",
-    "/third_party/",
-    "/python_bridge/",
-    "/.git/",
-    "_autogen",
+TRACKED_DIRS = [
+    "src",
+    "tests",
+    "tools/license_cleaner",
+    "tools/vst3_smoke_host",
+    "tools/separation_probe",
+    "third_party/beat_this/src",
+    "third_party/pffft/src",
 ]
+SOURCE_EXTS = {".cpp", ".c", ".cc", ".mm"}
 
 
-def parse_cmake_sources(cmake_path: Path) -> set[str]:
-    """
-    Extract every .cpp path referenced in CMakeLists.txt.
-
-    Strategy: after stripping comments, match any token that looks like a
-    relative path ending in .cpp. This catches both `set(SM5_SOURCES ...)`
-    variables and direct `target_sources(...)` entries without needing a
-    real CMake parser.
-    """
-    if not cmake_path.exists():
-        print(f"ERROR: CMakeLists.txt not found at {cmake_path}", file=sys.stderr)
-        sys.exit(2)
-
-    text = cmake_path.read_text(encoding="utf-8", errors="replace")
-    # Strip line comments
-    text = re.sub(r"#[^\n]*", "", text)
-    # Find all .cpp paths (relative, with forward slashes)
-    matches = re.findall(r"[\w./\-]+\.cpp", text)
-    # Normalize
-    return {m.replace("\\", "/").lstrip("./") for m in matches}
-
-
-def glob_disk_sources(root: Path) -> set[str]:
-    """Find every .cpp file on disk in TRACKED_DIRS, normalized to repo-relative."""
+def glob_disk_sources() -> set[str]:
     found: set[str] = set()
     for d in TRACKED_DIRS:
-        base = root / d
-        if not base.exists():
+        base = REPO_ROOT / d
+        if not base.is_dir():
             continue
-        for cpp in base.rglob("*.cpp"):
-            rel = cpp.relative_to(root).as_posix()
-            if any(ig in f"/{rel}" for ig in IGNORE_SUBSTRINGS):
-                continue
-            found.add(rel)
+        for f in base.rglob("*"):
+            if f.suffix in SOURCE_EXTS and f.is_file():
+                found.add(f.relative_to(REPO_ROOT).as_posix())
     return found
 
 
-def load_allowlist(path: Path) -> set[str]:
-    """Load intentional orphans (one path per line, # comments allowed)."""
-    if not path.exists():
-        return set()
-    allow: set[str] = set()
-    for line in path.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            allow.add(line.replace("\\", "/"))
-    return allow
-
-
 def analyze() -> dict:
-    cmake_refs = parse_cmake_sources(CMAKE_FILE)
-    disk_files = glob_disk_sources(REPO_ROOT)
-    allowlist = load_allowlist(ALLOWLIST_FILE)
+    refs = cmake_source_refs()
+    disk = glob_disk_sources()
+    allow = load_allowlist("intentional_orphans.txt")
 
-    # Keep only cmake refs that look like tracked-dir paths for a fair diff
-    cmake_tracked = {
-        p for p in cmake_refs if any(p.startswith(d + "/") for d in TRACKED_DIRS)
-    }
-
-    raw_orphans = disk_files - cmake_tracked
-    allowed_orphans = sorted(raw_orphans & allowlist)
-    orphans = sorted(raw_orphans - allowlist)
-    phantoms = sorted(cmake_tracked - disk_files)
+    tracked_refs = {p for p in refs if any(p.startswith(d + "/") for d in TRACKED_DIRS)}
+    raw_orphans = disk - tracked_refs
+    phantoms = sorted(p for p in refs if not (REPO_ROOT / p).exists() and not Path(p).exists())
 
     return {
-        "cmake_refs_total": len(cmake_refs),
-        "cmake_refs_tracked": len(cmake_tracked),
-        "disk_files_total": len(disk_files),
-        "orphans": orphans,                 # flagged: on disk, not in CMake, not allowlisted
-        "allowed_orphans": allowed_orphans, # silenced by allowlist
-        "phantoms": phantoms,               # in CMake, not on disk → configure fail
+        "cmake_files": [rel(f) for f in cmake_files()],
+        "cmake_refs_total": len(refs),
+        "cmake_refs_tracked": len(tracked_refs),
+        "disk_files_total": len(disk),
+        "orphans": sorted(raw_orphans - allow),
+        "allowed_orphans": sorted(raw_orphans & allow),
+        "stale_allowlist": sorted(a for a in allow if a not in raw_orphans),
+        "phantoms": phantoms,
+        "phantom_sources": {p: refs[p] for p in phantoms},
     }
 
 
-def print_report(report: dict) -> None:
+def print_report(r: dict) -> None:
     print("=" * 70)
-    print("SM5 RELEASE LINTER — Source/CMake Drift Check")
+    print("SAMPLAR RELEASE LINTER - Source/CMake Drift Check")
     print("=" * 70)
-    print(f"CMake references (total):   {report['cmake_refs_total']}")
-    print(f"CMake references (tracked): {report['cmake_refs_tracked']}")
-    print(f"Disk files (tracked dirs):  {report['disk_files_total']}")
+    print(f"CMake files parsed:          {', '.join(r['cmake_files'])}")
+    print(f"Source refs (total/tracked): {r['cmake_refs_total']} / {r['cmake_refs_tracked']}")
+    print(f"Source files on disk:        {r['disk_files_total']}")
     print()
-
-    orphans = report["orphans"]
-    phantoms = report["phantoms"]
-
-    if orphans:
-        print(f"[ORPHANS] {len(orphans)} .cpp file(s) on disk NOT in CMakeLists.txt:")
-        print("  (these will NOT be compiled — symbols will be missing)")
-        for p in orphans:
+    if r["orphans"]:
+        print(f"[ORPHANS] {len(r['orphans'])} source file(s) on disk referenced by NO CMake file:")
+        for p in r["orphans"]:
             print(f"  - {p}")
         print()
-
-    if phantoms:
-        print(f"[PHANTOMS] {len(phantoms)} .cpp file(s) in CMakeLists.txt but NOT on disk:")
-        print("  (CMake configure will fail)")
-        for p in phantoms:
+    if r["phantoms"]:
+        print(f"[PHANTOMS] {len(r['phantoms'])} referenced source file(s) missing on disk:")
+        for p in r["phantoms"]:
+            print(f"  - {p}   (in {', '.join(r['phantom_sources'][p])})")
+        print()
+    if r["allowed_orphans"]:
+        print(f"[ALLOWED] {len(r['allowed_orphans'])} orphan(s) in intentional_orphans.txt:")
+        for p in r["allowed_orphans"]:
             print(f"  - {p}")
         print()
-
-    if report["allowed_orphans"]:
-        print(f"[ALLOWED] {len(report['allowed_orphans'])} orphan(s) silenced via intentional_orphans.txt:")
-        for p in report["allowed_orphans"]:
+    if r["stale_allowlist"]:
+        print(f"[INFO] {len(r['stale_allowlist'])} allowlist entr(y/ies) no longer orphaned/present (prune them):")
+        for p in r["stale_allowlist"]:
             print(f"  - {p}")
         print()
-
-    if not orphans and not phantoms:
-        print("OK: CMakeLists.txt and filesystem are in sync.")
+    if not r["orphans"] and not r["phantoms"]:
+        print("OK: CMake files and filesystem are in sync.")
     print("=" * 70)
-
-
-def write_dot(report: dict, out: Path) -> None:
-    """Emit an Obsidian-style DOT graph: green = synced, red = drift."""
-    lines = [
-        "digraph sm5_sources {",
-        '  rankdir=LR;',
-        '  node [shape=box, style=filled, fontname="Helvetica"];',
-        '  graph [label="SM5 Source/CMake Sync", labelloc=t, fontsize=18];',
-        '  cmake [label="CMakeLists.txt", fillcolor="#4a90e2", fontcolor=white];',
-    ]
-    for p in report["orphans"]:
-        node = re.sub(r"[^\w]", "_", p)
-        lines.append(f'  {node} [label="{p}\\n(ORPHAN)", fillcolor="#ff6b6b", fontcolor=white];')
-        lines.append(f'  cmake -> {node} [color="#ff6b6b", style=dashed, label="missing"];')
-    for p in report["phantoms"]:
-        node = re.sub(r"[^\w]", "_", p)
-        lines.append(f'  {node} [label="{p}\\n(PHANTOM)", fillcolor="#ffa500", fontcolor=white];')
-        lines.append(f'  cmake -> {node} [color="#ffa500", label="dangling"];')
-    lines.append("}")
-    out.write_text("\n".join(lines), encoding="utf-8")
-    print(f"Wrote DOT graph: {out}")
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SM5 source/CMake drift linter")
-    ap.add_argument("--json", type=Path, help="Write JSON report to this path")
-    ap.add_argument("--graph", type=Path, help="Write Graphviz DOT to this path")
-    ap.add_argument("--quiet", action="store_true", help="Suppress stdout report")
+    ap = common_args(argparse.ArgumentParser(description="SAMPLAR source/CMake drift linter"))
     args = ap.parse_args()
-
-    report = analyze()
-
+    try:
+        report = analyze()
+    except Exception as e:  # tool error, not drift
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     if not args.quiet:
         print_report(report)
     if args.json:
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"Wrote JSON report: {args.json}")
-    if args.graph:
-        write_dot(report, args.graph)
-
     return 1 if (report["orphans"] or report["phantoms"]) else 0
 
 

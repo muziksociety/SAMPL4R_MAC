@@ -1,381 +1,336 @@
-﻿#include "OAuthBrowserAuthenticator.h"
+#include "OAuthBrowserAuthenticator.h"
+#include "LicenseServerClient.h"
 #include "../Version.h"
+#include "../security/LicenseSignature.h"
+
 #include <juce_cryptography/juce_cryptography.h>
+
+#if JUCE_WINDOWS
+ #include <windows.h>
+ #include <bcrypt.h>
+ #pragma comment(lib, "bcrypt.lib")   // OS CSPRNG (BCryptGenRandom) for state + PKCE verifier
+#endif
 
 namespace samplar {
 
-// ── Version attestation HMAC ────────────────────────────────────────────────
-// Signs (app_version + "|" + hardware_id) with a compile-time secret so the
-// server can verify the version claim wasn't edited in the browser URL bar.
-//
-// Raises the bar from "edit a query param" to "disassemble the binary and
-// extract the key". Not unbreakable on desktop — but catches casual tampering.
-//
-// The server must have the same key in OAUTH_SIGNING_KEY env var.
-// ─────────────────────────────────────────────────────────────────────────────
-static std::string computeVersionSignature(const std::string& version,
-                                            const std::string& hardwareId)
+namespace {
+
+constexpr int kFirstPort = 9876;
+constexpr int kLastPort  = 9900;
+constexpr int kJoinTimeoutMs = 5000;    // every wait in run() is cancellable; never force-kill
+constexpr int kPollMs = 100;            // socket poll: how fast a cancel is noticed
+
+// base64url without padding (RFC 4648 section 5), for the PKCE code_challenge.
+std::string base64UrlNoPad(const void* data, size_t numBytes)
 {
-    // Signing key — MUST match the license server's OAUTH_SIGNING_KEY env var.
-    static constexpr const char* signingKey = "sm5-oauth-sign-v1-a3f8c2d1e9b7";
-
-    // Pipe-separated to prevent length-extension ambiguity.
-    const std::string message = version + "|" + hardwareId;
-
-    // HMAC-SHA256 (RFC 2104)
-    constexpr size_t blockSize = 64;
-
-    juce::MemoryBlock keyBlock(signingKey, strlen(signingKey));
-    if (keyBlock.getSize() > blockSize)
-    {
-        juce::SHA256 keyHash(keyBlock.getData(), keyBlock.getSize());
-        auto raw = keyHash.getRawData();
-        keyBlock = juce::MemoryBlock(raw.getData(), raw.getSize());
-    }
-    keyBlock.setSize(blockSize, true);
-
-    juce::MemoryBlock ipad(blockSize, true);
-    juce::MemoryBlock opad(blockSize, true);
-    auto* kb = static_cast<const uint8_t*>(keyBlock.getData());
-    auto* ip = static_cast<uint8_t*>(ipad.getData());
-    auto* op = static_cast<uint8_t*>(opad.getData());
-    for (size_t i = 0; i < blockSize; ++i)
-    {
-        ip[i] = kb[i] ^ 0x36;
-        op[i] = kb[i] ^ 0x5c;
-    }
-
-    // Inner: SHA256(ipad || message)
-    juce::MemoryBlock innerInput;
-    innerInput.append(ipad.getData(), ipad.getSize());
-    innerInput.append(message.data(), message.size());
-    juce::SHA256 innerHash(innerInput.getData(), innerInput.getSize());
-    auto innerResult = innerHash.getRawData();
-
-    // Outer: SHA256(opad || innerHash)
-    juce::MemoryBlock outerInput;
-    outerInput.append(opad.getData(), opad.getSize());
-    outerInput.append(innerResult.getData(), innerResult.getSize());
-    juce::SHA256 outerHash(outerInput.getData(), outerInput.getSize());
-
-    return outerHash.toHexString().toStdString();
+    juce::String b64 = juce::Base64::toBase64(data, numBytes);
+    b64 = b64.replaceCharacter('+', '-').replaceCharacter('/', '_');
+    while (b64.endsWithChar('='))
+        b64 = b64.dropLastCharacters(1);
+    return b64.toStdString();
 }
 
-OAuthBrowserAuthenticator::OAuthBrowserAuthenticator()
-    : juce::Thread("OAuthAuthenticator")
+juce::StringPairArray parseQuery(const juce::String& query)
 {
-    juce::Logger::writeToLog("[OAuth] OAuthBrowserAuthenticator created");
+    juce::StringPairArray params;
+    juce::StringArray pairs;
+    pairs.addTokens(query, "&", "");
+    for (const auto& pair : pairs)
+    {
+        const int eqPos = pair.indexOf("=");
+        if (eqPos > 0)
+            params.set(pair.substring(0, eqPos), juce::URL::removeEscapeChars(pair.substring(eqPos + 1)));
+    }
+    return params;
+}
+
+juce::String maskEmail(const juce::String& email)
+{
+    const int at = email.indexOfChar('@');
+    if (at <= 0)
+        return email.isEmpty() ? juce::String("(empty)") : juce::String("***");
+    return email.substring(0, juce::jmin(2, at)) + "***" + email.substring(at);
+}
+
+const char* kSuccessPage =
+    "HTTP/1.1 200 OK\r\n"
+    "Content-Type: text/html; charset=utf-8\r\n"
+    "Connection: close\r\n"
+    "\r\n"
+    "<!DOCTYPE html>"
+    "<html><head><title>SAMPLAR</title>"
+    "<style>"
+    "body { font-family: 'Segoe UI', sans-serif; background: #050506; color: #fafafa; "
+    "display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }"
+    ".container { text-align: center; padding: 2rem; }"
+    ".icon { font-size: 4rem; color: #22c55e; }"
+    "h1 { color: #22c55e; margin: 1rem 0; }"
+    "p { color: #a1a1aa; }"
+    "</style></head><body>"
+    "<div class='container'>"
+    "<div class='icon'>&#10004;</div>"
+    "<h1>Sign-in received</h1>"
+    "<p>You can close this window and return to SAMPLAR.</p>"
+    "</div></body></html>";
+
+const char* kNotFound =
+    "HTTP/1.1 404 Not Found\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\nNot Found";
+
+const char* kBadState =
+    "HTTP/1.1 400 Bad Request\r\nContent-Type: text/plain\r\nConnection: close\r\n\r\n"
+    "This sign-in link is out of date. Start the sign-in again from SAMPLAR.";
+
+} // namespace
+
+OAuthBrowserAuthenticator::OAuthBrowserAuthenticator()
+    : juce::Thread("SamplarOAuth")
+{
+    juce::Logger::writeToLog("[License] OAuthBrowserAuthenticator created");
 }
 
 OAuthBrowserAuthenticator::~OAuthBrowserAuthenticator()
 {
-    // Log destructor to debug file
-    auto debugFile = juce::File::getSpecialLocation(juce::File::userDesktopDirectory).getChildFile("oauth_debug.txt");
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] ~OAuthBrowserAuthenticator DESTRUCTOR called!\n");
-
     cancelAuthentication();
-    juce::Logger::writeToLog("[OAuth] OAuthBrowserAuthenticator destroyed");
+    juce::Logger::writeToLog("[License] OAuthBrowserAuthenticator destroyed");
 }
 
-void OAuthBrowserAuthenticator::startAuthentication(
-    const std::string& serverBaseUrl,
-    const std::string& hardwareId,
-    CompletionCallback callback)
+void OAuthBrowserAuthenticator::startAuthentication(const std::string& serverBaseUrl,
+                                                    const std::string& hardwareId,
+                                                    CompletionCallback callback)
 {
-    juce::Logger::writeToLog("[OAuth] === Starting OAuth authentication ===");
-    juce::Logger::writeToLog("[OAuth] Server: " + juce::String(serverBaseUrl));
-    juce::Logger::writeToLog("[OAuth] Hardware ID: " + juce::String(hardwareId.substr(0, 16)) + "...");
+    juce::Logger::writeToLog("[License] === OAuth startAuthentication START === hwid: " +
+        juce::String(hardwareId.substr(0, 8)) + "...");
 
-    if (isRunning_)
+    if (isRunning_ && !shouldStop_)
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Authentication already in progress");
+        juce::Logger::writeToLog("[License] OAuth: already in progress - refused");
         if (callback)
         {
             AuthResult result;
-            result.success = false;
-            result.errorMessage = "Authentication already in progress";
-            juce::MessageManager::callAsync([callback, result]() {
-                callback(result);
-            });
+            result.errorMessage = "Sign-in is already in progress. Finish it in your browser.";
+            juce::MessageManager::callAsync([callback, result]() { callback(result); });
         }
         return;
     }
 
+    // A previous run may still be unwinding. Never join here (message thread):
+    // LicenseSystemService hands a fresh authenticator to every sign-in and
+    // reaps the old one later, so this is only a safety net.
+    if (isThreadRunning())
+    {
+        juce::Logger::writeToLog("[License] OAuth: previous run still closing - refused (no blocking join)");
+        if (callback)
+        {
+            AuthResult result;
+            result.errorMessage = "The previous sign-in is still closing. Click Sign in again in a moment.";
+            juce::MessageManager::callAsync([callback, result]() { callback(result); });
+        }
+        return;
+    }
+    isRunning_ = false;
+
     serverBaseUrl_ = serverBaseUrl;
     hardwareId_ = hardwareId;
-    completionCallback_ = callback;
+    completionCallback_ = std::move(callback);
     shouldStop_ = false;
-    callbackReceived_ = false;
-    callbackData_ = "";
+    http_ = std::make_shared<CancellableHttpPost>();
 
-    // Generate state token for CSRF protection
-    stateToken_ = generateStateToken();
-    juce::Logger::writeToLog("[OAuth] Generated state token: " + juce::String(stateToken_.substr(0, 8)) + "...");
+    // CSRF state + PKCE verifier (64 hex chars = valid RFC 7636 verifier). The
+    // challenge goes in the browser URL; the verifier only in the HTTPS POST.
+    stateToken_ = generateRandomToken();
+    codeVerifier_ = generateRandomToken();
 
-    // Start the authentication thread
-    startThread();
+    isRunning_ = true;   // set before the thread exists: no double start
+    if (!startThread())
+    {
+        isRunning_ = false;
+        juce::Logger::writeToLog("[License] OAuth ERROR: could not start the sign-in thread");
+        AuthResult result;
+        result.errorMessage = "Could not start sign-in. Please try again.";
+        postResult(result);
+        return;
+    }
+    juce::Logger::writeToLog("[License] === OAuth startAuthentication END (thread started) ===");
+}
+
+void OAuthBrowserAuthenticator::requestCancel()
+{
+    juce::Logger::writeToLog("[License] OAuth requestCancel - running: " +
+        juce::String(isRunning_ ? "yes" : "no"));
+
+    shouldStop_ = true;
+    if (http_ != nullptr)
+        http_->cancel();   // aborts a token exchange in flight
+    signalThreadShouldExit();
 }
 
 void OAuthBrowserAuthenticator::cancelAuthentication()
 {
-    juce::Logger::writeToLog("[OAuth] Cancelling authentication");
+    requestCancel();
 
-    // Debug: write cancellation to file
-    auto debugFile = juce::File::getSpecialLocation(juce::File::userDesktopDirectory).getChildFile("oauth_debug.txt");
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] cancelAuthentication() called - isRunning: " +
-        juce::String(isRunning_ ? "true" : "false") + ", shouldStop: " + juce::String(shouldStop_ ? "true" : "false") + "\n");
-
-    shouldStop_ = true;
-    stopCallbackServer();
-
-    if (isThreadRunning())
+    // Only the auth thread touches the socket. Every wait in run() is bounded
+    // and cancellable (socket polls of kPollMs, the exchange is aborted by
+    // http_->cancel(), no child processes), so it exits within ~0.1 s. Join,
+    // never detach, never force-kill (stopThread kills on timeout).
+    if (isThreadRunning() && !waitForThreadToExit(kJoinTimeoutMs))
     {
-        stopThread(5000);
+        juce::Logger::writeToLog("[License] OAuth WARNING: sign-in thread slow to stop - still waiting (no force-kill)");
+        waitForThreadToExit(-1);
     }
 
     isRunning_ = false;
 }
 
+void OAuthBrowserAuthenticator::postResult(const AuthResult& result)
+{
+    // The hop runs later on the message thread, possibly after this object is
+    // destroyed - so it captures a COPY of the callback, never `this`.
+    if (auto callback = completionCallback_)
+        juce::MessageManager::callAsync([callback, result]() { callback(result); });
+}
+
 void OAuthBrowserAuthenticator::run()
 {
-    isRunning_ = true;
+    juce::Logger::writeToLog("[License] OAuth thread started");
     AuthResult result;
 
-    juce::Logger::writeToLog("[OAuth] Authentication thread started");
+    auto finish = [this](AuthResult r, const char* why)
+    {
+        juce::Logger::writeToLog(juce::String("[License] OAuth finished: ") + why +
+            (r.success ? juce::String() : juce::String(" - ") + juce::String(r.errorMessage)));
+        stopCallbackServer();
+        isRunning_ = false;
+        postResult(r);
+    };
 
-    // Write to debug file for diagnostics
-    auto debugFile = juce::File::getSpecialLocation(juce::File::userDesktopDirectory).getChildFile("oauth_debug.txt");
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] OAuth thread started\n");
-
-    // 1. Start local callback server
+    // 1. Local callback server (loopback only)
     if (!startCallbackServer())
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Failed to start callback server");
-        result.success = false;
-        result.errorMessage = "Failed to start local authentication server";
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
+        result.errorMessage = "Could not start the local sign-in receiver. Close other SAMPLAR windows and try again.";
+        finish(result, "no callback port");
         return;
     }
 
-    juce::Logger::writeToLog("[OAuth] Callback server started on port " + juce::String(callbackPort_));
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] Server started on port " + juce::String(callbackPort_) + "\n");
+    // 2. Machine ID: the caller passes the licence machine ID (HWID v2, cached
+    //    per process). SAMPLAR has no legacy v1 bindings, so no wmic /
+    //    PowerShell recompute runs here any more.
+    hardwareIdV2_ = hardwareId_;
+    juce::Logger::writeToLog("[License] OAuth machine id: " + juce::String(hardwareIdV2_.empty() ? "(none)" : "present"));
 
-    // 2. Build OAuth URL and open browser
-    //    `product_id=sampl4r` tells the server which product is requesting auth
-    //    so it can filter the user's licenses and pick the SAMPL4R one rather
-    //    than e.g. an SM5 license attached to the same account.
-    std::string oauthUrl = serverBaseUrl_ + "/auth/app-login"
+    if (shouldStop_ || threadShouldExit())
+    {
+        result.errorMessage = "Sign-in cancelled";
+        finish(result, "cancelled before browser launch");
+        return;
+    }
+
+    // 3. Browser URL. product_id=SAMPL4R makes the server pick (or refuse) a
+    //    SAMPLAR licence only. flow=code: the redirect carries only ?code=&state=.
+    juce::SHA256 challengeHash(codeVerifier_.data(), codeVerifier_.size());
+    const auto challengeRaw = challengeHash.getRawData();
+    const std::string codeChallenge = base64UrlNoPad(challengeRaw.getData(), challengeRaw.getSize());
+
+    // Real version (src/Version.h, from CMake): the server gates per product.
+    const juce::String appVersion(samplar::kAppVersion);
+
+    std::string hwidV2Params;
+    if (!hardwareIdV2_.empty())
+        hwidV2Params += "&hardware_id_v2=" + urlEncode(hardwareIdV2_);
+
+    const std::string oauthUrl = serverBaseUrl_ + "/auth/app-login"
         "?callback_port=" + std::to_string(callbackPort_) +
         "&state=" + urlEncode(stateToken_) +
         "&hardware_id=" + urlEncode(hardwareId_) +
-        "&product_id=sampl4r" +
-        "&app_version=" + urlEncode(samplar::kAppVersion) +
-        "&app_signature=" + urlEncode(computeVersionSignature(samplar::kAppVersion, hardwareId_));
+        "&product_id=SAMPL4R" +
+        "&app_version=" + urlEncode(appVersion.toStdString()) +
+        "&flow=code" +
+        "&code_challenge=" + urlEncode(codeChallenge) +
+        "&code_challenge_method=S256" +
+        hwidV2Params;
 
-    juce::Logger::writeToLog("[OAuth] Attempting to open browser...");
-    juce::Logger::writeToLog("[OAuth] URL: " + juce::String(oauthUrl));
+    // Never log the URL itself: it carries the state and machine IDs.
+    juce::Logger::writeToLog("[License] OAuth opening browser: " + juce::String(serverBaseUrl_) +
+        "/auth/app-login (port " + juce::String(callbackPort_) + ", app_version " + appVersion + ")");
 
-    juce::URL url(oauthUrl);
-    bool browserLaunched = url.launchInDefaultBrowser();
-
-    juce::Logger::writeToLog("[OAuth] launchInDefaultBrowser returned: " + juce::String(browserLaunched ? "SUCCESS" : "FAILED"));
-
-    if (!browserLaunched)
+    if (!juce::URL(oauthUrl).launchInDefaultBrowser())
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Failed to open browser - check default browser settings");
-        result.success = false;
-        result.errorMessage = "Failed to open browser. Please check your default browser settings.";
-        stopCallbackServer();
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
+        result.errorMessage = "Could not open your web browser. Check your default browser settings.";
+        finish(result, "browser launch failed");
         return;
     }
 
-    juce::Logger::writeToLog("[OAuth] Browser launched successfully, waiting for callback...");
+    // 4. Wait for the redirect (matching state only).
+    juce::Logger::writeToLog("[License] OAuth waiting for the browser (timeout " +
+        juce::String(kAuthTimeoutMs / 1000) + " s)");
+    const std::string query = waitForCallback(kAuthTimeoutMs);
 
-    // 3. Wait for callback from browser
-    juce::Logger::writeToLog("[OAuth] Waiting for browser callback (timeout: " +
-        juce::String(AUTH_TIMEOUT_MS / 1000) + "s)...");
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] Waiting for callback...\n");
-
-    std::string callbackResponse = waitForCallback(AUTH_TIMEOUT_MS);
-
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] waitForCallback returned, response length: " + juce::String((int)callbackResponse.length()) + "\n");
-
-    stopCallbackServer();
-
-    if (shouldStop_)
+    if (shouldStop_ || threadShouldExit())
     {
-        juce::Logger::writeToLog("[OAuth] Authentication cancelled by user");
-        result.success = false;
-        result.errorMessage = "Authentication cancelled";
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
+        result.errorMessage = "Sign-in cancelled";
+        finish(result, "cancelled while waiting");
+        return;
+    }
+    if (query.empty())
+    {
+        result.errorMessage = "Sign-in timed out. Click Sign in to try again.";
+        finish(result, "timeout");
         return;
     }
 
-    if (callbackResponse.empty())
-    {
-        juce::Logger::writeToLog("[OAuth] ERROR: Timeout waiting for callback");
-        result.success = false;
-        result.errorMessage = "Authentication timed out. Please try again.";
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
-        return;
-    }
-
-    // 4. Parse callback - contains all license data in URL params
-    juce::Logger::writeToLog("[OAuth] Received callback, parsing license data...");
-
-    // Parse all params from callback URL
-    juce::StringPairArray params;
-    juce::StringArray pairs;
-    pairs.addTokens(juce::String(callbackResponse), "&", "");
-    for (const auto& pair : pairs)
-    {
-        int eqPos = pair.indexOf("=");
-        if (eqPos > 0)
-        {
-            juce::String key = pair.substring(0, eqPos);
-            juce::String value = juce::URL::removeEscapeChars(pair.substring(eqPos + 1));
-            params.set(key, value);
-        }
-    }
-
-    juce::String receivedState = params["state"];
-
-    // 5. Verify state token (CSRF protection)
-    if (receivedState.toStdString() != stateToken_)
-    {
-        juce::Logger::writeToLog("[OAuth] ERROR: State token mismatch - possible CSRF attack!");
-        result.success = false;
-        result.errorMessage = "Security verification failed. Please try again.";
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
-        return;
-    }
-
-    // Check for error in callback
+    const auto params = parseQuery(juce::String(query));
     if (params["error"].isNotEmpty())
     {
-        result.success = false;
         result.errorMessage = params["error"].toStdString();
-        juce::Logger::writeToLog("[OAuth] Auth failed: " + juce::String(result.errorMessage));
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
+        finish(result, "server reported an error");
         return;
     }
 
-    // Check for success param
-    if (params["success"] != "true")
+    // 5. Code -> licence data (HTTPS). The ONLY path that can activate: the old
+    //    "licence data in the callback URL" path is gone (anyone could forge it).
+    const juce::String authCode = params["code"];
+    if (authCode.isEmpty())
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Authentication not successful");
-        result.success = false;
-        result.errorMessage = "Authentication failed on server";
-        isRunning_ = false;
-        if (completionCallback_)
-        {
-            juce::MessageManager::callAsync([this, result]() {
-                if (completionCallback_) completionCallback_(result);
-            });
-        }
+        result.errorMessage = "Sign-in response was incomplete. Please try again.";
+        finish(result, "callback without code");
         return;
     }
 
-    // 6. Extract license data directly from callback URL params
-    juce::Logger::writeToLog("[OAuth] Parsing license data from callback...");
-    result.success = true;
-    result.accessToken = params["token"].toStdString();
-    result.licenseKey = params["license_key"].toStdString();
-    result.email = params["email"].toStdString();
-    result.licenseType = params["license_type"].toStdString();
-    result.expiresAt = params["expires_at"].toStdString();
-    result.hardwareId = params["hardware_id"].toStdString();
-    result.issuedAt = params["issued_at"].toStdString();
-    result.signature = params["signature"].toStdString();
-
-    // Build licenseInfo juce::var for caching
-    auto* licenseObj = new juce::DynamicObject();
-    licenseObj->setProperty("email", juce::String(result.email));
-    licenseObj->setProperty("license_key", juce::String(result.licenseKey));
-    licenseObj->setProperty("license_type", juce::String(result.licenseType));
-    licenseObj->setProperty("expires_at", juce::String(result.expiresAt));
-    licenseObj->setProperty("hardware_id", juce::String(result.hardwareId));
-    licenseObj->setProperty("signature", juce::String(result.signature));
-    licenseObj->setProperty("issued_at", juce::String(result.issuedAt));
-    result.licenseInfo = juce::var(licenseObj);
-
-    juce::Logger::writeToLog("[OAuth] License data received - email: " + params["email"] +
-                            ", type: " + params["license_type"]);
-
-    isRunning_ = false;
-
-    // 7. Call completion callback on message thread
-    if (completionCallback_)
+    result = exchangeCodeForToken(authCode.toStdString());
+    if (shouldStop_ || threadShouldExit())
     {
-        juce::MessageManager::callAsync([this, result]() {
-            if (completionCallback_) completionCallback_(result);
-        });
+        AuthResult cancelled;
+        cancelled.errorMessage = "Sign-in cancelled";
+        finish(cancelled, "cancelled during token exchange");
+        return;
     }
-
-    juce::Logger::writeToLog("[OAuth] Authentication " +
-        juce::String(result.success ? "successful" : "failed: " + result.errorMessage));
+    finish(result, result.success ? "token exchange OK" : "token exchange failed");
 }
 
 bool OAuthBrowserAuthenticator::startCallbackServer()
 {
     serverSocket_ = std::make_unique<juce::StreamingSocket>();
 
-    // Try to find an available port (9876-9900)
-    // Use empty string to listen on all local interfaces (both IPv4 and IPv6)
-    // This ensures browser can connect regardless of whether it uses localhost (IPv6) or 127.0.0.1 (IPv4)
-    for (int port = 9876; port <= 9900; ++port)
+    // Loopback only: the server always redirects to http://127.0.0.1:<port>.
+    // (1.0.0 listened on all interfaces: reachable from the LAN, firewall prompt.)
+    for (int port = kFirstPort; port <= kLastPort; ++port)
     {
-        if (serverSocket_->createListener(port, ""))
+        if (serverSocket_->createListener(port, "127.0.0.1"))
         {
             callbackPort_ = port;
-            juce::Logger::writeToLog("[OAuth] Listening on port " + juce::String(port) + " (all interfaces)");
+            juce::Logger::writeToLog("[License] OAuth listening on 127.0.0.1:" + juce::String(port));
             return true;
         }
     }
 
-    juce::Logger::writeToLog("[OAuth] ERROR: Could not find available port for callback server");
+    juce::Logger::writeToLog("[License] OAuth ERROR: no free port in " + juce::String(kFirstPort) +
+        ".." + juce::String(kLastPort));
+    serverSocket_.reset();
     return false;
 }
 
 void OAuthBrowserAuthenticator::stopCallbackServer()
 {
+    // Auth thread only.
     if (serverSocket_)
     {
         serverSocket_->close();
@@ -386,127 +341,112 @@ void OAuthBrowserAuthenticator::stopCallbackServer()
 std::string OAuthBrowserAuthenticator::waitForCallback(int timeoutMs)
 {
     if (!serverSocket_)
-        return "";
+        return {};
 
-    auto debugFile = juce::File::getSpecialLocation(juce::File::userDesktopDirectory).getChildFile("oauth_debug.txt");
-    auto startTime = juce::Time::getMillisecondCounter();
+    const auto startTime = juce::Time::getMillisecondCounter();
     int loopCount = 0;
 
-    while (!shouldStop_)
+    while (!shouldStop_ && !threadShouldExit())
     {
-        loopCount++;
+        const auto elapsed = juce::Time::getMillisecondCounter() - startTime;
+        if ((++loopCount % 300) == 1)   // every ~30 s
+            juce::Logger::writeToLog("[License] OAuth still waiting... " + juce::String((int) (elapsed / 1000)) + " s");
 
-        // Log every 10 seconds
-        auto elapsed = juce::Time::getMillisecondCounter() - startTime;
-        if (loopCount % 20 == 1) // Every ~10 seconds (20 * 500ms)
+        if (elapsed > (juce::uint32) timeoutMs)
         {
-            debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] Still waiting... elapsed: " + juce::String((int)(elapsed/1000)) + "s, shouldStop: " + juce::String(shouldStop_ ? "true" : "false") + "\n");
+            juce::Logger::writeToLog("[License] OAuth TIMEOUT after " + juce::String((int) (elapsed / 1000)) + " s");
+            return {};
         }
 
-        // Check timeout
-        if (elapsed > (juce::uint32)timeoutMs)
-        {
-            debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] TIMEOUT after " + juce::String((int)(elapsed/1000)) + "s\n");
-            return "";
-        }
+        if (serverSocket_->waitUntilReady(true, kPollMs) != 1)
+            continue;
 
-        // Wait for connection with shorter timeout for responsiveness
-        if (serverSocket_->waitUntilReady(true, 500) == 1)
-        {
-            // Accept connection
-            auto clientSocket = std::unique_ptr<juce::StreamingSocket>(
-                serverSocket_->waitForNextConnection());
+        std::unique_ptr<juce::StreamingSocket> client(serverSocket_->waitForNextConnection());
+        if (!client)
+            continue;
 
-            if (clientSocket)
+        // Read the request headers (they can arrive split across packets).
+        std::string acc;
+        acc.reserve(8192);
+        const auto readDeadline = juce::Time::getMillisecondCounter() + 4000;
+        while (juce::Time::getMillisecondCounter() < readDeadline && !shouldStop_)
+        {
+            if (client->waitUntilReady(true, kPollMs) != 1)
             {
-                juce::Logger::writeToLog("[OAuth] Client connected");
+                if (acc.find("\r\n\r\n") != std::string::npos) break;
+                continue;
+            }
+            char buf[8192];
+            const int n = client->read(buf, (int) sizeof(buf), false);
+            if (n <= 0) break;
+            acc.append(buf, (size_t) n);
+            if (acc.find("\r\n\r\n") != std::string::npos) break;
+            if (acc.size() > 65536) break;   // a callback line is tiny in the code flow
+        }
 
-                // Read HTTP request
-                char buffer[8192];
-                int bytesRead = clientSocket->read(buffer, sizeof(buffer) - 1, false);
+        const juce::String request = juce::String::fromUTF8(acc.data(), (int) acc.size());
+        const juce::String requestLine = request.upToFirstOccurrenceOf("\r\n", false, false);
+        const char* reply = kNotFound;
+        std::string accepted;
 
-                if (bytesRead > 0)
+        if (requestLine.startsWith("GET /callback?"))
+        {
+            const int queryStart = requestLine.indexOfChar('?');
+            const int httpStart = requestLine.indexOf(" HTTP/");
+            if (queryStart > 0 && httpStart > queryStart)
+            {
+                const auto query = requestLine.substring(queryStart + 1, httpStart);
+                // CSRF: only the redirect for THIS sign-in counts. Anything else
+                // (stale tab, other local process) is answered and ignored, so it
+                // cannot abort the user's sign-in.
+                if (parseQuery(query)["state"].toStdString() == stateToken_)
                 {
-                    buffer[bytesRead] = '\0';
-                    juce::String request(buffer);
-
-                    // Extract the GET request line
-                    juce::StringArray lines;
-                    lines.addTokens(request, "\r\n", "");
-
-                    if (lines.size() > 0 && lines[0].startsWith("GET /callback"))
-                    {
-                        // Extract query string
-                        juce::String requestLine = lines[0];
-                        int queryStart = requestLine.indexOf("?");
-                        int httpStart = requestLine.indexOf(" HTTP/");
-
-                        if (queryStart > 0 && httpStart > queryStart)
-                        {
-                            juce::String queryString = requestLine.substring(queryStart + 1, httpStart);
-                            juce::Logger::writeToLog("[OAuth] Received callback query: " +
-                                queryString.substring(0, 100) + "...");
-
-                            // Send HTTP response (success page)
-                            juce::String response =
-                                "HTTP/1.1 200 OK\r\n"
-                                "Content-Type: text/html; charset=utf-8\r\n"
-                                "Connection: close\r\n"
-                                "\r\n"
-                                "<!DOCTYPE html>"
-                                "<html><head><title>Success</title>"
-                                "<style>"
-                                "body { font-family: 'Segoe UI', sans-serif; background: #050506; color: #fafafa; "
-                                "display: flex; align-items: center; justify-content: center; min-height: 100vh; margin: 0; }"
-                                ".container { text-align: center; padding: 2rem; }"
-                                ".icon { font-size: 4rem; color: #22c55e; }"
-                                "h1 { color: #22c55e; margin: 1rem 0; }"
-                                "p { color: #a1a1aa; }"
-                                "</style></head><body>"
-                                "<div class='container'>"
-                                "<div class='icon'>&#10004;</div>"
-                                "<h1>Authorization Complete!</h1>"
-                                "<p>You can close this window and return to SAMPLAR.</p>"
-                                "</div></body></html>";
-
-                            clientSocket->write(response.toRawUTF8(), (int)response.getNumBytesAsUTF8());
-                            clientSocket->close();
-
-                            return queryString.toStdString();
-                        }
-                    }
-
-                    // Not the callback we're looking for - send 404
-                    juce::String response =
-                        "HTTP/1.1 404 Not Found\r\n"
-                        "Content-Type: text/plain\r\n"
-                        "Connection: close\r\n"
-                        "\r\n"
-                        "Not Found";
-                    clientSocket->write(response.toRawUTF8(), (int)response.getNumBytesAsUTF8());
+                    reply = kSuccessPage;
+                    accepted = query.toStdString();
+                    juce::Logger::writeToLog("[License] OAuth callback accepted (" +
+                        juce::String(query.length()) + " chars, values redacted)");
                 }
-
-                clientSocket->close();
+                else
+                {
+                    reply = kBadState;
+                    juce::Logger::writeToLog("[License] OAuth callback with wrong state - ignored, still waiting");
+                }
             }
         }
+
+        const juce::String response(reply);
+        client->write(response.toRawUTF8(), (int) response.getNumBytesAsUTF8());
+        client->close();
+
+        if (!accepted.empty())
+            return accepted;
     }
 
-    // Exited while loop - shouldStop must be true
-    debugFile.appendText("[" + juce::Time::getCurrentTime().toString(true, true) + "] Exited wait loop - shouldStop is TRUE (cancelled)\n");
-    return "";
+    juce::Logger::writeToLog("[License] OAuth wait loop exited - cancelled");
+    return {};
 }
 
-std::string OAuthBrowserAuthenticator::generateStateToken()
+std::string OAuthBrowserAuthenticator::generateRandomToken()
 {
-    // Generate 32 random bytes, encode as hex
-    juce::Random random(juce::Time::currentTimeMillis());
-    juce::String token;
+    uint8_t bytes[32] = {0};
+    bool ok = false;
 
-    for (int i = 0; i < 32; ++i)
+   #if JUCE_WINDOWS
+    // BCRYPT_USE_SYSTEM_PREFERRED_RNG requires a null algorithm handle.
+    ok = (BCryptGenRandom(nullptr, bytes, (ULONG) sizeof(bytes), BCRYPT_USE_SYSTEM_PREFERRED_RNG) == 0);
+   #endif
+
+    if (!ok)
     {
-        token += juce::String::toHexString(random.nextInt(256)).paddedLeft('0', 2);
+        juce::Logger::writeToLog("[License] WARNING: OS CSPRNG unavailable, using fallback RNG");
+        juce::Random random((juce::int64) (juce::Time::getHighResolutionTicks()
+                            ^ juce::Random::getSystemRandom().nextInt64()));
+        for (auto& b : bytes) b = (uint8_t) random.nextInt(256);
     }
 
+    juce::String token;
+    for (auto b : bytes)
+        token += juce::String::toHexString((int) b).paddedLeft('0', 2);
     return token.toStdString();
 }
 
@@ -517,125 +457,81 @@ std::string OAuthBrowserAuthenticator::urlEncode(const std::string& value)
 
 OAuthBrowserAuthenticator::AuthResult OAuthBrowserAuthenticator::exchangeCodeForToken(const std::string& authCode)
 {
+    juce::Logger::writeToLog("[License] === exchangeCodeForToken START === server: " + juce::String(serverBaseUrl_));
     AuthResult result;
 
-    juce::Logger::writeToLog("[OAuth] === Exchanging auth code for license data ===");
-    juce::Logger::writeToLog("[OAuth] Server: " + juce::String(serverBaseUrl_));
-
-    // Build the token exchange URL
-    juce::URL tokenUrl(juce::String(serverBaseUrl_) + "/auth/token-exchange");
-
-    // Create JSON payload (compact, no newlines)
     auto* payload = new juce::DynamicObject();
     payload->setProperty("code", juce::String(authCode));
     payload->setProperty("hardware_id", juce::String(hardwareId_));
+    const auto nonce = LicenseSignature::makeNonce();   // echoed inside the signed licence
+    payload->setProperty("nonce", nonce);
+    result.requestNonce = nonce.toStdString();
     payload->setProperty("state", juce::String(stateToken_));
-    juce::var payloadVar(payload);
+    payload->setProperty("code_verifier", juce::String(codeVerifier_));   // PKCE
+    if (!hardwareIdV2_.empty())
+        payload->setProperty("hardware_id_v2", juce::String(hardwareIdV2_));
+    const juce::var payloadVar(payload);
 
-    juce::String jsonPayload = juce::JSON::toString(payloadVar, true); // compact JSON
-    juce::Logger::writeToLog("[OAuth] Sending token exchange request...");
-    juce::Logger::writeToLog("[OAuth] JSON payload: " + jsonPayload);
+    // code + code_verifier are one-time secrets: never logged.
+    const auto url = juce::URL(juce::String(serverBaseUrl_) + "/auth/token-exchange")
+                         .withPOSTData(juce::JSON::toString(payloadVar, true));
+    const auto response = http_->post(url, "Content-Type: application/json\r\nAccept: application/json\r\n", 30000);
 
-    // Create MemoryBlock for POST body
-    juce::MemoryBlock postData(jsonPayload.toRawUTF8(), jsonPayload.getNumBytesAsUTF8());
-
-    // Use withDataToUpload for proper JSON POST
-    tokenUrl = tokenUrl.withDataToUpload("json", "", postData, "application/json");
-
-    int statusCode = 0;
-    juce::URL::InputStreamOptions options(juce::URL::ParameterHandling::inAddress);
-    options.withConnectionTimeoutMs(10000)
-           .withExtraHeaders("Accept: application/json")
-           .withStatusCode(&statusCode);
-
-    auto stream = tokenUrl.createInputStream(options);
-
-    if (!stream)
+    if (!response.connected)
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Failed to connect to token exchange endpoint");
-        result.success = false;
-        result.errorMessage = "Failed to connect to license server";
+        result.errorMessage = "Could not reach the SAMPLAR license server. Check your internet connection and try again.";
+        juce::Logger::writeToLog("[License] exchangeCodeForToken: no connection");
         return result;
     }
 
-    // Read response
-    juce::String responseBody = stream->readEntireStreamAsString();
-
-    juce::Logger::writeToLog("[OAuth] Token exchange response status: " + juce::String(statusCode));
-    juce::Logger::writeToLog("[OAuth] Response length: " + juce::String(responseBody.length()));
-
-    // Log first 500 chars of response for debugging
-    juce::Logger::writeToLog("[OAuth] Response body: " + responseBody.substring(0, 500));
-
-    if (statusCode != 200)
+    const auto json = juce::JSON::parse(response.body);
+    if (response.statusCode != 200 || !json.isObject())
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Token exchange failed with status " + juce::String(statusCode));
-        result.success = false;
-        result.errorMessage = "License server returned error: " + std::to_string(statusCode);
-
-        // Try to parse error message from response
-        auto responseJson = juce::JSON::parse(responseBody);
-        if (responseJson.isObject())
+        result.errorMessage = "The license server returned an error (" + std::to_string(response.statusCode) + "). Please try again.";
+        if (json.isObject())
         {
-            juce::String errorMsg = responseJson.getProperty("error", "").toString();
-            if (errorMsg.isNotEmpty())
-                result.errorMessage = errorMsg.toStdString();
+            const auto err = json.getProperty("error", "").toString();
+            if (err.isNotEmpty())
+                result.errorMessage = err.toStdString();
         }
+        juce::Logger::writeToLog("[License] exchangeCodeForToken: HTTP " + juce::String(response.statusCode) +
+            ", json: " + juce::String(json.isObject() ? "yes" : "no"));
         return result;
     }
 
-    // Parse the JSON response
-    auto responseJson = juce::JSON::parse(responseBody);
-    if (!responseJson.isObject())
+    if (!(bool) json.getProperty("success", false))
     {
-        juce::Logger::writeToLog("[OAuth] ERROR: Invalid JSON response from server");
-        result.success = false;
-        result.errorMessage = "Invalid response from license server";
+        result.errorMessage = json.getProperty("error", "Sign-in failed").toString().toStdString();
+        juce::Logger::writeToLog("[License] exchangeCodeForToken: server said not successful: " + juce::String(result.errorMessage));
         return result;
     }
 
-    // Check for success in response
-    bool success = responseJson.getProperty("success", false);
-    if (!success)
-    {
-        result.success = false;
-        result.errorMessage = responseJson.getProperty("error", "Authentication failed").toString().toStdString();
-        juce::Logger::writeToLog("[OAuth] Token exchange failed: " + juce::String(result.errorMessage));
-        return result;
-    }
+    result.success        = true;
+    result.accessToken    = json.getProperty("token", "").toString().toStdString();
+    result.licenseKey     = json.getProperty("license_key", "").toString().toStdString();
+    result.email          = json.getProperty("email", "").toString().toStdString();
+    result.licenseType    = json.getProperty("license_type", "").toString().toStdString();
+    result.expiresAt      = json.getProperty("expires_at", "").toString().toStdString();
+    result.hardwareId     = json.getProperty("hardware_id", "").toString().toStdString();
+    result.issuedAt       = json.getProperty("issued_at", "").toString().toStdString();
+    // Exact server-signed text + its signature (field signature_v2; the old v1
+    // "signature" is a different payload/key and is ignored).
+    result.licensePayload = json.getProperty("license_payload", "").toString().toStdString();
+    result.signatureV2    = json.getProperty("signature_v2", "").toString().toStdString();
 
-    // Extract license data from response
-    result.success = true;
-    result.accessToken = responseJson.getProperty("token", "").toString().toStdString();
-    result.licenseKey = responseJson.getProperty("license_key", "").toString().toStdString();
-    result.email = responseJson.getProperty("email", "").toString().toStdString();
-    result.licenseType = responseJson.getProperty("license_type", "").toString().toStdString();
-    result.expiresAt = responseJson.getProperty("expires_at", "").toString().toStdString();
-    result.hardwareId = responseJson.getProperty("hardware_id", "").toString().toStdString();
-    result.signature = responseJson.getProperty("signature", "").toString().toStdString();
-    result.issuedAt = responseJson.getProperty("issued_at", "").toString().toStdString();
+    // Plain fields kept for display/caching. The access token is NOT copied into
+    // the licence data: it lives only in the encrypted session file.
+    auto* info = new juce::DynamicObject();
+    info->setProperty("customer_email", juce::String(result.email));
+    info->setProperty("license_type", juce::String(result.licenseType));
+    info->setProperty("expires_at", juce::String(result.expiresAt));
+    info->setProperty("issued_at", juce::String(result.issuedAt));
+    result.licenseInfo = juce::var(info);
 
-    // Build license info object for caching
-    auto* licenseObj = new juce::DynamicObject();
-    licenseObj->setProperty("success", true);
-    licenseObj->setProperty("license_valid", true);
-    licenseObj->setProperty("access_token", juce::String(result.accessToken));
-    licenseObj->setProperty("licenseKey", juce::String(result.licenseKey));
-    licenseObj->setProperty("email", juce::String(result.email));
-    licenseObj->setProperty("license_type", juce::String(result.licenseType));
-    licenseObj->setProperty("expires_at", juce::String(result.expiresAt));
-    licenseObj->setProperty("hardware_bound_to", juce::String(result.hardwareId));
-    licenseObj->setProperty("signature", juce::String(result.signature));
-    licenseObj->setProperty("issued_at", juce::String(result.issuedAt));
-
-    result.licenseInfo = juce::var(licenseObj);
-
-    juce::Logger::writeToLog("[OAuth] Token exchange successful!");
-    juce::Logger::writeToLog("[OAuth]   Email: " + juce::String(result.email));
-    juce::Logger::writeToLog("[OAuth]   License Type: " + juce::String(result.licenseType));
-    juce::Logger::writeToLog("[OAuth]   License Key: " +
-        juce::String(result.licenseKey.empty() ? "(empty)" : result.licenseKey.substr(0, 8) + "..."));
-
+    juce::Logger::writeToLog("[License] === exchangeCodeForToken END === email " + maskEmail(juce::String(result.email)) +
+        ", type " + juce::String(result.licenseType) +
+        ", key prefix " + juce::String(result.licenseKey).upToFirstOccurrenceOf("-", false, false) +
+        ", signed payload: " + juce::String(result.licensePayload.empty() ? "absent" : "present"));
     return result;
 }
 

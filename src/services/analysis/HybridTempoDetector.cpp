@@ -1,6 +1,7 @@
 ﻿#include "HybridTempoDetector.h"
 #include "OctaveCorrection.h"
 #include "TempoRefiner.h"
+#include "AnalysisDsp.h"
 #include <cmath>
 
 namespace samplar {
@@ -12,208 +13,219 @@ namespace samplar {
 HybridTempoDetector::Result HybridTempoDetector::detect(
     const juce::AudioBuffer<float>& buffer,
     double sampleRate,
-    const Config& config)
+    const Config& config,
+    AnalysisCancel cancel)
 {
+    const double tStart = juce::Time::getMillisecondCounterHiRes();
     juce::Logger::writeToLog("=== HYBRID TEMPO DETECTOR ===");
-    juce::Logger::writeToLog("[Hybrid] Starting dual-detector analysis...");
+    juce::Logger::writeToLog("[Hybrid] START samples=" + juce::String(buffer.getNumSamples())
+        + " ch=" + juce::String(buffer.getNumChannels()) + " sr=" + juce::String(sampleRate, 0)
+        + " useBeatThis=" + juce::String(config.useBeatThis ? 1 : 0)
+        + " alwaysRunDsp=" + juce::String(config.alwaysRunDsp ? 1 : 0));
 
     Result result;
+    if (buffer.getNumSamples() <= 0 || buffer.getNumChannels() <= 0 || sampleRate <= 0.0)
+    {
+        juce::Logger::writeToLog("[Hybrid] invalid input -> no result");
+        return result;
+    }
+
+    // Cancel (shutdown / new song): checked between every stage; BeatThis also aborts its
+    // running ONNX inference. A cancelled result never falls through to the DSP fallback.
+    auto cancelledResult = [&](const char* where)
+    {
+        Result r;
+        r.cancelled = true;
+        r.elapsedMs = static_cast<float>(juce::Time::getMillisecondCounterHiRes() - tStart);
+        juce::Logger::writeToLog(juce::String("[Hybrid] CANCELLED ") + where + " after "
+            + juce::String(r.elapsedMs, 0) + " ms");
+        return r;
+    };
+    if (cancel.requested())
+        return cancelledResult("before start");
 
     // ==========================================
-    // 1. Run FFT Spectral Flux Detector
+    // 1. Beat This! FIRST (C12). The neural tracker is authoritative when
+    //    confident: it already resolves octave / metric ambiguity and gives
+    //    beats + downbeats. DSP detectors only run as a fallback.
     // ==========================================
-    juce::Logger::writeToLog("[Hybrid] Running FFT detector...");
-
-    TempoAnalyzer::Config fftConfig;
-    fftConfig.fftSize = config.fftSize;
-    fftConfig.hopSize = config.hopSize;
-    fftConfig.minBPM = config.minBPM;
-    fftConfig.maxBPM = config.maxBPM;
-    fftConfig.preferredBPM = config.preferredBPM;
-
-    auto fftResult = fftDetector_.analyze(buffer, sampleRate, fftConfig);
-    result.fftBPM = fftResult.bpm;
-    result.fftConfidence = fftResult.confidence;
-
-    juce::Logger::writeToLog("[Hybrid] FFT Result: " +
-        juce::String(result.fftBPM, 2) + " BPM (conf: " +
-        juce::String(result.fftConfidence, 2) + ")");
-
-    // ==========================================
-    // 2. Run DWT Detector
-    // ==========================================
-    juce::Logger::writeToLog("[Hybrid] Running DWT detector...");
-
-    DWTTempoDetector::Config dwtConfig;
-    dwtConfig.numLevels = config.dwtLevels;
-    dwtConfig.minBPM = config.minBPM;
-    dwtConfig.maxBPM = config.maxBPM;
-    dwtConfig.windowSeconds = config.windowSeconds;
-    dwtConfig.hopSeconds = config.windowHopSeconds;
-
-    auto dwtResult = dwtDetector_.detect(buffer, sampleRate, dwtConfig);
-    result.dwtBPM = dwtResult.bpm;
-    result.dwtConfidence = dwtResult.confidence;
-
-    juce::Logger::writeToLog("[Hybrid] DWT Result: " +
-        juce::String(result.dwtBPM, 2) + " BPM (conf: " +
-        juce::String(result.dwtConfidence, 2) + ")");
-
-    // ==========================================
-    // 3. Merge DSP Results
-    // ==========================================
-    const float fftBpmIn  = result.fftBPM;
-    const float fftConfIn = result.fftConfidence;
-    const float dwtBpmIn  = result.dwtBPM;
-    const float dwtConfIn = result.dwtConfidence;
-
-    result = mergeResults(fftBpmIn, fftConfIn, dwtBpmIn, dwtConfIn, config);
-    const float dspFusedBpm = result.bpm;
-
 #if WITH_BEAT_THIS
-    // ==========================================
-    // 3b. Beat This! Neural Detector
-    //     Runs after DSP fusion. If confident, REPLACES the result and
-    //     skips octave correction (the model already produces beat-level
-    //     timestamps — no metric-ratio ambiguity to fix).
-    // ==========================================
-    bool useBeatThisResult = false;
     if (config.useBeatThis)
     {
-        juce::Logger::writeToLog("[Hybrid] Running BeatThis! neural detector...");
-        auto bt = beatThisDetector_.detect(buffer, sampleRate);
+        juce::Logger::writeToLog("[Hybrid] Step 1: BeatThis neural detector");
+        const auto bt = beatThisDetector_.detect(buffer, sampleRate, cancel);
+        if (bt.cancelled || cancel.requested())
+            return cancelledResult("during BeatThis");
         if (bt.valid)
         {
             result.beatThisBPM        = static_cast<float>(bt.bpm);
             result.beatThisConfidence = static_cast<float>(bt.confidence);
-            useBeatThisResult = (bt.confidence >= config.beatThisConfidenceFloor);
+            result.beatTimesSec       = bt.beatTimesSec;
+            result.downbeatTimesSec   = bt.downbeatTimesSec;
+            result.beatsPerBar        = bt.beatsPerBar;
         }
+        const bool confident = bt.valid && bt.confidence >= config.beatThisConfidenceFloor;
+        juce::Logger::writeToLog("[Hybrid] BeatThis: valid=" + juce::String(bt.valid ? 1 : 0)
+            + " bpm=" + juce::String(bt.bpm, 3) + " conf=" + juce::String(bt.confidence, 2)
+            + " inliers=" + juce::String(bt.tempoInliers)
+            + " -> " + (confident ? "ACCEPT (DSP skipped)" : "REJECT (DSP fallback)"));
 
-        juce::Logger::writeToLog("[Hybrid] BeatThis: " + juce::String(result.beatThisBPM, 2)
-            + " BPM conf=" + juce::String(result.beatThisConfidence, 2)
-            + " | DSP fused: " + juce::String(dspFusedBpm, 2)
-            + " - picking " + (useBeatThisResult ? juce::String("BeatThis") : juce::String("DSP")));
-
-        if (useBeatThisResult)
+        if (confident)
         {
-            // Preserve individual DSP results in the struct for debugging.
-            result.bpm        = result.beatThisBPM;
-            result.confidence = result.beatThisConfidence;
+            result.bpm        = static_cast<float>(bt.bpm);
+            result.confidence = static_cast<float>(bt.confidence);
             result.source     = Result::Source::BeatThis;
 
-            // ==========================================
-            // 3c. Tempo Refinement (sample-level autocorr around BeatThis hint)
-            //     Beat This! gets the right octave/metric but is quantized by
-            //     the model's ~20ms frame rate (median IBI ≈ 0.640s = 93.75 BPM
-            //     for a 95 BPM track — 1.3% off). Narrow-band autocorrelation
-            //     on the ODF with parabolic peak refinement recovers sub-decimal
-            //     BPM precision. Tolerance ±5% — won't cross octave boundaries.
-            // ==========================================
-            if (result.beatThisConfidence >= 0.5f)
+            // The IBI fit over beat numbers (C16) is sub-0.1 BPM precise when
+            // it has enough beats; the ODF refiner is only needed for short
+            // material where the fit has few inliers.
+            if (bt.tempoInliers < kMinInliersForFit)
             {
-                auto refined = samplar::refineTempoNearBPM(
-                    buffer, sampleRate,
-                    static_cast<double>(result.beatThisBPM),
-                    0.05);
-
+                auto refined = samplar::refineTempoNearBPM(buffer, sampleRate, bt.bpm, 0.05);
                 if (refined.improved && refined.confidence > 0.15)
                 {
-                    juce::Logger::writeToLog("[Hybrid] Refined "
-                        + juce::String(result.beatThisBPM, 2)
-                        + " -> " + juce::String(refined.refinedBPM, 2)
-                        + " (conf=" + juce::String(refined.confidence, 2) + ")");
-                    result.bpm    = static_cast<float>(refined.refinedBPM);
-                    result.source = Result::Source::BeatThis;  // still neural-decided
+                    juce::Logger::writeToLog("[Hybrid] few inliers (" + juce::String(bt.tempoInliers)
+                        + ") -> refined " + juce::String(bt.bpm, 3) + " -> " + juce::String(refined.refinedBPM, 3));
+                    result.bpm = static_cast<float>(refined.refinedBPM);
                 }
                 else
                 {
-                    juce::Logger::writeToLog("[Hybrid] Refinement skipped (improved="
-                        + juce::String(refined.improved ? 1 : 0)
-                        + " conf=" + juce::String(refined.confidence, 3) + ")");
+                    juce::Logger::writeToLog("[Hybrid] refinement skipped (improved="
+                        + juce::String(refined.improved ? 1 : 0) + " conf=" + juce::String(refined.confidence, 3) + ")");
                 }
             }
+            else
+            {
+                juce::Logger::writeToLog("[Hybrid] IBI fit has " + juce::String(bt.tempoInliers)
+                    + " inliers -> ODF refiner not needed");
+            }
+
+            result.preCorrectionBPM = result.bpm;
+            result.correctedBPM     = result.bpm;
+
+            if (! config.alwaysRunDsp)
+            {
+                result.elapsedMs = static_cast<float>(juce::Time::getMillisecondCounterHiRes() - tStart);
+                juce::Logger::writeToLog("[Hybrid] END bpm=" + juce::String(result.bpm, 3)
+                    + " conf=" + juce::String(result.confidence, 2) + " source=BeatThis elapsed="
+                    + juce::String(result.elapsedMs, 0) + " ms");
+                return result;
+            }
+            juce::Logger::writeToLog("[Hybrid] alwaysRunDsp=1 -> running DSP detectors for diagnostics only");
         }
     }
-#else
-    (void) dspFusedBpm; // unused without WITH_BEAT_THIS
 #endif
 
     // ==========================================
-    // 4. Octave Correction (Schreiber & Müller 2014)
-    //    Post-step on the fused candidate. Reversible via Config flag.
-    //    SKIPPED when BeatThis result was selected.
+    // 2. DSP fallback: FFT spectral flux + DWT on a mono downmix (the old
+    //    code analysed channel 0 only), merged, then octave correction.
     // ==========================================
-#if WITH_BEAT_THIS
-    const bool skipOctaveCorrection = (result.source == Result::Source::BeatThis);
-#else
-    const bool skipOctaveCorrection = false;
-#endif
+    const bool beatThisAccepted = (result.source == Result::Source::BeatThis);
+    const Result beatThisPart = result;
+    result.dspFallbackUsed = ! beatThisAccepted;
+    juce::Logger::writeToLog("[Hybrid] Step 2: DSP detectors (FFT + DWT)");
+
+    if (cancel.requested())
+        return cancelledResult("before DSP fallback");
+    const juce::AudioBuffer<float> mono = analysis::downmixToMonoBuffer(buffer);
+
+    TempoAnalyzer::Config fftConfig;
+    fftConfig.fftSize      = config.fftSize;
+    fftConfig.hopSize      = config.hopSize;
+    fftConfig.minBPM       = config.minBPM;
+    fftConfig.maxBPM       = config.maxBPM;
+    fftConfig.preferredBPM = config.preferredBPM;
+    const auto fftResult = fftDetector_.analyze(mono, sampleRate, fftConfig);
+    juce::Logger::writeToLog("[Hybrid] FFT Result: " + juce::String(fftResult.bpm, 2)
+        + " BPM (conf: " + juce::String(fftResult.confidence, 2) + ")");
+
+    if (cancel.requested())
+        return cancelledResult("after FFT detector");
+    DWTTempoDetector::Config dwtConfig;
+    dwtConfig.numLevels     = config.dwtLevels;
+    dwtConfig.minBPM        = config.minBPM;
+    dwtConfig.maxBPM        = config.maxBPM;
+    dwtConfig.windowSeconds = config.windowSeconds;
+    dwtConfig.hopSeconds    = config.windowHopSeconds;
+    const auto dwtResult = dwtDetector_.detect(mono, sampleRate, dwtConfig);
+    juce::Logger::writeToLog("[Hybrid] DWT Result: " + juce::String(dwtResult.bpm, 2)
+        + " BPM (conf: " + juce::String(dwtResult.confidence, 2) + ")");
+
+    if (cancel.requested())
+        return cancelledResult("after DWT detector");
+    Result dsp = mergeResults(fftResult.bpm, fftResult.confidence,
+                              dwtResult.bpm, dwtResult.confidence, config);
+
+    if (beatThisAccepted)
+    {
+        // Diagnostics-only DSP run: keep the BeatThis answer.
+        result = beatThisPart;
+        result.fftBPM = dsp.fftBPM; result.fftConfidence = dsp.fftConfidence;
+        result.dwtBPM = dsp.dwtBPM; result.dwtConfidence = dsp.dwtConfidence;
+        result.elapsedMs = static_cast<float>(juce::Time::getMillisecondCounterHiRes() - tStart);
+        juce::Logger::writeToLog("[Hybrid] END bpm=" + juce::String(result.bpm, 3)
+            + " source=BeatThis (DSP diag fft=" + juce::String(dsp.fftBPM, 2) + " dwt=" + juce::String(dsp.dwtBPM, 2)
+            + ") elapsed=" + juce::String(result.elapsedMs, 0) + " ms");
+        return result;
+    }
+
+    // Keep whatever BeatThis produced (low-confidence beats) for callers.
+    dsp.beatThisBPM        = beatThisPart.beatThisBPM;
+    dsp.beatThisConfidence = beatThisPart.beatThisConfidence;
+    dsp.beatTimesSec       = beatThisPart.beatTimesSec;
+    dsp.downbeatTimesSec   = beatThisPart.downbeatTimesSec;
+    dsp.beatsPerBar        = beatThisPart.beatsPerBar;
+    dsp.dspFallbackUsed    = true;
+    result = dsp;
+
+    // ==========================================
+    // 3. Octave Correction (Schreiber & Mueller 2014) on the DSP candidate.
+    // ==========================================
     result.preCorrectionBPM = result.bpm;
-    if (skipOctaveCorrection)
+    if (config.enableOctaveCorrection && result.bpm > 0.0f)
     {
-        juce::Logger::writeToLog("[Hybrid] Octave correction SKIPPED (BeatThis result is authoritative)");
-        result.correctedBPM = result.bpm;
-    }
-    else if (config.enableOctaveCorrection && result.bpm > 0.0f)
-    {
-        juce::Logger::writeToLog("[Hybrid] Running octave correction post-step...");
-
-        // Build a mono view for the ODF computation. Detectors above accept a
-        // multi-channel buffer; reduce to mono here (recomputing ODF inside
-        // OctaveCorrection is cheap — one FFT pass).
-        juce::AudioBuffer<float> mono;
-        if (buffer.getNumChannels() == 1)
-        {
-            mono.setSize(1, buffer.getNumSamples(), false, false, true);
-            mono.copyFrom(0, 0, buffer, 0, 0, buffer.getNumSamples());
-        }
-        else if (buffer.getNumChannels() >= 2)
-        {
-            mono.setSize(1, buffer.getNumSamples(), false, false, true);
-            mono.clear();
-            const int nCh = buffer.getNumChannels();
-            const float scale = 1.0f / static_cast<float>(nCh);
-            for (int ch = 0; ch < nCh; ++ch)
-                mono.addFrom(0, 0, buffer, ch, 0, buffer.getNumSamples(), scale);
-        }
-
         auto oc = correctOctaveFromBuffer(static_cast<double>(result.bpm), mono, sampleRate);
         result.onsetDensityHz = static_cast<float>(oc.onsetDensityHz);
-
+        result.octaveCorrected = oc.wasCorrected;
+        result.correctedBPM    = static_cast<float>(oc.wasCorrected ? oc.correctedBPM : result.bpm);
         if (oc.wasCorrected)
-        {
-            result.octaveCorrected = true;
-            result.correctedBPM    = static_cast<float>(oc.correctedBPM);
-            result.bpm             = static_cast<float>(oc.correctedBPM);
-            juce::Logger::writeToLog("[Hybrid] Octave-corrected: " +
-                juce::String(result.preCorrectionBPM, 2) + " -> " +
-                juce::String(result.bpm, 2) + " | " + oc.reasoning);
-        }
-        else
-        {
-            result.octaveCorrected = false;
-            result.correctedBPM    = result.bpm;
-            juce::Logger::writeToLog("[Hybrid] Octave correction: no change | " + oc.reasoning);
-        }
+            result.bpm = static_cast<float>(oc.correctedBPM);
+        juce::Logger::writeToLog("[Hybrid] Octave correction: " + juce::String(result.preCorrectionBPM, 2)
+            + " -> " + juce::String(result.bpm, 2) + " | " + oc.reasoning);
     }
     else
     {
         result.correctedBPM = result.bpm;
-        if (!config.enableOctaveCorrection)
+        if (! config.enableOctaveCorrection)
             juce::Logger::writeToLog("[Hybrid] Octave correction DISABLED via config");
     }
 
-    juce::Logger::writeToLog("=== HYBRID RESULT ===");
-    juce::Logger::writeToLog("[Hybrid] Final BPM: " + juce::String(result.bpm, 2));
-    juce::Logger::writeToLog("[Hybrid] Final Confidence: " + juce::String(result.confidence, 2));
-    juce::Logger::writeToLog("[Hybrid] Source: " + result.getSourceName());
+    if (cancel.requested())
+        return cancelledResult("after octave correction");
+    // Precision pass on the DSP answer (same narrow-band refiner as before).
+    if (result.bpm > 0.0f)
+    {
+        auto refined = samplar::refineTempoNearBPM(buffer, sampleRate, result.bpm, 0.03);
+        if (refined.improved && refined.confidence > 0.15)
+        {
+            juce::Logger::writeToLog("[Hybrid] DSP refined " + juce::String(result.bpm, 3)
+                + " -> " + juce::String(refined.refinedBPM, 3));
+            result.bpm = static_cast<float>(refined.refinedBPM);
+        }
+    }
 
+    result.elapsedMs = static_cast<float>(juce::Time::getMillisecondCounterHiRes() - tStart);
+    juce::Logger::writeToLog("=== HYBRID RESULT ===");
+    juce::Logger::writeToLog("[Hybrid] END bpm=" + juce::String(result.bpm, 3)
+        + " conf=" + juce::String(result.confidence, 2) + " source=" + result.getSourceName()
+        + " (DSP fallback) elapsed=" + juce::String(result.elapsedMs, 0) + " ms");
     return result;
 }
 
 HybridTempoDetector::Result HybridTempoDetector::detect(
     const juce::File& audioFile,
-    const Config& config)
+    const Config& config,
+    AnalysisCancel cancel)
 {
     if (!formatManagerInitialized_)
     {
@@ -249,7 +261,7 @@ HybridTempoDetector::Result HybridTempoDetector::detect(
         }
     }
 
-    return detect(buffer, reader->sampleRate, config);
+    return detect(buffer, reader->sampleRate, config, cancel);
 }
 
 //==============================================================================

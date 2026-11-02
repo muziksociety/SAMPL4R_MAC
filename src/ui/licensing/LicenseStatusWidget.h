@@ -51,7 +51,7 @@ private:
     juce::ProgressBar graceProgressBar_;
     juce::TextButton activateButton_{ "Activate" };
     juce::TextButton renewButton_{ "Renew" };
-    juce::TextButton supportButton_{ "Support" };
+    juce::TextButton supportButton_{ "Account" };   // opens the account portal (licences, devices)
 
     LicenseSystemService::LicenseStatus lastStatus_{ LicenseSystemService::LicenseStatus::NotInitialised };
 

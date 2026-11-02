@@ -1,4 +1,4 @@
-﻿#include "StemWaveformComponent.h"
+#include "StemWaveformComponent.h"
 
 namespace samplar {
 
@@ -18,8 +18,7 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
         if (!stem) return;
         model_.pushUndoState("Stem solo");
         model_.setSolo(stemIndex_, !stem->solo);
-        soloBtn_.setColour(juce::TextButton::textColourOffId,
-                           stem->solo ? juce::Colours::yellow : juce::Colours::grey);
+        refreshStemButtons();
         repaint();
     };
 
@@ -34,8 +33,7 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
         if (!stem) return;
         model_.pushUndoState("Stem mute");
         model_.setMute(stemIndex_, !stem->mute);
-        muteBtn_.setColour(juce::TextButton::textColourOffId,
-                           stem->mute ? juce::Colours::red : juce::Colours::grey);
+        refreshStemButtons();
         repaint();
     };
 
@@ -117,7 +115,7 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
         return t.retainCharacters("-0123456789").getDoubleValue();
     };
     pitchKnob_.setDoubleClickReturnValue(true, 0.0);
-    pitchKnob_.setTooltip(
+    pitchKnob_.setBaseTooltip(
         "Pitch: shift this stem up or down by -12 to +12 semitones.\n"
         "Time is preserved (does not affect playback speed).\n"
         "Double-click to reset to 0.");
@@ -128,9 +126,13 @@ StemWaveformComponent::StemWaveformComponent(SModeSegmentModel& model, int stemI
         if (onPitchChanged)
             onPitchChanged(stemIndex_, (float) pitchKnob_.getValue());
     };
+    pitchKnob_.onContextMenu = [this]()
+    {
+        if (onPitchMidiMenu) onPitchMidiMenu(stemIndex_);
+    };
 
     // ── Control panel redesign widgets ───────────────────────────────────────
-    addAndMakeVisible(chevronBtn_);
+    addChildComponent(chevronBtn_);   // D-10: no action is wired to it -> never shown
     chevronBtn_.setColour(juce::TextButton::buttonColourId, juce::Colours::transparentBlack);
     chevronBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::lightgrey);
 
@@ -363,11 +365,13 @@ void StemWaveformComponent::computeSpectralColors()
     }
 
     spectralReady_ = true;
+    waveCacheValid_ = false;
     juce::Logger::writeToLog("✅ [StemWaveform] Spectral colors: " + juce::String(spectralColors_.size()) + " slices");
     repaint();
 }
 
-void StemWaveformComponent::computeSpectralColorsAsync()
+void StemWaveformComponent::computeSpectralColorsAsync(const std::function<bool(std::function<void()>)>& runBackground,
+                                                       const std::atomic<bool>* cancel)
 {
     auto* stem = model_.getStem(stemIndex_);
     if (!stem || stem->audioBuffer.getNumSamples() == 0) return;
@@ -378,32 +382,40 @@ void StemWaveformComponent::computeSpectralColorsAsync()
         spectralColors_ = stem->spectralColors;
         spectralDuration_ = stem->spectralDuration;
         spectralReady_ = true;
+        waveCacheValid_ = false;
         repaint();
         juce::Logger::writeToLog("[StemWaveform] Spectral colors restored from cache ("
                                  + juce::String(spectralColors_.size()) + " slices)");
         return;
     }
 
-    // ── Slow path: compute on background thread ──
-    // Get raw pointers + metadata for the thread. The audio buffers are owned
-    // by the processor-lifetime SModeSegmentModel — they won't be deleted
-    // while we read them.
-    const float* const* readPtrs = stem->audioBuffer.getArrayOfReadPointers();
-    int numCh = stem->audioBuffer.getNumChannels();
-    int totalSmp = stem->audioBuffer.getNumSamples();
+    // ── Slow path: compute on the processor-owned worker pool ──
+    // Copy the audio HERE (message thread, a memcpy): a new song load clears
+    // the model while the job runs, so the job must never hold raw pointers
+    // into it. The job is drained by SModeService::shutdown(), so it never
+    // outlives the plugin DLL.
+    if (!runBackground)
+    {
+        juce::Logger::writeToLog("[StemWaveform] no background runner - computing spectral colours synchronously");
+        computeSpectralColors();
+        return;
+    }
+
+    // B33: share the model's immutable stem buffer (refcounted) instead of
+    // copying the whole stem per lane on the message thread.
+    auto shared = model_.getSharedStemAudio(stemIndex_);
+    if (shared == nullptr || shared->getNumSamples() == 0) return;
+    int numCh = shared->getNumChannels();
+    int totalSmp = shared->getNumSamples();
     double sr = model_.getSampleRate();
     int stemIdx = stemIndex_;
+    const uint64_t generation = model_.getContentGeneration();
+    juce::Logger::writeToLog("[StemWaveform] spectral job: stem=" + juce::String(stemIdx)
+                             + " samples=" + juce::String(totalSmp) + " (shared buffer, no copy)");
 
-    // Move the buffer COPY into the background thread instead of blocking
-    // the message thread. Raw pointers are safe because the model outlives
-    // any editor component.
-    std::thread([this, readPtrs, totalSmp, sr, numCh, stemIdx]() mutable
+    auto safeThis = juce::Component::SafePointer<StemWaveformComponent>(this);
+    const bool queued = runBackground([safeThis, shared, totalSmp, sr, numCh, stemIdx, generation, cancel]()
     {
-        // Copy audio data HERE (background thread, not message thread)
-        std::vector<std::vector<float>> channelData;
-        channelData.reserve(static_cast<size_t>(numCh));
-        for (int ch = 0; ch < numCh; ++ch)
-            channelData.emplace_back(readPtrs[ch], readPtrs[ch] + totalSmp);
         constexpr int fftOrder = 11;
         constexpr int fftSize = 1 << fftOrder;
         juce::dsp::FFT fft(fftOrder);
@@ -424,6 +436,8 @@ void StemWaveformComponent::computeSpectralColorsAsync()
 
         for (int slice = 0; slice < numSlices; ++slice)
         {
+            if ((slice & 255) == 0 && cancel != nullptr && cancel->load())
+                return;   // plugin unloading: drop the half-done colours (worker: no logging)
             int64_t sliceStart = static_cast<int64_t>(slice) * samplesPerSlice;
             int samplesToRead = juce::jmin(fftSize, static_cast<int>(totalSmp - sliceStart));
             if (samplesToRead <= 0) { colors.push_back(juce::Colours::darkgrey); continue; }
@@ -431,7 +445,7 @@ void StemWaveformComponent::computeSpectralColorsAsync()
             std::fill(fftData.begin(), fftData.end(), 0.0f);
             for (int ch = 0; ch < numCh; ++ch)
             {
-                const float* data = channelData[static_cast<size_t>(ch)].data();
+                const float* data = shared->getReadPointer(ch);
                 for (int s = 0; s < samplesToRead; ++s)
                     fftData[static_cast<size_t>(s)] += data[sliceStart + s];
             }
@@ -475,8 +489,19 @@ void StemWaveformComponent::computeSpectralColorsAsync()
         }
 
         // Apply on message thread + cache in model for reconnect
-        juce::MessageManager::callAsync([this, colors = std::move(colors), duration, stemIdx]()
+        juce::MessageManager::callAsync([safeThis, colors = std::move(colors), duration, stemIdx, generation]()
         {
+            auto* self = safeThis.getComponent();
+            if (self == nullptr) return;   // lane destroyed (editor closed / stems reloaded)
+            if (generation != self->model_.getContentGeneration())
+            {
+                juce::Logger::writeToLog("[StemWaveform] spectral result dropped (song changed)");
+                return;
+            }
+            auto& spectralColors_ = self->spectralColors_;
+            auto& spectralDuration_ = self->spectralDuration_;
+            auto& spectralReady_ = self->spectralReady_;
+            auto& model_ = self->model_;
             spectralColors_ = colors;
             spectralDuration_ = duration;
             spectralReady_ = true;
@@ -490,19 +515,47 @@ void StemWaveformComponent::computeSpectralColorsAsync()
                 s->spectralReady = true;
             }
 
-            repaint();
+            self->waveCacheValid_ = false;
+            self->repaint();
             juce::Logger::writeToLog("✅ [StemWaveform] Spectral async done: " + juce::String(spectralColors_.size()) + " slices (cached in model)");
         });
-    }).detach();
+    });
+
+    if (!queued)
+    {
+        juce::Logger::writeToLog("[StemWaveform] background runner refused job - computing synchronously");
+        computeSpectralColors();
+    }
 }
 
 // ── View Range ───────────────────────────────────────────────────────────────
 
 void StemWaveformComponent::setViewRange(double startTime, double endTime)
 {
+    if (startTime == viewStartTime_ && endTime == viewEndTime_) return;
     viewStartTime_ = startTime;
     viewEndTime_ = endTime;
+    waveCacheValid_ = false;
     repaint();
+}
+
+int StemWaveformComponent::playheadColumn(double timeSeconds) const
+{
+    if (timeSeconds < 0.0 || waveArea_.isEmpty()) return -1;
+    if (timeSeconds < viewStartTime_ || timeSeconds > viewEndTime_) return -1;
+    return timeToPixel(timeSeconds);
+}
+
+void StemWaveformComponent::setPlayheadTime(double timeSeconds)
+{
+    if (timeSeconds == playheadTime_) return;
+    const int oldX = playheadColumn(playheadTime_);
+    playheadTime_ = timeSeconds;
+    const int newX = playheadColumn(playheadTime_);
+    if (oldX == newX) return;
+    // drawPlayhead() paints x-1 .. x+1: repaint a 5 px column at each position.
+    if (oldX >= 0) repaint(oldX - 2, waveArea_.getY(), 5, waveArea_.getHeight());
+    if (newX >= 0) repaint(newX - 2, waveArea_.getY(), 5, waveArea_.getHeight());
 }
 
 // ── Layout ───────────────────────────────────────────────────────────────────
@@ -511,65 +564,85 @@ void StemWaveformComponent::resized()
 {
     auto area = getLocalBounds();
     controlArea_ = area.removeFromLeft(kControlWidth);
+    if (area.getWidth() != waveArea_.getWidth() || area.getHeight() != waveArea_.getHeight())
+        waveCacheValid_ = false;
     waveArea_ = area;
 
-    // ── New control panel layout (178px wide) ────────────────────────────────
-    // The leftmost 4px is the accent strip (painted in paint(), not a widget).
-    // An additional 6px inset matches the card margin drawn in paint().
+    // Card interior: accent strip 4, card inset 6 (all sides), card padding 6 x 4.
     auto panel = controlArea_;
-    panel.removeFromLeft(4);   // reserve accent strip
-    panel.removeFromLeft(6);   // card left inset (kPanelInset)
-    panel.removeFromRight(6);  // card right inset
-    panel = panel.reduced(0, 6);  // card top/bottom inset
-    panel = panel.reduced(6, 4);  // internal padding within the card
+    panel.removeFromLeft(4);
+    panel = panel.withTrimmedLeft(kPanelInset).withTrimmedRight(kPanelInset).reduced(0, kPanelInset);
+    panel = panel.reduced(6, 4);   // 132 x (h - 20)
 
-    // Row 4 (bottom, ~58 px): pitch knob centered (BIGGER, ~50 px diameter)
-    // Removed FIRST from the bottom of the panel so rows 1-3 keep their
-    // existing top-anchored layout above it. If the lane is vertically
-    // tight, the knob row is allowed to push past the visual centre — the
-    // eye row 3 stays at its current Y because it's removed from the top
-    // of `panel` next.
-    constexpr int kKnobRowH = 44;
-    constexpr int kKnobDiameter = 38;
-    juce::Rectangle<int> knobRow;
-    if (panel.getHeight() > kKnobRowH + 30)
-        knobRow = panel.removeFromBottom(kKnobRowH);
-    else
-        knobRow = panel.removeFromBottom(juce::jmax(kKnobDiameter, panel.getHeight() / 3));
+    const auto mode = getHeight() >= kTallLaneH    ? HeaderMode::Tall
+                    : getHeight() >= kCompactLaneH ? HeaderMode::Compact
+                                                   : HeaderMode::Mini;
+    applyHeaderMode(mode);
 
-    // Row 1 (28px): chevron ▾ + stem icon + stem name
-    auto row1 = panel.removeFromTop(28);
-    chevronBtn_.setBounds(row1.removeFromLeft(20));
-    row1.removeFromLeft(4);
-    stemIconBtn_.setBounds(row1.removeFromLeft(24));
-    row1.removeFromLeft(6);
-    stemNameLabel_.setBounds(row1);
-    panel.removeFromTop(6);
-
-    // Row 2 (28px): S / M / L horizontally — knob is now in row 4, so S/M/L
-    // gets the full row width back (split equally three ways).
-    auto row2 = panel.removeFromTop(28).reduced(0, 3);
-    const int btnsAvail = juce::jmax(60, row2.getWidth());
-    const int btnW = juce::jmax(18, (btnsAvail - 12) / 3);
-    soloBtn_.setBounds(row2.removeFromLeft(btnW));
-    row2.removeFromLeft(6);
-    muteBtn_.setBounds(row2.removeFromLeft(btnW));
-    row2.removeFromLeft(6);
-    linkBtn_.setBounds(row2.removeFromLeft(btnW));
-    panel.removeFromTop(6);
-
-    // Row 3 (32px): eye / focus button
-    auto row3 = panel.removeFromTop(22);
-    focusBtn_.setBounds(row3.removeFromLeft(24).withHeight(20));
-
-    // Row 4: large pitch knob, centered horizontally within the control panel.
+    auto placeSmlEye = [this](juce::Rectangle<int> row, int w, int gap, bool withEye)
     {
-        const int diameter = juce::jmin(kKnobDiameter,
-                                        juce::jmin(knobRow.getWidth(), knobRow.getHeight()));
-        const int x = knobRow.getX() + (knobRow.getWidth()  - diameter) / 2;
-        const int y = knobRow.getY() + (knobRow.getHeight() - diameter) / 2;
-        pitchKnob_.setBounds(x, y, diameter, diameter);
+        for (auto* b : std::initializer_list<juce::Component*> { &soloBtn_, &muteBtn_, &linkBtn_ })
+        {
+            b->setBounds(row.removeFromLeft(w));
+            row.removeFromLeft(gap);
+        }
+        if (withEye) focusBtn_.setBounds(row.removeFromLeft(w));
+    };
+
+    if (mode == HeaderMode::Tall)
+    {
+        auto row1 = panel.removeFromTop(26);
+        stemIconBtn_.setBounds(row1.removeFromLeft(22));
+        row1.removeFromLeft(6);
+        focusBtn_.setBounds(row1.removeFromRight(22).withSizeKeepingCentre(22, 20));
+        row1.removeFromRight(4);
+        stemNameLabel_.setBounds(row1);
+        panel.removeFromTop(6);
+        auto row2 = panel.removeFromTop(24);
+        placeSmlEye(row2, (row2.getWidth() - 12) / 3, 6, false);
+        panel.removeFromTop(6);
+        const int d = juce::jmin(64, juce::jmin(panel.getWidth(), panel.getHeight()));
+        pitchKnob_.setBounds(panel.withSizeKeepingCentre(d, d));
     }
+    else if (mode == HeaderMode::Compact)
+    {
+        auto knobCol = panel.removeFromRight(40);
+        panel.removeFromRight(6);
+        auto rows = panel.withSizeKeepingCentre(panel.getWidth(), juce::jmin(panel.getHeight(), 42));
+        auto row1 = rows.removeFromTop(18);
+        stemIconBtn_.setBounds(row1.removeFromLeft(16));
+        row1.removeFromLeft(4);
+        stemNameLabel_.setBounds(row1);
+        rows.removeFromTop(4);
+        placeSmlEye(rows.removeFromTop(20), 20, 2, true);   // 4 x 20 + 3 x 2 = 86
+        const int d = juce::jmin(40, knobCol.getHeight());
+        pitchKnob_.setBounds(knobCol.withSizeKeepingCentre(d, d));
+    }
+    else // Mini
+    {
+        auto row = panel.withSizeKeepingCentre(panel.getWidth(), juce::jmin(20, panel.getHeight()));
+        pitchKnob_.setBounds(row.removeFromRight(row.getHeight()));
+        row.removeFromRight(4);
+        placeSmlEye(row, 20, 2, true);
+    }
+}
+
+void StemWaveformComponent::applyHeaderMode(HeaderMode m)
+{
+    if (m == headerMode_ && headerModeApplied_) return;
+    headerMode_ = m;
+    headerModeApplied_ = true;
+    const bool tall = (m == HeaderMode::Tall);
+    pitchKnob_.setTextBoxStyle(tall ? juce::Slider::TextBoxBelow : juce::Slider::NoTextBox, true, 36, 14);
+    auto* top = getTopLevelComponent();
+    pitchKnob_.setPopupDisplayEnabled(! tall, ! tall, top != this ? top : nullptr, 1500);
+    stemNameLabel_.setFont(juce::FontOptions(tall ? 14.0f : 13.0f, juce::Font::bold));
+    stemIconBtn_.setVisible(m != HeaderMode::Mini);
+    stemNameLabel_.setVisible(m != HeaderMode::Mini);
+    chevronBtn_.setVisible(false);   // D-10: dead control
+    juce::Logger::writeToLog("[StemWaveform] stem=" + juce::String(stemIndex_) + " header mode -> "
+        + juce::String(tall ? "Tall" : (m == HeaderMode::Compact ? "Compact" : "Mini"))
+        + " (h=" + juce::String(getHeight()) + ")");
 }
 
 // ── Visibility ───────────────────────────────────────────────────────────────
@@ -584,6 +657,12 @@ void StemWaveformComponent::visibilityChanged()
 
 void StemWaveformComponent::paint(juce::Graphics& g)
 {
+    struct PaintTimer
+    {
+        double t0 { juce::Time::getMillisecondCounterHiRes() };
+        ~PaintTimer() { debugPaintMs_ += juce::Time::getMillisecondCounterHiRes() - t0; ++debugPaintCount_; }
+    } paintTimer;
+
     // Lane corner radius — clip the whole paint pass to a rounded rect so the
     // waveform, accent strip, and control panel card all respect the curves.
     const float kLaneRadius = 12.0f;
@@ -654,7 +733,6 @@ void StemWaveformComponent::paint(juce::Graphics& g)
     // Drawn as a visually distinct rounded box inset from the lane edges,
     // sitting to the right of the 4px accent strip.
     {
-        static constexpr int kPanelInset = 6;
         juce::Rectangle<float> card(
             4.0f + (float)kPanelInset,                      // left: after accent strip + inset
             (float)kPanelInset,                              // top inset
@@ -737,7 +815,7 @@ void StemWaveformComponent::paint(juce::Graphics& g)
         const int pct = juce::roundToInt(loadingProgress_ * 100.0f);
         juce::String label = "SEPARATING - " + juce::String(pct) + "%";
         g.setColour(juce::Colours::white.withAlpha(0.95f));
-        g.setFont(juce::FontOptions(juce::jmax(14.0f, waveF.getHeight() * 0.28f), juce::Font::bold));
+        g.setFont(juce::FontOptions(juce::jlimit(14.0f, 28.0f, waveF.getHeight() * 0.28f), juce::Font::bold));
         g.drawText(label, waveArea_, juce::Justification::centred);
 
         return;  // skip normal waveform drawing while loading
@@ -778,7 +856,7 @@ void StemWaveformComponent::paint(juce::Graphics& g)
     }
 
     drawGrid(g, waveArea_);
-    drawWaveform(g, waveArea_);
+    drawWaveformCached(g, waveArea_);
     drawSegments(g, waveArea_);
     drawPlayhead(g, waveArea_);
 
@@ -843,6 +921,44 @@ void StemWaveformComponent::drawWaveform(juce::Graphics& g, juce::Rectangle<int>
         g.setColour(col.withAlpha(0.85f));
         g.fillRect(static_cast<float>(area.getX() + x), y1, 1.0f, lineHeight);
     }
+}
+
+void StemWaveformComponent::drawWaveformCached(juce::Graphics& g, juce::Rectangle<int> area)
+{
+    auto* stem = model_.getStem(stemIndex_);
+    if (!stem || stem->audioBuffer.getNumSamples() == 0 || area.isEmpty()) return;
+
+    const float scale = juce::jlimit(1.0f, 4.0f, g.getInternalContext().getPhysicalPixelScaleFactor());
+    WaveCacheKey key;
+    key.w = area.getWidth();
+    key.h = area.getHeight();
+    key.scale = scale;
+    key.viewStart = viewStartTime_;
+    key.viewEnd = viewEndTime_;
+    key.generation = model_.getContentGeneration();
+    key.numSamples = stem->audioBuffer.getNumSamples();
+    key.data = stem->audioBuffer.getNumChannels() > 0 ? stem->audioBuffer.getReadPointer(0) : nullptr;
+    key.spectral = spectralReady_;
+    key.spectralCount = spectralColors_.size();
+
+    if (!waveCacheValid_ || !(key == waveCacheKey_) || !waveCache_.isValid())
+    {
+        const int iw = juce::jmax(1, juce::roundToInt((float) area.getWidth()  * scale));
+        const int ih = juce::jmax(1, juce::roundToInt((float) area.getHeight() * scale));
+        waveCache_ = juce::Image(juce::Image::ARGB, iw, ih, true);
+        {
+            juce::Graphics ig(waveCache_);
+            ig.addTransform(juce::AffineTransform::scale(scale));
+            drawWaveform(ig, area.withPosition(0, 0));
+        }
+        waveCacheKey_ = key;
+        waveCacheValid_ = true;
+        ++debugWaveCacheBuilds_;
+    }
+    // drawImage() is modulated by the current colour's opacity (drawGrid leaves
+    // a 13% white behind) -> draw the cached image fully opaque.
+    g.setOpacity(1.0f);
+    g.drawImage(waveCache_, area.toFloat());
 }
 
 // ── Segment Drawing ──────────────────────────────────────────────────────────
@@ -988,7 +1104,7 @@ void StemWaveformComponent::drawGrid(juce::Graphics& g, juce::Rectangle<int> are
 
 void StemWaveformComponent::drawGridTooltip(juce::Graphics& g)
 {
-    juce::String text = "Ctrl + Click = Drag";
+    juce::String text = "Ctrl + Drag = move grid";
     auto font = juce::Font(11.0f);
     g.setFont(font);
     int tw = (int)font.getStringWidthFloat(text) + 14;
@@ -1033,22 +1149,29 @@ void StemWaveformComponent::mouseDown(const juce::MouseEvent& e)
         menu.addSeparator();
         menu.addItem(2, "Remove Channel");
 
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
-            localAreaToGlobal(juce::Rectangle<int>(e.x, e.y, 1, 1)).toFloat().toNearestInt()),
-            [this](int result)
+        // B7: the menu is tied to this lane (closed if the lane is deleted) and
+        // the callback re-checks the lane is still alive.
+        juce::Component::SafePointer<StemWaveformComponent> safe(this);
+        menu.showMenuAsync(juce::PopupMenu::Options()
+                               .withTargetComponent(this)
+                               .withTargetScreenArea(localAreaToGlobal(juce::Rectangle<int>(e.x, e.y, 1, 1)))
+                               .withDeletionCheck(*this),
+            [safe](int result)
             {
+                auto* self = safe.getComponent();
+                if (self == nullptr || result == 0) return;
                 if (result == 1)
                 {
-                    excludedFromQuickAssign_ = !excludedFromQuickAssign_;
-                    juce::Logger::writeToLog("[StemWaveform] Stem " + juce::String(stemIndex_)
-                                             + " quick assign: " + juce::String(excludedFromQuickAssign_ ? "EXCLUDED" : "INCLUDED"));
-                    if (onQuickAssignExcludeChanged)
-                        onQuickAssignExcludeChanged(stemIndex_, excludedFromQuickAssign_);
+                    self->excludedFromQuickAssign_ = !self->excludedFromQuickAssign_;
+                    juce::Logger::writeToLog("[StemWaveform] Stem " + juce::String(self->stemIndex_)
+                                             + " quick assign: " + juce::String(self->excludedFromQuickAssign_ ? "EXCLUDED" : "INCLUDED"));
+                    if (self->onQuickAssignExcludeChanged)
+                        self->onQuickAssignExcludeChanged(self->stemIndex_, self->excludedFromQuickAssign_);
                 }
                 else if (result == 2)
                 {
-                    if (onRemoveRequested)
-                        onRemoveRequested(stemIndex_);
+                    if (self->onRemoveRequested)
+                        self->onRemoveRequested(self->stemIndex_);
                 }
             });
         return;
@@ -1078,24 +1201,27 @@ void StemWaveformComponent::mouseDown(const juce::MouseEvent& e)
         return;
     }
 
-    // Grid drag: Ctrl+Click anywhere (not just near grid lines)
-    if (gridBpm_ > 0.0 && e.mods.isCtrlDown())
+    // Grid drag: Ctrl+drag anywhere. Ctrl+Shift is reserved for the
+    // multi-segment drag-out below (B19), so it never moves the grid.
+    if (gridBpm_ > 0.0 && e.mods.isCtrlDown() && ! e.mods.isShiftDown())
     {
         dragMode_ = DragMode::DraggingGrid;
         dragStartX_ = e.x;
         gridDragStartOffset_ = gridOffsetSeconds_;
-        juce::Logger::writeToLog("🎵 [StemWaveform] Grid drag (Ctrl+Click) at x=" + juce::String(e.x));
+        if (onGridDragStarted) onGridDragStarted(stemIndex_);   // one undo entry per drag
+        juce::Logger::writeToLog("[StemWaveform] Grid drag (Ctrl+drag) at x=" + juce::String(e.x));
         return;
     }
 
-    // Check for segment edge (resize)
+    // Check for segment edge (resize). The undo entry is pushed on the first
+    // real move (B24: a click on an edge must not add a junk entry).
     int edgeSeg = -1;
     auto edge = findSegmentEdge(e.x, edgeSeg);
-    if (edge != EdgeHit::None)
+    if (edge != EdgeHit::None && ! (e.mods.isCtrlDown() && e.mods.isShiftDown()))
     {
         dragMode_ = (edge == EdgeHit::Left) ? DragMode::ResizingLeft : DragMode::ResizingRight;
         activeSegIdx_ = edgeSeg;
-        model_.pushUndoState("Resize segment");
+        resizeUndoPushed_ = false;
         return;
     }
 
@@ -1161,10 +1287,10 @@ void StemWaveformComponent::mouseDown(const juce::MouseEvent& e)
 
     clickedSegIdx_ = -1;
 
-    // Start creating a new segment
+    // Start creating a new segment. The undo entry is pushed in mouseUp, only
+    // if a segment is actually created (B24).
     dragMode_ = DragMode::Creating;
     dragStartX_ = e.x;
-    model_.pushUndoState("Create segment");
 }
 
 void StemWaveformComponent::mouseDrag(const juce::MouseEvent& e)
@@ -1195,7 +1321,7 @@ void StemWaveformComponent::mouseDrag(const juce::MouseEvent& e)
 
     // Drag-out: user clicked a segment and dragged > 8px — offer WAV export
     if (dragMode_ == DragMode::None && clickedSegIdx_ >= 0
-        && !dragOutStarted_ && e.getDistanceFromDragStart() > 8)
+        && !dragOutStarted_ && e.getDistanceFromDragStart() > 8 && e.mods.isLeftButtonDown())
     {
         dragOutStarted_ = true;
         if (multiDragIntent_ && onMultiSegmentDragOut)
@@ -1226,14 +1352,23 @@ void StemWaveformComponent::mouseDrag(const juce::MouseEvent& e)
         int64_t sample = pixelToSample(e.x);
         sample = snapToGrid(sample);
 
+        const bool valid = dragMode_ == DragMode::ResizingLeft ? (sample < seg->endSample && sample != seg->startSample)
+                                                               : (sample > seg->startSample && sample != seg->endSample);
+        if (valid && ! resizeUndoPushed_)
+        {
+            model_.pushUndoState("Resize segment");   // state BEFORE the first change
+            resizeUndoPushed_ = true;
+            seg = model_.getSegment(stemIndex_, activeSegIdx_);
+            if (! seg) return;
+        }
         if (dragMode_ == DragMode::ResizingLeft)
         {
-            if (sample < seg->endSample)
+            if (valid)
                 model_.resizeSegment(stemIndex_, activeSegIdx_, sample, seg->endSample);
         }
         else
         {
-            if (sample > seg->startSample)
+            if (valid)
                 model_.resizeSegment(stemIndex_, activeSegIdx_, seg->startSample, sample);
         }
         repaint();
@@ -1261,8 +1396,18 @@ void StemWaveformComponent::mouseUp(const juce::MouseEvent& e)
 
             if (endSample > startSample)
             {
-                model_.addSegment(stemIndex_, startSample, endSample);
+                model_.pushUndoState("Create segment");
+                const int newIdx = model_.addSegment(stemIndex_, startSample, endSample);
                 if (onSegmentsChanged) onSegmentsChanged();
+                if (newIdx >= 0 && onSegmentSelected)
+                {
+                    if (auto* stem = model_.getStem(stemIndex_))
+                    {
+                        for (auto& s : stem->segments) s.selected = false;
+                        if (newIdx < (int) stem->segments.size()) stem->segments[(size_t) newIdx].selected = true;
+                    }
+                    onSegmentSelected(stemIndex_, newIdx);
+                }
             }
         }
     }
@@ -1274,9 +1419,10 @@ void StemWaveformComponent::mouseUp(const juce::MouseEvent& e)
     }
     else if (dragMode_ == DragMode::ResizingLeft || dragMode_ == DragMode::ResizingRight)
     {
-        if (onSegmentsChanged) onSegmentsChanged();
+        if (resizeUndoPushed_ && onSegmentsChanged) onSegmentsChanged();
     }
 
+    resizeUndoPushed_ = false;
     dragMode_ = DragMode::None;
     activeSegIdx_ = -1;
     clickedSegIdx_ = -1;
@@ -1301,12 +1447,10 @@ void StemWaveformComponent::mouseDoubleClick(const juce::MouseEvent& e)
 
 void StemWaveformComponent::mouseEnter(const juce::MouseEvent&)
 {
-    // Grab keyboard focus on mouse enter so Ctrl modifier is reliably detected
-    // for Ctrl+Wheel zoom on Windows.
-    // No cross-lane dim from S/M/L/eye buttons or the lane itself — only the
-    // sequencer-dot hover triggers that effect.
-    if (!hasKeyboardFocus(false))
-        grabKeyboardFocus();
+    // B27: never take keyboard focus on hover - inside a DAW that steals the
+    // host's Space / QWERTY shortcuts. Focus is taken on click only (JUCE
+    // does that for components with setWantsKeyboardFocus(true)); the wheel
+    // zooms without focus.
 }
 
 void StemWaveformComponent::mouseExit(const juce::MouseEvent& e)
@@ -1414,7 +1558,7 @@ void StemWaveformComponent::mouseMove(const juce::MouseEvent& e)
         {
             segTooltipVisible_ = true;
             segTooltipPos_ = e.getPosition();
-            segTooltipText_ = "Click = Play  |  Alt+Click = Loop  |  Right-Click = Menu";
+            segTooltipText_ = "Click = Play  |  Alt+Click = Loop  |  Drag = WAV out  |  Right-Click = Menu";
             repaint();
         }
     }
@@ -1457,11 +1601,43 @@ void StemWaveformComponent::showSegmentContextMenu(int segIdx, juce::Point<int> 
     menu.addItem(2, "Delete Segment");
     menu.addItem(3, "Select");
 
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
-        localAreaToGlobal(juce::Rectangle<int>(pos.x, pos.y, 1, 1)).toFloat().toNearestInt()),
-        [this, segIdx](int result)
+    // B7: the menu closes if the lane is deleted, and the callback re-finds the
+    // segment by its sample range (indices go stale after edits / undo).
+    const int64_t wantStart = seg->startSample, wantEnd = seg->endSample;
+    juce::Component::SafePointer<StemWaveformComponent> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options()
+                           .withTargetComponent(this)
+                           .withTargetScreenArea(localAreaToGlobal(juce::Rectangle<int>(pos.x, pos.y, 1, 1)))
+                           .withDeletionCheck(*this),
+        [safe, segIdx, wantStart, wantEnd](int menuResult)
         {
-            if (result == 0) return;
+            auto* self = safe.getComponent();
+            if (self == nullptr || menuResult == 0) return;
+            self->handleSegmentMenuResult(menuResult, segIdx, wantStart, wantEnd);
+        });
+}
+
+void StemWaveformComponent::handleSegmentMenuResult(int result, int segIdxAtOpen, int64_t wantStart, int64_t wantEnd)
+{
+    int segIdx = -1;
+    if (auto* st = model_.getStem(stemIndex_))
+    {
+        if (segIdxAtOpen >= 0 && segIdxAtOpen < (int) st->segments.size()
+            && st->segments[(size_t) segIdxAtOpen].startSample == wantStart
+            && st->segments[(size_t) segIdxAtOpen].endSample == wantEnd)
+            segIdx = segIdxAtOpen;
+        else
+            for (int i = 0; i < (int) st->segments.size(); ++i)
+                if (st->segments[(size_t) i].startSample == wantStart && st->segments[(size_t) i].endSample == wantEnd)
+                { segIdx = i; break; }
+    }
+    if (segIdx < 0)
+    {
+        juce::Logger::writeToLog("[StemWaveform] segment menu: chop no longer exists - ignored");
+        return;
+    }
+    {
+        {
 
             if (result == 1)  // Assign MIDI Key via learn overlay
             {
@@ -1484,7 +1660,7 @@ void StemWaveformComponent::showSegmentContextMenu(int segIdx, juce::Point<int> 
                 // segment's removal on linked stems (surgical erase), instead of
                 // the clear-and-rebuild path in onSegmentsChanged which used to
                 // wipe every segment on every linked stem when one was deleted.
-                if (onSegmentDeleted) onSegmentDeleted(segIdx);
+                if (onSegmentDeleted) onSegmentDeleted(segIdx, wantStart, wantEnd);
                 else if (onSegmentsChanged) onSegmentsChanged();
                 repaint();
             }
@@ -1505,7 +1681,8 @@ void StemWaveformComponent::showSegmentContextMenu(int segIdx, juce::Point<int> 
                 model_.clearMidiNote(stemIndex_, segIdx);
                 repaint();
             }
-        });
+        }
+    }
 }
 
 // ── Coordinate Helpers ───────────────────────────────────────────────────────
@@ -1645,11 +1822,15 @@ void StemWaveformComponent::showEmptyAreaContextMenu(juce::Point<int> pos)
     juce::PopupMenu menu;
     menu.addSubMenu("Quick Assign by Grid", gridMenu);
 
-    menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
-        localAreaToGlobal(juce::Rectangle<int>(pos.x, pos.y, 1, 1)).toFloat().toNearestInt()),
-        [this](int result)
+    juce::Component::SafePointer<StemWaveformComponent> safe(this);
+    menu.showMenuAsync(juce::PopupMenu::Options()
+                           .withTargetComponent(this)
+                           .withTargetScreenArea(localAreaToGlobal(juce::Rectangle<int>(pos.x, pos.y, 1, 1)))
+                           .withDeletionCheck(*this),
+        [safe](int result)
         {
-            if (result == 0) return;
+            auto* self = safe.getComponent();
+            if (self == nullptr || result == 0) return;
             double beats = 1.0;
             switch (result)
             {
@@ -1659,8 +1840,21 @@ void StemWaveformComponent::showEmptyAreaContextMenu(juce::Point<int> pos)
                 case 104: beats = 0.25; break;
                 default: return;
             }
-            if (onGridQuickAssign) onGridQuickAssign(stemIndex_, beats);
+            if (self->onGridQuickAssign) self->onGridQuickAssign(self->stemIndex_, beats);
         });
+}
+
+void StemWaveformComponent::refreshStemButtons()
+{
+    auto* stem = model_.getStem(stemIndex_);
+    const bool solo = stem != nullptr && stem->solo;
+    const bool mute = stem != nullptr && stem->mute;
+    soloBtn_.setColour(juce::TextButton::textColourOffId, solo ? juce::Colours::yellow : juce::Colours::lightgrey);
+    soloBtn_.setColour(juce::TextButton::buttonColourId, solo ? juce::Colour(0xff5a5200) : juce::Colour(0xff2d2d3a));
+    muteBtn_.setColour(juce::TextButton::textColourOffId, mute ? juce::Colours::red : juce::Colours::lightgrey);
+    muteBtn_.setColour(juce::TextButton::buttonColourId, mute ? juce::Colour(0xff5a1a1a) : juce::Colour(0xff2d2d3a));
+    soloBtn_.repaint();
+    muteBtn_.repaint();
 }
 
 void StemWaveformComponent::refreshLinkButton()
@@ -1677,10 +1871,9 @@ void StemWaveformComponent::refreshLinkButton()
 
 juce::String StemWaveformComponent::midiNoteToName(int note)
 {
-    static const char* noteNames[] = { "C", "C#", "D", "D#", "E", "F", "F#", "G", "G#", "A", "A#", "B" };
-    int octave = (note / 12) - 1;
-    int nameIdx = note % 12;
-    return juce::String(noteNames[nameIdx]) + juce::String(octave);
+    // B22: same convention as MidiMappingService::noteNumberToName (JUCE
+    // default, middle C = 60 = C3).
+    return juce::MidiMessage::getMidiNoteName(juce::jlimit(0, 127, note), true, true, 3);
 }
 
 void StemWaveformComponent::flashSegment(int segIndex)
@@ -1767,7 +1960,10 @@ void StemWaveformComponent::timerCallback()
 // ── Pitch knob value sync (no callback fire) ─────────────────────────────────
 void StemWaveformComponent::setPitchSemitones(float semi)
 {
+    if (! std::isfinite(semi)) return;
+    if (pitchKnob_.isMouseButtonDown()) return;   // never fight the user's drag
     const float clamped = juce::jlimit(-12.0f, 12.0f, semi);
+    if (std::abs(pitchKnob_.getValue() - (double) clamped) < 1.0e-6) return;
     pitchKnob_.setValue((double) clamped, juce::dontSendNotification);
 }
 

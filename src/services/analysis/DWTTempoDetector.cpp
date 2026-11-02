@@ -1,4 +1,5 @@
 ﻿#include "DWTTempoDetector.h"
+#include "AnalysisDsp.h"
 #include <algorithm>
 #include <numeric>
 
@@ -227,33 +228,12 @@ std::vector<float> DWTTempoDetector::downsample(const std::vector<float>& signal
 
 std::vector<float> DWTTempoDetector::autocorrelate(const std::vector<float>& signal)
 {
+    // C12: FFT autocorrelation, O(n log n). The old all-lags time-domain loop
+    // was O(n^2) per window (~34 M MAC x ~136 windows per 3-min song).
+    // Same output: mean-removed, biased, normalised so r[0] == 1.
     const int n = static_cast<int>(signal.size());
-    std::vector<float> result(n, 0.0f);
-
-    // Compute mean
-    float mean = std::accumulate(signal.begin(), signal.end(), 0.0f) /
-                 static_cast<float>(n);
-
-    // Autocorrelation (positive lags only)
-    for (int lag = 0; lag < n; ++lag)
-    {
-        float sum = 0.0f;
-        for (int i = 0; i < n - lag; ++i)
-        {
-            sum += (signal[i] - mean) * (signal[i + lag] - mean);
-        }
-        result[lag] = sum;
-    }
-
-    // Normalize by zero-lag
-    if (result[0] > 0.0f)
-    {
-        float norm = result[0];
-        for (auto& r : result)
-            r /= norm;
-    }
-
-    return result;
+    if (n <= 0) return {};
+    return analysis::autocorrelationFFT(signal, n - 1);
 }
 
 float DWTTempoDetector::findBPMFromAutocorr(const std::vector<float>& autocorr,
@@ -340,19 +320,13 @@ float DWTTempoDetector::findBPMFromAutocorr(const std::vector<float>& autocorr,
             offset = std::max(-0.5f, std::min(0.5f, offset));
 
             refinedLag = static_cast<double>(bestLag) + static_cast<double>(offset);
-
-            juce::Logger::writeToLog("[DWTDetector] Parabolic refinement: lag " +
-                juce::String(bestLag) + " -> " + juce::String(refinedLag, 4) +
-                " (offset: " + juce::String(offset, 4) + ")");
+            // (per-window log removed: ~200 lines per detection, C12)
         }
     }
 
     // Calculate BPM from refined (fractional) lag
     float bestBPM = static_cast<float>(60.0 * effectiveRate / refinedLag);
 
-    juce::Logger::writeToLog("[DWTDetector] Final BPM: " + juce::String(bestBPM, 3) +
-        " (from lag " + juce::String(refinedLag, 4) + " at " +
-        juce::String(effectiveRate, 1) + " Hz effective rate)");
 
     return bestBPM;
 }

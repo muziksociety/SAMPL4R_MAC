@@ -6,6 +6,7 @@
 #include "../../services/LicenseSystemService.h"
 #include "../../services/MidiMappingService.h"
 #include "../../utils/SamplarSettings.h"
+#include "../../services/separation/OnnxSeparationProvider.h"
 #include "../licensing/LicenseActivationDialog.h"
 
 namespace samplar {
@@ -14,12 +15,13 @@ namespace samplar {
 // SettingsDialog Implementation
 //==============================================================================
 
-SettingsDialog::SettingsDialog()
+SettingsDialog::SettingsDialog(const ServiceLocator::Context& ctx)
+    : ctx_(ctx)
 {
     juce::Logger::writeToLog("[SettingsDialog] === CONSTRUCTOR START ===");
 
     // Set size first
-    setSize(700, 550);
+    setSize(700, 650);   // +100 px for the STEM SEPARATION section
 
     try {
         // Title
@@ -34,7 +36,7 @@ SettingsDialog::SettingsDialog()
 
         // Detect standalone mode: AudioDeviceService is only registered in standalone
         {
-            auto* reg = samplar::ServiceLocator::getRegistry();
+            auto* reg = ctx_.getRegistry();
             standaloneMode_ = (reg != nullptr &&
                 dynamic_cast<AudioDeviceService*>(reg->get("audio")) != nullptr);
         }
@@ -59,11 +61,11 @@ SettingsDialog::SettingsDialog()
 
         // Create panels
         juce::Logger::writeToLog("[SettingsDialog] Creating AudioSettingsPanel");
-        audioPanel_ = std::make_unique<AudioSettingsPanel>();
+        audioPanel_ = std::make_unique<AudioSettingsPanel>(ctx_);
         juce::Logger::writeToLog("[SettingsDialog] Creating MidiSettingsPanel");
-        midiPanel_ = std::make_unique<MidiSettingsPanel>();
+        midiPanel_ = std::make_unique<MidiSettingsPanel>(ctx_);
         juce::Logger::writeToLog("[SettingsDialog] Creating LicenseInfoPanel");
-        licensePanel_ = std::make_unique<LicenseInfoPanel>();
+        licensePanel_ = std::make_unique<LicenseInfoPanel>(ctx_);
 
         addAndMakeVisible(audioPanel_.get());
         addAndMakeVisible(midiPanel_.get());
@@ -180,12 +182,12 @@ void SettingsDialog::onClose()
     }
 }
 
-void SettingsDialog::showDialog(juce::Component* parent)
+juce::DialogWindow* SettingsDialog::showDialog(juce::Component* parent, const ServiceLocator::Context& ctx)
 {
     juce::Logger::writeToLog("[SettingsDialog] showDialog() called");
 
     try {
-        auto* dialog = new SettingsDialog();
+        auto* dialog = new SettingsDialog(ctx);
 
         juce::DialogWindow::LaunchOptions options;
         options.dialogTitle = "";
@@ -196,12 +198,14 @@ void SettingsDialog::showDialog(juce::Component* parent)
         options.useNativeTitleBar = false;
         options.resizable = false;
 
-        options.launchAsync();
+        auto* window = options.launchAsync();
         juce::Logger::writeToLog("[SettingsDialog] Dialog launched");
+        return window;
     }
     catch (const std::exception& e) {
         juce::Logger::writeToLog("[SettingsDialog] EXCEPTION in showDialog: " + juce::String(e.what()));
     }
+    return nullptr;
 }
 
 // LearningModelPanel removed (ClassificationService/DrumMLClassifier deleted)
@@ -210,16 +214,16 @@ void SettingsDialog::showDialog(juce::Component* parent)
 // AudioSettingsPanel Implementation (functional settings only)
 //==============================================================================
 
-// Helper to get AudioDeviceService via ServiceLocator
-static AudioDeviceService* getAudioDeviceService()
+// AudioDeviceService of the dialog's own plugin instance (its Context registry)
+static AudioDeviceService* getAudioDeviceService(ServiceRegistry* reg)
 {
-    auto* reg = samplar::ServiceLocator::getRegistry();
     if (!reg) return nullptr;
 
     return dynamic_cast<AudioDeviceService*>(reg->get("audio"));
 }
 
-AudioSettingsPanel::AudioSettingsPanel()
+AudioSettingsPanel::AudioSettingsPanel(const ServiceLocator::Context& ctx)
+    : ctx_(ctx)
 {
     juce::Logger::writeToLog("[AudioSettingsPanel] === CONSTRUCTOR START ===");
 
@@ -281,6 +285,26 @@ AudioSettingsPanel::AudioSettingsPanel()
     autoRoundBpmHelpLabel_.setColour(juce::Label::textColourId, dimTextColor_);
     addAndMakeVisible(autoRoundBpmHelpLabel_);
 
+    // -- Stem separation section: GPU toggle + active backend (read-only) --
+    separationSectionLabel_.setFont(juce::Font(16.0f, juce::Font::bold));
+    separationSectionLabel_.setColour(juce::Label::textColourId, textColor_);
+    addAndMakeVisible(separationSectionLabel_);
+
+    useGpuToggle_.setColour(juce::ToggleButton::textColourId, textColor_);
+    useGpuToggle_.setColour(juce::ToggleButton::tickColourId, enabledColor_);
+    useGpuToggle_.setTooltip("Runs stem separation on a graphics card with 2 GB+ of video memory "
+                             "(DirectML). Falls back to the CPU automatically. Turn off if separation "
+                             "fails or the system becomes unstable. Applies to the next separation. Default: ON.");
+    useGpuToggle_.setToggleState(SamplarSettings::getInstance().getUseGpuSeparation(),
+                                 juce::dontSendNotification);
+    useGpuToggle_.onClick = [this] { onUseGpuToggled(); };
+    addAndMakeVisible(useGpuToggle_);
+
+    backendLabel_.setFont(juce::Font(11.0f));
+    backendLabel_.setColour(juce::Label::textColourId, dimTextColor_);
+    addAndMakeVisible(backendLabel_);
+    refreshBackendLabel();
+
     // Populate device list
     refreshDeviceList();
 
@@ -291,6 +315,27 @@ void AudioSettingsPanel::onAutoRoundBpmToggled()
 {
     const bool value = autoRoundBpmToggle_.getToggleState();
     SamplarSettings::getInstance().setAutoRoundBpm(value);
+}
+
+void AudioSettingsPanel::onUseGpuToggled()
+{
+    const bool value = useGpuToggle_.getToggleState();
+    juce::Logger::writeToLog("[AudioSettingsPanel] onUseGpuToggled: " + juce::String(value ? "ON" : "OFF"));
+    SamplarSettings::getInstance().setUseGpuSeparation(value);
+    refreshBackendLabel();
+}
+
+void AudioSettingsPanel::refreshBackendLabel()
+{
+    // Read-only: what the NEXT separation will use (+ what the last one used, if any).
+    const bool gpuOn = SamplarSettings::getInstance().getUseGpuSeparation();
+    juce::String text = "Backend: " + OnnxSeparationProvider::describeNextBackend(gpuOn);
+    const auto last = OnnxSeparationProvider::lastRunBackend();
+    if (last.isNotEmpty())
+        text << "   |   Last run: " << last;
+    backendLabel_.setText(text, juce::dontSendNotification);
+    backendLabel_.setTooltip(text);
+    juce::Logger::writeToLog("[AudioSettingsPanel] refreshBackendLabel: " + text);
 }
 
 void AudioSettingsPanel::paint(juce::Graphics& g)
@@ -329,6 +374,15 @@ void AudioSettingsPanel::paint(juce::Graphics& g)
     g.fillRoundedRectangle(analysisSection.toFloat(), 4.0f);
     g.setColour(borderColor_.withAlpha(0.2f));
     g.drawRoundedRectangle(analysisSection.toFloat(), 4.0f, 1.0f);
+
+    bounds.removeFromTop(15);
+
+    // Stem separation section background (GPU toggle + backend)
+    auto separationSection = bounds.removeFromTop(85);
+    g.setColour(sectionBgColor_.withAlpha(0.3f));
+    g.fillRoundedRectangle(separationSection.toFloat(), 4.0f);
+    g.setColour(borderColor_.withAlpha(0.2f));
+    g.drawRoundedRectangle(separationSection.toFloat(), 4.0f, 1.0f);
 }
 
 void AudioSettingsPanel::resized()
@@ -371,13 +425,22 @@ void AudioSettingsPanel::resized()
     autoRoundBpmToggle_.setBounds(analysisSection.removeFromTop(28));
     analysisSection.removeFromTop(2);
     autoRoundBpmHelpLabel_.setBounds(analysisSection.removeFromTop(20));
+
+    bounds.removeFromTop(15);
+
+    // Stem separation section (GPU toggle + read-only backend)
+    auto separationSection = bounds.removeFromTop(85).reduced(10);
+    separationSectionLabel_.setBounds(separationSection.removeFromTop(22));
+    separationSection.removeFromTop(2);
+    useGpuToggle_.setBounds(separationSection.removeFromTop(24));
+    backendLabel_.setBounds(separationSection.removeFromTop(18));
 }
 
 void AudioSettingsPanel::refreshDeviceList()
 {
     juce::Logger::writeToLog("[AudioSettingsPanel] Refreshing device list");
 
-    auto* audioService = getAudioDeviceService();
+    auto* audioService = getAudioDeviceService(ctx_.getRegistry());
     if (!audioService) {
         juce::Logger::writeToLog("[AudioSettingsPanel] No AudioDeviceService available");
         return;
@@ -424,7 +487,7 @@ void AudioSettingsPanel::onDeviceChanged()
     juce::String selectedDevice = deviceCombo_.getText();
     juce::Logger::writeToLog("[AudioSettingsPanel] Device changed to: " + selectedDevice);
 
-    auto* audioService = getAudioDeviceService();
+    auto* audioService = getAudioDeviceService(ctx_.getRegistry());
     if (!audioService) return;
 
     if (audioService->trySetPreferredDevice(selectedDevice)) {
@@ -449,7 +512,7 @@ void AudioSettingsPanel::onBufferChanged()
     int selectedBuffer = bufferCombo_.getSelectedId();
     juce::Logger::writeToLog("[AudioSettingsPanel] Buffer changed to: " + juce::String(selectedBuffer));
 
-    auto* audioService = getAudioDeviceService();
+    auto* audioService = getAudioDeviceService(ctx_.getRegistry());
     if (!audioService) return;
 
     if (audioService->setBufferSize(selectedBuffer)) {
@@ -459,7 +522,7 @@ void AudioSettingsPanel::onBufferChanged()
 
 void AudioSettingsPanel::updateSampleRateDisplay()
 {
-    auto* audioService = getAudioDeviceService();
+    auto* audioService = getAudioDeviceService(ctx_.getRegistry());
     if (!audioService) return;
 
     auto* device = audioService->deviceManager().getCurrentAudioDevice();
@@ -477,16 +540,17 @@ void AudioSettingsPanel::updateSampleRateDisplay()
 
 // Helper to get the AudioDeviceManager for MIDI device management.
 // In standalone mode, AudioDeviceService owns the device manager.
-static juce::AudioDeviceManager* getStandaloneDeviceManager()
+static juce::AudioDeviceManager* getStandaloneDeviceManager(ServiceRegistry* reg)
 {
-    auto* audioService = getAudioDeviceService();
+    auto* audioService = getAudioDeviceService(reg);
     if (audioService)
         return &audioService->deviceManager();
 
     return nullptr;
 }
 
-MidiSettingsPanel::MidiSettingsPanel()
+MidiSettingsPanel::MidiSettingsPanel(const ServiceLocator::Context& ctx)
+    : ctx_(ctx)
 {
     juce::Logger::writeToLog("[MidiSettingsPanel] === CONSTRUCTOR START ===");
 
@@ -513,7 +577,7 @@ MidiSettingsPanel::MidiSettingsPanel()
     computerKeyboardBtn_.setToggleState(true, juce::dontSendNotification);  // Default ON
     computerKeyboardBtn_.onClick = [this] {
         bool enabled = computerKeyboardBtn_.getToggleState();
-        if (auto* reg = samplar::ServiceLocator::getRegistry())
+        if (auto* reg = ctx_.getRegistry())
         {
             if (auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")))
                 midiSvc->setComputerKeyboardEnabled(enabled);
@@ -616,7 +680,7 @@ void MidiSettingsPanel::refreshDeviceList()
 {
     juce::Logger::writeToLog("[MidiSettingsPanel] === refreshDeviceList START ===");
 
-    auto* devMgr = getStandaloneDeviceManager();
+    auto* devMgr = getStandaloneDeviceManager(ctx_.getRegistry());
     auto devices = juce::MidiInput::getAvailableDevices();
 
     juce::Logger::writeToLog("[MidiSettingsPanel] Found " +
@@ -735,7 +799,7 @@ void MidiSettingsPanel::onDeviceToggled(int index)
                              " -> " + juce::String(nowEnabled ? "ENABLED" : "DISABLED"));
 
     // Apply to the AudioDeviceService's manager
-    auto* devMgr = getStandaloneDeviceManager();
+    auto* devMgr = getStandaloneDeviceManager(ctx_.getRegistry());
     if (devMgr) {
         devMgr->setMidiInputDeviceEnabled(row->identifier, nowEnabled);
         juce::Logger::writeToLog("[MidiSettingsPanel] DeviceManager updated for: " + row->name);
@@ -765,7 +829,7 @@ void MidiSettingsPanel::onChannelChanged(int index)
                              " -> " + (channel == 0 ? juce::String("ALL") : juce::String(channel)));
 
     // Apply channel filter to MidiMappingService
-    auto* reg = samplar::ServiceLocator::getRegistry();
+    auto* reg = ctx_.getRegistry();
     if (reg) {
         auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
         if (midiSvc) {
@@ -780,16 +844,16 @@ void MidiSettingsPanel::onChannelChanged(int index)
 // LicenseInfoPanel Implementation
 //==============================================================================
 
-// Helper to get LicenseSystemService via ServiceLocator
-static LicenseSystemService* getLicenseSystemService()
+// LicenseSystemService of the dialog's own plugin instance (its Context registry)
+static LicenseSystemService* getLicenseSystemService(ServiceRegistry* reg)
 {
-    auto* reg = samplar::ServiceLocator::getRegistry();
     if (!reg) return nullptr;
 
     return dynamic_cast<LicenseSystemService*>(reg->get("license"));
 }
 
-LicenseInfoPanel::LicenseInfoPanel()
+LicenseInfoPanel::LicenseInfoPanel(const ServiceLocator::Context& ctx)
+    : ctx_(ctx)
 {
     juce::Logger::writeToLog("[LicenseInfoPanel] Constructor");
 
@@ -958,7 +1022,7 @@ void LicenseInfoPanel::refreshLicenseInfo()
 {
     juce::Logger::writeToLog("[LicenseInfoPanel] Refreshing license info");
 
-    auto* licenseService = getLicenseSystemService();
+    auto* licenseService = getLicenseSystemService(ctx_.getRegistry());
 
     if (licenseService)
     {
@@ -966,7 +1030,18 @@ void LicenseInfoPanel::refreshLicenseInfo()
         bool isLicensed = (status == LicenseSystemService::LicenseStatus::Valid);
 
         // Update status
-        if (isLicensed)
+        activateBtn_.setButtonText("Activate License");
+        if (isLicensed && licenseService->isSignInRequired())
+        {
+            // token_* reply: the licence is kept and plays offline, but the
+            // server wants a fresh sign-in (browser flow).
+            statusValue_.setText("Active - sign in again to stay verified", juce::dontSendNotification);
+            statusValue_.setColour(juce::Label::textColourId, juce::Colour(0xffffaa44));
+            activateBtn_.setButtonText("Sign in again");
+            activateBtn_.setVisible(true);
+            deactivateBtn_.setVisible(true);
+        }
+        else if (isLicensed)
         {
             statusValue_.setText("Active", juce::dontSendNotification);
             statusValue_.setColour(juce::Label::textColourId, activeColor_);
@@ -1085,7 +1160,7 @@ void LicenseInfoPanel::refreshLicenseInfo()
 
 void LicenseInfoPanel::onCopyHardwareId()
 {
-    auto* licenseService = getLicenseSystemService();
+    auto* licenseService = getLicenseSystemService(ctx_.getRegistry());
     if (licenseService)
     {
         juce::String hwId = juce::String(licenseService->generateHardwareId());
@@ -1105,10 +1180,24 @@ void LicenseInfoPanel::onActivate()
 {
     juce::Logger::writeToLog("[LicenseInfoPanel] Opening activation dialog");
 
-    auto* licenseService = getLicenseSystemService();
+    auto* licenseService = getLicenseSystemService(ctx_.getRegistry());
+    if (licenseService && ctx_.getBus() != nullptr
+        && licenseService->getCurrentStatus() == LicenseSystemService::LicenseStatus::Valid
+        && licenseService->isSignInRequired())
+    {
+        // "Sign in again": the in-window browser sign-in panel (plugin-safe, no modal loop).
+        juce::Logger::writeToLog("[LicenseInfoPanel] Sign in again -> in-window browser sign-in panel");
+        juce::Component::SafePointer<LicenseInfoPanel> safeThis(this);
+        LicenseActivationDialog::showInWindow(this, *licenseService, *ctx_.getBus(), true, [safeThis](int result) {
+            juce::Logger::writeToLog("[LicenseInfoPanel] sign-in panel closed (result " + juce::String(result) + ")");
+            if (safeThis != nullptr)
+                safeThis->refreshLicenseInfo();
+        });
+        return;
+    }
     if (licenseService)
     {
-        auto* bus = samplar::ServiceLocator::getBus();
+        auto* bus = ctx_.getBus();
         if (bus)
         {
             // Launch activation dialog asynchronously instead of blocking with showModal()
@@ -1137,7 +1226,7 @@ void LicenseInfoPanel::onDeactivate()
 {
     juce::Logger::writeToLog("[LicenseInfoPanel] Deactivation requested");
 
-    auto* licenseService = getLicenseSystemService();
+    auto* licenseService = getLicenseSystemService(ctx_.getRegistry());
     if (!licenseService) {
         juce::AlertWindow::showMessageBoxAsync(
             juce::AlertWindow::WarningIcon,
@@ -1152,11 +1241,11 @@ void LicenseInfoPanel::onDeactivate()
 
     auto options = juce::MessageBoxOptions()
         .withIconType(juce::AlertWindow::QuestionIcon)
-        .withTitle("Deactivate License")
-        .withMessage("Are you sure you want to deactivate your license on this machine?\n\n"
-                     "This will free up an activation slot that can be used on another device.\n"
-                     "You will need to reactivate to use the full features again.")
-        .withButton("Deactivate")
+        .withTitle("Sign out")
+        .withMessage("Sign out of SAMPLAR on this computer?\n\n"
+                     "Your account page opens in your browser: release this computer there "
+                     "to use the activation on another one.")
+        .withButton("Sign out")
         .withButton("Cancel");
 
     juce::AlertWindow::showAsync(options, [safeThis](int result) {
@@ -1164,7 +1253,7 @@ void LicenseInfoPanel::onDeactivate()
 
         juce::Logger::writeToLog("[LicenseInfoPanel] User confirmed deactivation");
 
-        auto* svc = getLicenseSystemService();
+        auto* svc = getLicenseSystemService(safeThis->ctx_.getRegistry());
         if (!svc) return;
 
         bool success = svc->deactivateLicense();
@@ -1172,17 +1261,16 @@ void LicenseInfoPanel::onDeactivate()
         if (success) {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::InfoIcon,
-                "Deactivated",
-                "License has been deactivated on this machine.\n\n"
-                "You can reactivate at any time using your account credentials.",
+                "Signed out",
+                juce::String(svc->getLastResultMessage()),
                 "OK"
             );
             safeThis->refreshLicenseInfo();
         } else {
             juce::AlertWindow::showMessageBoxAsync(
                 juce::AlertWindow::WarningIcon,
-                "Deactivation Failed",
-                "Failed to deactivate: " + juce::String(svc->getLastResultMessage()),
+                "Sign out failed",
+                "Could not sign out: " + juce::String(svc->getLastResultMessage()),
                 "OK"
             );
         }

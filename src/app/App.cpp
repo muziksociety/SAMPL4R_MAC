@@ -6,7 +6,6 @@
 #include "AudioDeviceService.h"
 #include "../utils/Tracing.h"
 #include "../utils/FontWarmer.h"
-#include "../services/ProcessingCoordinatorService.h"
 // SAMPLAR fork: GeneratorService, VariationService, MentorRegistration, CustomCategoryManager removed
 #include "../services/LicenseSystemService.h"
 #include "../services/UpdateCheckService.h"
@@ -16,10 +15,15 @@
 #include "../ui/licensing/LicenseActivationDialog.h"
 #include "../utils/LogPaths.h"               // Writable log directory for Program Files installs
 
-#include <signal.h>
 #ifdef _WIN32
 #include <windows.h>
+#include <signal.h>
 #include <eh.h>
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+#include <signal.h>
+#include <unistd.h>
 #endif
 
 using namespace juce;
@@ -28,24 +32,8 @@ namespace samplar {
 
 const juce::String App::getApplicationVersion() { return SAMPLAR_VERSION; }
 
-// POSIX signal handler — portable across Windows and macOS. Logs the signal,
-// flushes the logger, and exits. Used for SIGSEGV/SIGABRT/etc on both platforms.
-void signalHandler(int sig) {
-    juce::Logger::writeToLog("[CRASH] Signal caught: " + juce::String(sig));
-    juce::Logger::writeToLog("[CRASH] Application will terminate");
-
-    if (auto* logger = juce::Logger::getCurrentLogger()) {
-        delete logger;
-        juce::Logger::setCurrentLogger(nullptr);
-    }
-
-    exit(sig);
-}
-
 #ifdef _WIN32
-// Windows-only SEH crash handler — catches structured exceptions that POSIX
-// signals don't cover (access violations, divide-by-zero, etc.). Installed
-// via SetUnhandledExceptionFilter below.
+// Windows crash handler
 LONG WINAPI crashHandler(EXCEPTION_POINTERS* exceptionInfo) {
     juce::Logger::writeToLog("[CRASH][CRASH][CRASH][CRASH] [CRASH] Windows exception caught!");
     juce::Logger::writeToLog("[ERROR] Exception code: 0x" + juce::String::toHexString((int)exceptionInfo->ExceptionRecord->ExceptionCode));
@@ -73,6 +61,32 @@ LONG WINAPI crashHandler(EXCEPTION_POINTERS* exceptionInfo) {
     }
 
     return EXCEPTION_EXECUTE_HANDLER;
+}
+
+void signalHandler(int signal) {
+    juce::Logger::writeToLog("???????????? [CRASH] Signal caught: " + juce::String(signal));
+    juce::Logger::writeToLog("???????????? [CRASH] Application will terminate");
+
+    // Force flush the log
+    if (auto* logger = juce::Logger::getCurrentLogger()) {
+        delete logger;
+        juce::Logger::setCurrentLogger(nullptr);
+    }
+
+    exit(signal);
+}
+#endif
+
+#if defined(__unix__) || defined(__APPLE__)
+// POSIX crash handler (standalone only). Uses only async-signal-safe calls:
+// FileLogger has already flushed every earlier line, so the handler writes one
+// line to stderr, restores the default action and re-raises, which keeps the
+// macOS crash report.
+void posixSignalHandler(int sig) {
+    static const char msg[] = "[CRASH] SAMPLAR caught a fatal signal, terminating\n";
+    (void) ::write(STDERR_FILENO, msg, sizeof(msg) - 1);
+    ::signal(sig, SIG_DFL);
+    ::raise(sig);
 }
 #endif
 
@@ -144,19 +158,23 @@ void App::initialise (const String& /*commandLine*/)
     juce::Logger::writeToLog("???? [App] initialise() ENTER");
     juce::Logger::writeToLog("???? [App] Working directory: " + juce::File::getCurrentWorkingDirectory().getFullPathName());
 
-    // Install crash handlers (POSIX signals on all platforms;
-    // SEH filter additionally on Windows for structured exceptions)
-    juce::Logger::writeToLog("[App] Installing crash handlers");
 #ifdef _WIN32
+    // Install crash handlers
+    juce::Logger::writeToLog("???? [App] Installing Windows crash handlers");
     SetUnhandledExceptionFilter(crashHandler);
-#endif
     signal(SIGABRT, signalHandler);
-    signal(SIGFPE,  signalHandler);
-    signal(SIGILL,  signalHandler);
-    signal(SIGINT,  signalHandler);
+    signal(SIGFPE, signalHandler);
+    signal(SIGILL, signalHandler);
+    signal(SIGINT, signalHandler);
     signal(SIGSEGV, signalHandler);
     signal(SIGTERM, signalHandler);
-    juce::Logger::writeToLog("[App] Crash handlers installed");
+    juce::Logger::writeToLog("???? [App] Crash handlers installed");
+#elif defined(__unix__) || defined(__APPLE__)
+    juce::Logger::writeToLog("[App] Installing POSIX crash handlers (SIGABRT SIGFPE SIGILL SIGSEGV SIGBUS)");
+    for (int sig : { SIGABRT, SIGFPE, SIGILL, SIGSEGV, SIGBUS })
+        ::signal(sig, posixSignalHandler);
+    juce::Logger::writeToLog("[App] POSIX crash handlers installed");
+#endif
 
     try {
         juce::Logger::writeToLog("???? [App] Creating ServiceRegistry");
@@ -170,9 +188,6 @@ void App::initialise (const String& /*commandLine*/)
         serviceRegistry->registerService("audio", std::make_unique<samplar::AudioDeviceService>());
         juce::Logger::writeToLog("???? [App] AudioDeviceService registered successfully");
 
-        juce::Logger::writeToLog("???? [App] Registering ProcessingCoordinatorService");
-        serviceRegistry->registerService("processing.coordinator", std::make_unique<samplar::ProcessingCoordinatorService>(eventBus_));
-        juce::Logger::writeToLog("???? [App] ProcessingCoordinatorService registered successfully");
 
         // SAMPLAR fork: variation services and MentorService removed (stems-to-pads only)
 
@@ -206,6 +221,9 @@ void App::initialise (const String& /*commandLine*/)
             if (audioSvc && midiSvc)
             {
                 auto& devMgr = audioSvc->deviceManager();
+                // Licence gate on the standalone audio path + exports (N-18).
+                if (auto* lic = dynamic_cast<samplar::LicenseSystemService*>(serviceRegistry->get("license")))
+                    midiSvc->setAudioGate(&lic->audioAllowedFlag());
                 midiSvc->connectToDeviceManager(&devMgr);
                 juce::Logger::writeToLog("[App] MidiMappingService connected to AudioDeviceManager");
 

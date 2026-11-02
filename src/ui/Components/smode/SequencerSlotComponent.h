@@ -20,6 +20,8 @@ public:
     void setCellWidth(float cw) { cellWidth_ = cw; }
     void setMaxCellSpan(int max) { maxCellSpan_ = max; }
     void setTotalCells(int tc) { totalCells_ = tc; }
+    /** Registry of the owning plugin instance (audition), never the global locator. */
+    void setServiceRegistry(class ServiceRegistry* r) { registry_ = r; }
     void clearSlot();
 
     const PatternSlot& getSlotData() const { return slot_; }
@@ -125,6 +127,8 @@ private:
     }
 
     void rebuildWaveformPath();
+
+    class ServiceRegistry* registry_ { nullptr };
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(SequencerSlotComponent)
 };

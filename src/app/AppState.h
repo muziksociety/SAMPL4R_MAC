@@ -4,11 +4,13 @@
 #include <juce_data_structures/juce_data_structures.h>
 #include <functional>
 #include <vector>
+#include <atomic>
+#include <memory>
 
 namespace samplar {
 
 /**
- * AppState — centralized plugin state store.
+ * AppState ï¿½ centralized plugin state store.
  *
  * See docs/superpowers/specs/2026-04-21-appstate-full-plan.md for the full design.
  *
@@ -36,6 +38,10 @@ struct StateBinding
     int version { 1 };
     std::function<void(juce::ValueTree&)>       save;
     std::function<void(const juce::ValueTree&)> restore;
+    // true: a loaded project WITHOUT this node still calls restore() with an
+    // invalid tree (the feature resets instead of keeping the previous
+    // project's state, review N-18). Only the load dispatch does this.
+    bool restoreWhenMissing { false };
 };
 
 class AppState
@@ -51,8 +57,33 @@ public:
     void unregisterBinding(int token);
 
     // Called from SamplarAudioProcessor::getStateInformation / setStateInformation.
+    // Any thread (A18):
+    //  - serialize on the message thread refreshes every binding first; on any
+    //    other thread, or while a deferred restore has not run yet, it streams
+    //    the tree as it is (no UI / model access off the message thread). The
+    //    processor keeps that tree fresh via snapshotBinding() on every change.
+    //  - deserialize on the message thread restores bindings synchronously; on
+    //    any other thread it loads the tree and posts the restores to the
+    //    message thread (alive-guarded).
     void serialize  (juce::MemoryBlock& out);
     void deserialize(const void* data, int size);
+
+    /** Re-run one binding's save() into the tree (message thread). Used to keep
+     *  the tree current for saves that arrive off the message thread. */
+    bool snapshotBinding(const juce::Identifier& nodeId);
+
+    /** A node whose data moved elsewhere: its binding may still register, but
+     *  it is never restored and the node is never written to a project.
+     *  ("smodePage" -> the "smode" session, schema 1.) A loaded project keeps
+     *  the node in memory (getChildCopy) so a newer binding can migrate it. */
+    void addSupersededNode(const juce::Identifier& nodeId);
+
+    /** Copy of a child of the loaded / current tree (invalid if absent). Any
+     *  thread. Used to migrate superseded legacy nodes. */
+    juce::ValueTree getChildCopy(const juce::Identifier& nodeId);
+
+    /** True between an off-thread deserialize and its restore dispatch. */
+    bool isRestoreDispatchPending() const { return dispatchPending_.load(); }
 
     // Called when the editor is about to be destroyed (e.g. user closes the plugin
     // window within FL). Walks every registered binding's save() so the current
@@ -68,13 +99,17 @@ public:
     // Direct access (e.g. a feature wants to add a ValueTree::Listener on its sub-tree).
     juce::ValueTree getOrCreateChild(const juce::Identifier& nodeId);
 
-    // Fire updateHostDisplay() on the processor — tells DAW the project is dirty.
-    // Automatically called by the root listener on any tree property/child change.
-    void markDirty();
+    // Tells the host the project changed (VST3 "nonParameterStateChanged" ->
+    // pluginShouldBeMarkedDirtyFlag, A16). Any thread (hops to the message
+    // thread). Suppressed while AppState itself rewrites the tree
+    // (serialize / deserialize / snapshots) ON THE SAME THREAD, so saving never
+    // re-dirties, and an off-thread save never swallows a message-thread edit
+    // (review N-15). Returns false when suppressed (nothing was notified).
+    bool markDirty();
 
     // Test / diagnostic: true after deserialize has been called at least once
     // (or the empty initial state has been considered ready).
-    bool isRestoreReady() const { return restoreReady_; }
+    bool isRestoreReady() const { return restoreReady_.load(); }
 
 private:
     static constexpr const char* kMagic       = "SMAS";
@@ -91,8 +126,38 @@ private:
         StateBinding binding;
     };
     std::vector<Entry> bindings_;
+
+    // Liveness token for deferred restore callbacks (they can run after the
+    // owning processor - and this AppState - have been destroyed).
+    std::shared_ptr<std::atomic<bool>> aliveToken_ { std::make_shared<std::atomic<bool>>(true) };
     int  nextToken_   { 1 };
-    bool restoreReady_ { false };
+    std::atomic<bool> restoreReady_ { false };
+
+    // root_ is read by off-thread serialize and replaced by off-thread
+    // deserialize; every root_ access goes through this lock.
+    juce::CriticalSection treeLock_;
+    // dispatchPending_ / dispatchSeq_ change only while treeLock_ is held
+    // together with the root_ swap; snapshots re-check them under the lock
+    // (review N-14: no check-then-lock window).
+    std::atomic<bool> dispatchPending_ { false };
+    std::atomic<int>  dispatchSeq_ { 0 };
+    juce::Array<juce::Identifier> supersededNodes_;
+
+    bool isSuperseded(const juce::Identifier& id) const { return supersededNodes_.contains(id); }
+    void dispatchRestores();
+    void stripSuperseded(juce::ValueTree& tree) const;
+
+    // Dirty suppression is per THREAD (and per AppState): see markDirty().
+    static void pushDirtySuppress(const AppState* s);
+    static void popDirtySuppress(const AppState* s);
+    bool isDirtySuppressedOnThisThread() const;
+
+    struct ScopedDirtySuppress
+    {
+        explicit ScopedDirtySuppress(AppState& s) : st(s) { pushDirtySuppress(&st); }
+        ~ScopedDirtySuppress() { popDirtySuppress(&st); }
+        AppState& st;
+    };
 
     // Forwards any tree change to markDirty().
     struct RootListener : juce::ValueTree::Listener
@@ -107,7 +172,7 @@ private:
     };
     RootListener listener_ { this };
 
-    // Legacy JSON importer — populates root_ from old-format { "ui", "smode", "midi" } blob.
+    // Legacy JSON importer ï¿½ populates root_ from old-format { "ui", "smode", "midi" } blob.
     void importLegacyJson(const juce::String& jsonText);
 
     // Writes version attribute on root_ if missing.
@@ -117,7 +182,7 @@ private:
 };
 
 /**
- * ScopedStateBinding — RAII helper. Registers on construction, unregisters on destruction.
+ * ScopedStateBinding ï¿½ RAII helper. Registers on construction, unregisters on destruction.
  * Use this as a member of any class that needs to persist state.
  *
  * Example:

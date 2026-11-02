@@ -27,6 +27,10 @@ public:
 
     bool isEncryptionAvailable() const;
 
+    /** An encryption.key content we accept (32+ hex digits, as juce::Uuid writes). */
+    static bool isUsableKey(const juce::String& key);
+    static constexpr int kMinKeyChars = 32;
+
 private:
     juce::String encryptData(const juce::String& data) const;
     juce::String decryptData(const juce::String& encryptedData) const;

@@ -1,9 +1,11 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include <juce_audio_basics/juce_audio_basics.h>
 #include <juce_dsp/juce_dsp.h>
 #include "../../../services/smode/SModeSegmentModel.h"
+#include "MidiLearnControls.h"
+#include <atomic>
 #include <vector>
 #include <functional>
 #include <map>
@@ -52,7 +54,13 @@ public:
     int  getGridDivision() const { return divisionValue_; }
     void setViewRange(double startTime, double endTime);
     void computeSpectralColors();        // sync (internal use only)
-    void computeSpectralColorsAsync();   // launches background thread, repaints when done
+    /** Runs the spectral analysis via `runBackground` (the processor-owned
+     *  SModeService pool), repaints when done. Falls back to the synchronous
+     *  path if no runner is available (e.g. after shutdown). */
+    /** `cancel` (optional, must outlive the job: SModeService::getJobCancelFlag())
+     *  stops the analysis early when the plugin unloads (review A4). */
+    void computeSpectralColorsAsync(const std::function<bool(std::function<void()>)>& runBackground,
+                                    const std::atomic<bool>* cancel = nullptr);
 
     // Callbacks
     std::function<void(int stemIndex, int segIndex)> onSegmentSelected;
@@ -61,26 +69,34 @@ public:
     std::function<void(int stemIndex, int segIndex)> onSegmentDragOut;      // Drag out as WAV (single)
     std::function<void(int stemIndex, int segIndex)> onMultiSegmentDragOut; // Ctrl+Shift+drag: drag every selected segment on any stem as multiple WAVs
     std::function<void()> onSegmentsChanged;
-    std::function<void(int segIndex)> onSegmentDeleted; // Fired specifically when a single segment is deleted — lets the page mirror the surgical erase on linked stems instead of the nuclear clear+rebuild path used for bulk changes.
+    std::function<void(int segIndex, int64_t start, int64_t end)> onSegmentDeleted; // Fired specifically when a single segment is deleted — lets the page mirror the surgical erase on linked stems instead of the nuclear clear+rebuild path used for bulk changes.
     std::function<void(int stemIndex, int segIndex)> onMidiAssignRequested;
     std::function<void(double startTime, double endTime)> onViewRangeChanged;
     std::function<void(int stemIndex, double beatsPerSegment)> onGridQuickAssign;
     std::function<void(int stemIndex, double gridOffset)> onGridOffsetChanged;
+    std::function<void(int stemIndex)> onGridDragStarted;     // Ctrl+drag began (page pushes ONE undo entry)
     std::function<void(int stemIndex)> onFocusRequested;      // V button: expand this stem
     std::function<void(int stemIndex)> onRemoveRequested;     // Right-click: remove channel
     std::function<void(int stemIndex, bool exclude)> onQuickAssignExcludeChanged;
     std::function<void(int stemIndex)> onLinkToggled;         // L button: parent decides new link state
     std::function<void(int stemIndex)> onStemHovered;         // -1 when hover ends; mirrors SequencerLane dot pattern
     std::function<void(int stemIndex, float semi)> onPitchChanged;  // pitch knob -12..+12 semitones
+    std::function<void(int stemIndex)> onPitchMidiMenu;             // right-click on the pitch knob (MIDI Learn menu)
 
     /** Push a value into the pitch knob without firing onPitchChanged (used
      *  by AppState restore + EventBus mirror). */
     void setPitchSemitones(float semi);
     float getPitchSemitones() const;
+    /** Learned CC shown in the pitch knob tooltip ("" = none). */
+    void setPitchMidiInfo(const juce::String& info) { pitchKnob_.setMidiInfo(info); }
+    juce::String getPitchMidiInfo() const { return pitchKnob_.getMidiInfo(); }
+    juce::Component& getPitchKnob() { return pitchKnob_; }
 
     /** Sync the L button visual with the current model.isLinked() state.
         Call this after the parent updates link state for any stem. */
     void refreshLinkButton();
+    /** Sync the S / M button colours with the model (after undo / reopen, B24). */
+    void refreshStemButtons();
 
     bool excludedFromQuickAssign_ { false };
 
@@ -109,8 +125,11 @@ public:
             repaint();
     }
 
-    /** Set transport playhead position (negative = hidden). */
-    void setPlayheadTime(double timeSeconds) { playheadTime_ = timeSeconds; repaint(); }
+    /** Set transport playhead position (negative = hidden). Repaints only the
+     *  old and new playhead columns (B32), never the whole lane. */
+    void setPlayheadTime(double timeSeconds);
+    /** Waveform rect in local coords (SModePage maps its playhead strip onto it). */
+    juce::Rectangle<int> getWaveArea() const { return waveArea_; }
     double getViewStartTime() const { return viewStartTime_; }
     double getViewEndTime() const { return viewEndTime_; }
 
@@ -123,6 +142,12 @@ public:
 
     // MIDI note name helper
     static juce::String midiNoteToName(int note);
+
+    /** Debug perf counters (UI self-test only reads them): total time spent in
+     *  paint() and number of paint() calls across all lanes. */
+    static inline double debugPaintMs_ { 0.0 };
+    static inline int    debugPaintCount_ { 0 };
+    static inline int    debugWaveCacheBuilds_ { 0 };
 
 private:
     // Timer callback for animation
@@ -158,7 +183,7 @@ private:
     juce::TextButton soloBtn_ { "S" };
     juce::TextButton muteBtn_ { "M" };
     juce::TextButton linkBtn_ { "L" };
-    juce::Slider     pitchKnob_;  // per-stem pitch shift (-12..+12 semitones, time-preserving)
+    MidiLearnSlider  pitchKnob_;  // per-stem pitch shift (-12..+12 semitones, time-preserving)
     juce::DrawableButton focusBtn_ { "Focus", juce::DrawableButton::ImageFitted };
     std::unique_ptr<juce::Drawable> eyeIcon_, eyeIconOver_;
 
@@ -177,6 +202,7 @@ private:
     int clickedSegIdx_ { -1 };   // Segment clicked — tracks drag-out candidate
     bool dragOutStarted_ { false };
     bool multiDragIntent_ { false };   // Armed by Ctrl+Shift+click on a segment
+    bool resizeUndoPushed_ { false };  // B24: "Resize segment" pushed on the first real move only
     double gridDragStartOffset_ { 0.0 };  // Grid offset when drag began
 
     // Snap / grid
@@ -230,6 +256,36 @@ private:
 
     // Drawing helpers
     void drawWaveform(juce::Graphics& g, juce::Rectangle<int> area);
+    /** B32: draws the waveform from a cached image; the image is rebuilt only
+     *  when size, scale, view range, audio or spectral colours change. */
+    void drawWaveformCached(juce::Graphics& g, juce::Rectangle<int> area);
+    struct WaveCacheKey
+    {
+        int w { 0 }, h { 0 };
+        float scale { 0.0f };
+        double viewStart { 0.0 }, viewEnd { 0.0 };
+        uint64_t generation { 0 };
+        int numSamples { 0 };
+        const float* data { nullptr };
+        bool spectral { false };
+        size_t spectralCount { 0 };
+        bool operator==(const WaveCacheKey& o) const
+        {
+            return w == o.w && h == o.h && scale == o.scale && viewStart == o.viewStart
+                && viewEnd == o.viewEnd && generation == o.generation && numSamples == o.numSamples
+                && data == o.data && spectral == o.spectral && spectralCount == o.spectralCount;
+        }
+    };
+    juce::Image  waveCache_;
+    WaveCacheKey waveCacheKey_;
+    bool         waveCacheValid_ { false };
+    int playheadColumn(double timeSeconds) const;   // -1 = not drawn
+
+    // Responsive header (lane height decides the layout; width is constant).
+    enum class HeaderMode { Tall, Compact, Mini };
+    HeaderMode headerMode_ { HeaderMode::Tall };
+    bool headerModeApplied_ { false };
+    void applyHeaderMode(HeaderMode mode);   // acts only on change
     void drawSegments(juce::Graphics& g, juce::Rectangle<int> area);
     void drawGrid(juce::Graphics& g, juce::Rectangle<int> area);
     void drawPlayhead(juce::Graphics& g, juce::Rectangle<int> area);
@@ -249,10 +305,14 @@ private:
 
     // Context menu
     void showSegmentContextMenu(int segIdx, juce::Point<int> pos);
+    void handleSegmentMenuResult(int result, int segIdxAtOpen, int64_t wantStart, int64_t wantEnd);
     void showEmptyAreaContextMenu(juce::Point<int> pos);
     void showMidiNotePickerMenu(int segIdx);
 
-    static constexpr int kControlWidth = 178;
+    static constexpr int kControlWidth = 160;   // was 178; one width at every size
+    static constexpr int kTallLaneH    = 140;   // >= : name row, S/M/L row, big knob
+    static constexpr int kCompactLaneH = 62;    // >= : 2 rows + 40 px knob; below: 1 row
+    static constexpr int kPanelInset   = 6;     // card margin (paint + resized)
     static constexpr int kEdgeHitZone = 6;
     static constexpr int kGridHitZone = 5;
 

@@ -1,6 +1,7 @@
 ﻿#pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
+#include "../../app/ServiceLocator.h"
 #include <memory>
 #include <vector>
 
@@ -21,16 +22,20 @@ class LicenseInfoPanel;
  */
 class SettingsDialog : public juce::Component {
 public:
-    SettingsDialog();
+    /** `ctx` = the services of the plugin instance whose editor opened the
+     *  dialog. Every lookup goes through it, never the global locator (A2). */
+    explicit SettingsDialog(const ServiceLocator::Context& ctx);
     ~SettingsDialog() override;
 
     void paint(juce::Graphics& g) override;
     void resized() override;
 
     // Static method to show dialog
-    static void showDialog(juce::Component* parent);
+    static juce::DialogWindow* showDialog(juce::Component* parent, const ServiceLocator::Context& ctx);
 
 private:
+    ServiceLocator::Context ctx_;
+
     // Title bar
     juce::Label titleLabel_{ {}, "SETTINGS" };
     juce::TextButton closeBtn_{ "X" };
@@ -76,7 +81,7 @@ private:
  */
 class AudioSettingsPanel : public juce::Component {
 public:
-    AudioSettingsPanel();
+    explicit AudioSettingsPanel(const ServiceLocator::Context& ctx);
     ~AudioSettingsPanel() override = default;
 
     void paint(juce::Graphics& g) override;
@@ -85,6 +90,7 @@ public:
     void refreshDeviceList();
 
 private:
+    ServiceLocator::Context ctx_;
     // Device settings
     juce::Label deviceLabel_{ {}, "Output Device" };
     juce::ComboBox deviceCombo_;
@@ -104,6 +110,11 @@ private:
     juce::ToggleButton autoRoundBpmToggle_{ "Auto-round detected BPM" };
     juce::Label autoRoundBpmHelpLabel_{ {}, "Rounds auto-detected BPM to the nearest integer. Manual / host / tap-tempo entry is unaffected." };
 
+    // Stem separation - GPU (DirectML) toggle + read-only active backend
+    juce::Label separationSectionLabel_{ {}, "STEM SEPARATION" };
+    juce::ToggleButton useGpuToggle_{ "Use GPU (DirectML) for stem separation" };
+    juce::Label backendLabel_{ {}, "Backend: ---" };
+
     // Colors
     juce::Colour bgColor_{ 0xff1a1a2e };
     juce::Colour sectionBgColor_{ 0xff252540 };
@@ -116,6 +127,8 @@ private:
     void onBufferChanged();
     void updateSampleRateDisplay();
     void onAutoRoundBpmToggled();
+    void onUseGpuToggled();
+    void refreshBackendLabel();
 
     JUCE_DECLARE_NON_COPYABLE_WITH_LEAK_DETECTOR(AudioSettingsPanel)
 };
@@ -132,7 +145,7 @@ private:
 class MidiSettingsPanel : public juce::Component,
                           public juce::Timer {
 public:
-    MidiSettingsPanel();
+    explicit MidiSettingsPanel(const ServiceLocator::Context& ctx);
     ~MidiSettingsPanel() override;
 
     void paint(juce::Graphics& g) override;
@@ -142,6 +155,7 @@ public:
     void refreshDeviceList();
 
 private:
+    ServiceLocator::Context ctx_;
     // Header
     juce::Label headerLabel_{ {}, "MIDI INPUT DEVICES" };
     juce::Label helpLabel_{ {}, "Select your MIDI controller. Enable a device to receive MIDI input in the Sample Browser." };
@@ -195,7 +209,7 @@ private:
  */
 class LicenseInfoPanel : public juce::Component {
 public:
-    LicenseInfoPanel();
+    explicit LicenseInfoPanel(const ServiceLocator::Context& ctx);
     ~LicenseInfoPanel() override = default;
 
     void paint(juce::Graphics& g) override;
@@ -204,6 +218,7 @@ public:
     void refreshLicenseInfo();
 
 private:
+    ServiceLocator::Context ctx_;
     // License status section
     juce::Label statusSectionLabel_{ {}, "LICENSE STATUS" };
     juce::Label statusLabel_{ {}, "Status" };
@@ -237,7 +252,7 @@ private:
 
     // Actions
     juce::TextButton activateBtn_{ "Activate License" };
-    juce::TextButton deactivateBtn_{ "Deactivate" };
+    juce::TextButton deactivateBtn_{ "Sign out" };
 
     // Colors
     juce::Colour bgColor_{ 0xff1a1a2e };
@@ -265,9 +280,19 @@ public:
         setMouseCursor(juce::MouseCursor::PointingHandCursor);
     }
 
+    // The dialog never outlives the editor that opened it (it holds this
+    // instance's service pointers): closed when the button goes away.
+    ~SettingsButton() override {
+        if (auto* dw = dynamic_cast<juce::DialogWindow*>(dialog_.getComponent()))
+            dw->exitModalState(0);
+    }
+
+    /** This plugin instance's services (RootComponent's captured Context). */
+    void setContext(const ServiceLocator::Context& ctx) { ctx_ = ctx; }
+
     void clicked() override {
         if (auto* parent = getTopLevelComponent()) {
-            SettingsDialog::showDialog(parent);
+            dialog_ = SettingsDialog::showDialog(parent, ctx_);
         }
     }
 
@@ -285,6 +310,10 @@ public:
         g.setFont(juce::Font(r.getWidth() * 0.45f, juce::Font::bold));
         g.drawText("S", r.toNearestInt(), juce::Justification::centred);
     }
+
+private:
+    ServiceLocator::Context ctx_ { ServiceLocator::capture() };
+    juce::Component::SafePointer<juce::Component> dialog_;
 };
 
 } // namespace samplar

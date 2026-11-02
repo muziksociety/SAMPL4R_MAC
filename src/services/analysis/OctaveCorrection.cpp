@@ -1,4 +1,5 @@
 #include "OctaveCorrection.h"
+#include "AnalysisDsp.h"
 
 #include <juce_dsp/juce_dsp.h>
 #include <algorithm>
@@ -74,81 +75,6 @@ static std::vector<int> pickOnsetPeaks(const std::vector<float>& env,
             peaks.push_back(i);
     }
     return peaks;
-}
-
-// Spectral-flux ODF for a mono buffer. Reusable since TempoAnalyzer's
-// own envelope is currently private; the cost is one FFT pass.
-static std::vector<float> computeSpectralFluxEnvelope(
-    const juce::AudioBuffer<float>& monoBuf,
-    double sampleRate,
-    int fftSize,
-    int hopSize,
-    double& outEnvSR)
-{
-    outEnvSR = 0.0;
-    std::vector<float> envelope;
-
-    if (monoBuf.getNumChannels() == 0) return envelope;
-    if (monoBuf.getNumSamples() < fftSize) return envelope;
-
-    const int numSamples = monoBuf.getNumSamples();
-    const float* samples = monoBuf.getReadPointer(0);
-
-    const int fftOrder = static_cast<int>(std::log2(static_cast<double>(fftSize)));
-    juce::dsp::FFT fft(fftOrder);
-
-    // Hann window
-    std::vector<float> window(static_cast<size_t>(fftSize));
-    for (int i = 0; i < fftSize; ++i)
-        window[static_cast<size_t>(i)] =
-            0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi
-                                    * static_cast<float>(i)
-                                    / static_cast<float>(fftSize - 1)));
-
-    std::vector<float> fftBuf(static_cast<size_t>(fftSize) * 2, 0.0f);
-    std::vector<float> prevMag(static_cast<size_t>(fftSize / 2), 0.0f);
-    std::vector<float> curMag(static_cast<size_t>(fftSize / 2), 0.0f);
-
-    bool first = true;
-    for (int pos = 0; pos + fftSize <= numSamples; pos += hopSize)
-    {
-        // Window + zero-pad imag
-        for (int i = 0; i < fftSize; ++i)
-        {
-            fftBuf[static_cast<size_t>(i) * 2]     = samples[pos + i] * window[static_cast<size_t>(i)];
-            fftBuf[static_cast<size_t>(i) * 2 + 1] = 0.0f;
-        }
-
-        fft.performRealOnlyForwardTransform(fftBuf.data());
-
-        // Magnitude (real-only output stores interleaved real/imag bins)
-        for (int k = 0; k < fftSize / 2; ++k)
-        {
-            const float re = fftBuf[static_cast<size_t>(k) * 2];
-            const float im = fftBuf[static_cast<size_t>(k) * 2 + 1];
-            curMag[static_cast<size_t>(k)] = std::sqrt(re * re + im * im);
-        }
-
-        if (first)
-        {
-            envelope.push_back(0.0f);
-            first = false;
-        }
-        else
-        {
-            float flux = 0.0f;
-            for (int k = 0; k < fftSize / 2; ++k)
-            {
-                const float d = curMag[static_cast<size_t>(k)] - prevMag[static_cast<size_t>(k)];
-                if (d > 0.0f) flux += d; // half-wave rectified spectral flux
-            }
-            envelope.push_back(flux);
-        }
-        prevMag.swap(curMag);
-    }
-
-    outEnvSR = sampleRate / static_cast<double>(hopSize);
-    return envelope;
 }
 
 struct CandidateScore
@@ -245,6 +171,18 @@ OctaveCorrectionResult correctOctave(double candidateBPM,
     best.onsetsPerBeat = density / (T / 60.0);
 
     CandidateScore scoreT = best;
+
+    // Ratio "simplicity" rank: the detector's own T first, then octaves,
+    // then 3:2 metric, then 4:3, then triples. Used to break score ties.
+    auto rankOf = [T](double c) -> int
+    {
+        const double r = c / T;
+        if (std::abs(r - 1.0) < 1e-6) return 0;
+        if (std::abs(r - 2.0) < 1e-6 || std::abs(r - 0.5) < 1e-6) return 1;
+        if (std::abs(r - 1.5) < 1e-6 || std::abs(r - 2.0 / 3.0) < 1e-6) return 2;
+        if (std::abs(r - 4.0 / 3.0) < 1e-6 || std::abs(r - 0.75) < 1e-6) return 3;
+        return 4;
+    };
     CandidateScore scoreHalf, scoreDouble;
     scoreHalf.bpm   = T / 2.0;
     scoreHalf.score = scoreCandidate(scoreHalf.bpm, density);
@@ -258,17 +196,20 @@ OctaveCorrectionResult correctOctave(double candidateBPM,
         cs.score = scoreCandidate(c, density);
         cs.onsetsPerBeat = (c > 0.0) ? density / (c / 60.0) : 0.0;
 
-        // Tie-breaker (within 5% score): prefer the SLOWER tempo.
-        // Humans tap the pulse, not the subdivision; DSP-only detection
-        // can't reliably distinguish 95 vs 84 vs 126 BPM on density alone.
-        // Slow-bias picks the most "tactus-like" value; the neural Beat
-        // This! detector (when enabled) overrides this heuristic for
-        // tracks where density is ambiguous.
+        // Tie-breaker (within the tie band): prefer the SIMPLER ratio to T
+        // (T itself, then octaves, then metric ratios); only among equally
+        // simple ratios prefer the slower tempo. The old rule ("slower wins
+        // any tie") replaced a correct, top-scoring T by T*2/3 or T*3/4
+        // whenever that also scored 1.0 (120 -> 80, 129 -> 86 in tests).
         const double tieBand = std::max(0.05, best.score * 0.05);
         if (cs.score > best.score + tieBand)
             best = cs;
-        else if (std::abs(cs.score - best.score) <= tieBand && cs.bpm < best.bpm && cs.bpm >= 60.0)
-            best = cs;
+        else if (std::abs(cs.score - best.score) <= tieBand)
+        {
+            const int rc = rankOf(cs.bpm), rb = rankOf(best.bpm);
+            if (rc < rb || (rc == rb && cs.bpm < best.bpm && cs.bpm >= 60.0))
+                best = cs;
+        }
     }
 
     // 3) Bimodal density gate (Fix 3): when T and T/2 score similarly,
@@ -327,10 +268,14 @@ OctaveCorrectionResult correctOctaveFromBuffer(double candidateBPM,
                                                double sampleRate)
 {
     double envSR = 0.0;
-    auto env = computeSpectralFluxEnvelope(monoBuffer, sampleRate,
-                                           /*fftSize*/ 2048,
-                                           /*hopSize*/ 512,
-                                           envSR);
+    if (monoBuffer.getNumChannels() <= 0 || monoBuffer.getNumSamples() <= 0)
+        return correctOctave(candidateBPM, {}, 0.0);
+    // C11 fix: shared ODF with the correct real-only FFT layout (full band,
+    // as before). Multi-channel input is downmixed (old code read ch 0 only).
+    const std::vector<float> mono = analysis::downmixToMono(monoBuffer);
+    auto env = analysis::spectralFluxEnvelope(mono.data(), static_cast<int>(mono.size()),
+                                              sampleRate, /*fftSize*/ 2048, /*hopSize*/ 512,
+                                              0.0, sampleRate * 0.5, envSR);
     return correctOctave(candidateBPM, env, envSR);
 }
 

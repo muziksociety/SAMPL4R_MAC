@@ -1,4 +1,6 @@
 #include "DownbeatDetector.h"
+#include "AnalysisDsp.h"
+#include "BeatThisDetector.h"
 
 #include <juce_dsp/juce_dsp.h>
 #include <cmath>
@@ -32,7 +34,7 @@ inline float dbToGain(float db) { return std::pow(10.0f, db * 0.05f); }
 
 } // namespace
 
-DownbeatDetector::Result DownbeatDetector::detect(
+DownbeatDetector::Result DownbeatDetector::detectCombFilter(
     const juce::AudioBuffer<float>& drumStem,
     double sampleRate,
     double bpm)
@@ -375,15 +377,248 @@ DownbeatDetector::Result DownbeatDetector::detect(
         beat1Samples = attackSamples;
     }
 
-    r.beat1Sample = beat1Samples;
-    r.confidence  = confidence;
-    r.valid       = true;
+    r.beat1Sample   = beat1Samples;
+    r.confidence    = confidence;
+    r.valid         = true;
+    r.source        = Source::CombFilter;
+    r.beatsPerBar   = 0;                  // comb filter only knows the BEAT phase
+    r.periodSamples = beatPeriodSamples;
 
     juce::Logger::writeToLog("✅ [DownbeatDetector] beat1=" + juce::String(r.beat1Sample)
                              + " samples (" + juce::String(static_cast<double>(r.beat1Sample) / sampleRate, 4) + "s)"
                              + " conf=" + juce::String(r.confidence, 3)
                              + " tauSamp=" + juce::String(beatPeriodSamples)
                              + " band=" + bandUsed);
+    return r;
+}
+
+//==============================================================================
+// C10: BeatThis downbeat path
+//==============================================================================
+namespace {
+
+// Onset strength around time t: energy rise of the signal (optionally one-pole
+// low-passed at lpHz, 0 = broadband) from [t-50ms, t) to [t, t+50ms).
+double onsetStrengthAt(const std::vector<float>& mono, double sampleRate, double t, double lpHz)
+{
+    const int64_t n   = static_cast<int64_t>(mono.size());
+    const int64_t c   = static_cast<int64_t>(std::llround(t * sampleRate));
+    const int64_t w   = static_cast<int64_t>(std::llround(0.050 * sampleRate));
+    const int64_t pre = static_cast<int64_t>(std::llround(0.150 * sampleRate)); // filter warm-up
+    const int64_t a = std::max<int64_t>(0, c - w - pre), b = std::min<int64_t>(n, c + w);
+    if (b - a < 2 * w) return 0.0;
+    const double k = (lpHz > 0.0) ? 1.0 - std::exp(-2.0 * juce::MathConstants<double>::pi * lpHz / sampleRate) : 1.0;
+    double y = 0.0, before = 0.0, after = 0.0;
+    for (int64_t i = a; i < b; ++i)
+    {
+        y += k * (mono[static_cast<size_t>(i)] - y);
+        if (i >= c - w && i < c) before += y * y;
+        else if (i >= c)         after  += y * y;
+    }
+    return std::max(0.0, after - before);
+}
+
+// Beat numbers k_i (missed beats bridged by rounding the IOI to the median IOI).
+std::vector<int64_t> beatNumbers(const std::vector<double>& beats)
+{
+    std::vector<int64_t> k(beats.size(), 0);
+    if (beats.size() < 2) return k;
+    std::vector<double> iois;
+    for (size_t i = 1; i < beats.size(); ++i) iois.push_back(beats[i] - beats[i - 1]);
+    std::vector<double> sorted = iois;
+    std::nth_element(sorted.begin(), sorted.begin() + static_cast<std::ptrdiff_t>(sorted.size() / 2), sorted.end());
+    const double med = std::max(1e-3, sorted[sorted.size() / 2]);
+    for (size_t i = 1; i < beats.size(); ++i)
+        k[i] = k[i - 1] + std::max<int64_t>(1, static_cast<int64_t>(std::llround(iois[i - 1] / med)));
+    return k;
+}
+
+// Refine a model downbeat time (50 fps frames, +-10 ms) to the sample-accurate
+// attack: energy-step argmax within +-30 ms, then zero crossing <= 1 ms back.
+int64_t refineDownbeatAttack(const std::vector<float>& mono, double sampleRate, double timeSec)
+{
+    const int64_t n      = static_cast<int64_t>(mono.size());
+    const int64_t centre = static_cast<int64_t>(std::llround(timeSec * sampleRate));
+    const int64_t radius = static_cast<int64_t>(std::llround(0.030 * sampleRate));
+    const int     win    = std::max(16, static_cast<int>(std::lround(0.001 * sampleRate)));
+    int64_t pos = analysis::findAttackSample(mono.data(), n, centre - radius, centre + radius, win, 10 * win);
+    if (pos < 0) pos = juce::jlimit<int64_t>(0, std::max<int64_t>(0, n - 1), centre);
+    const int zcBack = std::max(1, static_cast<int>(std::lround(0.001 * sampleRate)));
+    return analysis::snapToZeroCrossing(mono.data(), n, pos, zcBack, 0);
+}
+
+} // namespace
+
+DownbeatDetector::Result DownbeatDetector::detectFromDownbeats(
+    const juce::AudioBuffer<float>& drumStem,
+    double sampleRate,
+    double bpm,
+    const std::vector<double>& beatTimesSec,
+    const std::vector<double>& downbeatTimesSec,
+    double beatThisConfidence)
+{
+    juce::Logger::writeToLog("[DownbeatDetector] === detectFromDownbeats START === bpm=" + juce::String(bpm, 3)
+        + " beats=" + juce::String((int) beatTimesSec.size())
+        + " downbeats=" + juce::String((int) downbeatTimesSec.size()));
+    Result r;
+    if (drumStem.getNumSamples() <= 0 || drumStem.getNumChannels() <= 0 || sampleRate <= 0.0
+        || bpm < 60.0 || bpm > 220.0 || downbeatTimesSec.size() < 2 || beatTimesSec.size() < 4)
+    {
+        juce::Logger::writeToLog("[DownbeatDetector] detectFromDownbeats: unusable input -> invalid");
+        return r;
+    }
+
+    const std::vector<float> mono = analysis::downmixToMono(drumStem);
+
+    // Meter: median beats between model downbeats. A 2-count (model marks
+    // beats 1 AND 3, or a half-time fold) is treated as 4/4 with the phase
+    // decided below; unknown -> 4.
+    int beatsPerBar = BeatThisDetector::estimateBeatsPerBar(beatTimesSec, downbeatTimesSec);
+    const int rawMeter = beatsPerBar;
+    if (beatsPerBar == 2 || beatsPerBar <= 0) beatsPerBar = 4;
+
+    // Bar-phase VOTE: every model downbeat votes for (beat number mod meter).
+    // Robust to stray / missing downbeats in fills and breaks (the real
+    // MAQUETA drum stem has 1-, 2-, 3- and 4-beat downbeat spacings).
+    const std::vector<int64_t> k = beatNumbers(beatTimesSec);
+    std::vector<int> votes(static_cast<size_t>(beatsPerBar), 0);
+    std::vector<size_t> voterBeat; // beat index of each voting downbeat
+    for (double d : downbeatTimesSec)
+    {
+        auto it = std::lower_bound(beatTimesSec.begin(), beatTimesSec.end(), d - 0.03);
+        if (it == beatTimesSec.end() || std::abs(*it - d) > 0.03) continue;
+        const size_t bi = static_cast<size_t>(it - beatTimesSec.begin());
+        ++votes[static_cast<size_t>(k[bi] % beatsPerBar)];
+        voterBeat.push_back(bi);
+    }
+    int total = 0;
+    for (int v : votes) total += v;
+    if (total < 2)
+    {
+        juce::Logger::writeToLog("[DownbeatDetector] downbeats do not coincide with beats -> invalid");
+        return r;
+    }
+    int p = 0, q = -1;
+    for (int i = 1; i < beatsPerBar; ++i) if (votes[(size_t) i] > votes[(size_t) p]) p = i;
+    for (int i = 0; i < beatsPerBar; ++i)
+        if (i != p && (q < 0 || votes[(size_t) i] > votes[(size_t) q])) q = i;
+
+    juce::String voteStr;
+    for (int i = 0; i < beatsPerBar; ++i) voteStr << votes[(size_t) i] << (i + 1 < beatsPerBar ? "/" : "");
+
+    // Ambiguous vote (typ. beats 1 and 3 equally marked): beat 1 carries the
+    // strongest kick (+ crash) - compare kick-band + broadband onset strength
+    // of all beats in the two candidate phases.
+    juce::String decision = "vote";
+    if (q >= 0 && votes[(size_t) q] >= 0.6 * votes[(size_t) p])
+    {
+        double s[2] = {}, kickMax = 1e-12, broadMax = 1e-12;
+        std::vector<std::pair<int, std::pair<double, double>>> samples; // phase slot, (kick, broad)
+        for (size_t i = 0; i < beatTimesSec.size(); ++i)
+        {
+            const int ph = static_cast<int>(k[i] % beatsPerBar);
+            if (ph != p && ph != q) continue;
+            const double kk = onsetStrengthAt(mono, sampleRate, beatTimesSec[i], 150.0);
+            const double bb = onsetStrengthAt(mono, sampleRate, beatTimesSec[i], 0.0);
+            kickMax = std::max(kickMax, kk); broadMax = std::max(broadMax, bb);
+            samples.push_back({ ph == p ? 0 : 1, { kk, bb } });
+        }
+        int cnt[2] = {};
+        for (auto& smp : samples)
+        {
+            s[smp.first] += smp.second.first / kickMax + 0.5 * smp.second.second / broadMax;
+            ++cnt[smp.first];
+        }
+        const double sp = cnt[0] ? s[0] / cnt[0] : 0.0, sq = cnt[1] ? s[1] / cnt[1] : 0.0;
+        decision = "tie-break kick/crash strength " + juce::String(sp, 3) + " vs " + juce::String(sq, 3);
+        if (sq > sp) std::swap(p, q);
+    }
+
+    // Anchor: first model downbeat in the winning phase (a real hit), else
+    // the first beat in that phase.
+    double anchorTime = -1.0;
+    for (size_t bi : voterBeat)
+        if (static_cast<int>(k[bi] % beatsPerBar) == p) { anchorTime = beatTimesSec[bi]; break; }
+    if (anchorTime < 0.0)
+        for (size_t i = 0; i < beatTimesSec.size(); ++i)
+            if (static_cast<int>(k[i] % beatsPerBar) == p) { anchorTime = beatTimesSec[i]; break; }
+
+    const double barSec = beatsPerBar * 60.0 / bpm;
+    const int64_t attack = refineDownbeatAttack(mono, sampleRate, anchorTime);
+    const int64_t barSamples = static_cast<int64_t>(std::llround(barSec * sampleRate));
+    int64_t offset = barSamples > 0 ? attack % barSamples : attack;
+    if (offset < 0) offset += barSamples;
+
+    const double agreement = static_cast<double>(votes[(size_t) p]) / total;
+    r.beat1Sample         = offset;
+    r.firstDownbeatSample = attack;
+    r.beatsPerBar         = beatsPerBar;
+    r.periodSamples       = barSamples;
+    r.confidence          = juce::jlimit(0.0, 1.0, beatThisConfidence * agreement);
+    r.source              = Source::BeatThis;
+    r.valid               = true;
+
+    juce::Logger::writeToLog("[DownbeatDetector] meter raw=" + juce::String(rawMeter) + " used=" + juce::String(beatsPerBar)
+        + " phase votes=" + voteStr + " -> phase " + juce::String(p) + " (" + decision + ")"
+        + " anchor model=" + juce::String(anchorTime, 4) + "s attack="
+        + juce::String(static_cast<double>(attack) / sampleRate, 4) + "s bar=" + juce::String(barSec, 4) + "s");
+    juce::Logger::writeToLog("[DownbeatDetector] === detectFromDownbeats END === offset="
+        + juce::String(r.beat1Sample) + " samples (" + juce::String(static_cast<double>(r.beat1Sample) / sampleRate, 4)
+        + "s) conf=" + juce::String(r.confidence, 3));
+    return r;
+}
+
+DownbeatDetector::Result DownbeatDetector::detect(
+    const juce::AudioBuffer<float>& drumStem,
+    double sampleRate,
+    double bpm,
+    AnalysisCancel cancel)
+{
+    auto cancelledResult = [](const char* where)
+    {
+        Result r;
+        r.cancelled = true;
+        juce::Logger::writeToLog(juce::String("[DownbeatDetector] === detect CANCELLED (") + where + ") ===");
+        return r;
+    };
+    if (cancel.requested())
+        return cancelledResult("before start");
+    juce::Logger::writeToLog("[DownbeatDetector] === detect START === bpm=" + juce::String(bpm, 3)
+        + " samples=" + juce::String(drumStem.getNumSamples()) + " sr=" + juce::String(sampleRate, 0));
+
+    if (drumStem.getNumSamples() > 0 && drumStem.getNumChannels() > 0 && sampleRate > 0.0
+        && bpm >= 60.0 && bpm <= 220.0)
+    {
+        // Content-cached: free when the BPM job already analysed this stem.
+        BeatThisDetector beatThis;
+        const auto bt = beatThis.detect(drumStem, sampleRate, cancel);
+        if (bt.cancelled || cancel.requested())
+            return cancelledResult("during BeatThis");
+        if (bt.valid && bt.confidence >= kBeatThisConfidenceFloor && bt.downbeatTimesSec.size() >= 2)
+        {
+            juce::Logger::writeToLog("[DownbeatDetector] decision: BeatThis downbeats (conf="
+                + juce::String(bt.confidence, 2) + (bt.fromCache ? ", cached" : ", fresh inference") + ")");
+            auto r = detectFromDownbeats(drumStem, sampleRate, bpm,
+                                         bt.beatTimesSec, bt.downbeatTimesSec, bt.confidence);
+            if (r.valid)
+            {
+                juce::Logger::writeToLog("[DownbeatDetector] === detect END === source=BeatThis");
+                return r;
+            }
+        }
+        else
+        {
+            juce::Logger::writeToLog("[DownbeatDetector] decision: comb-filter fallback (BeatThis valid="
+                + juce::String(bt.valid ? 1 : 0) + " conf=" + juce::String(bt.confidence, 2)
+                + " downbeats=" + juce::String((int) bt.downbeatTimesSec.size()) + ")");
+        }
+    }
+
+    if (cancel.requested())
+        return cancelledResult("before comb-filter fallback");
+    auto r = detectCombFilter(drumStem, sampleRate, bpm);
+    juce::Logger::writeToLog("[DownbeatDetector] === detect END === source=CombFilter valid="
+        + juce::String(r.valid ? 1 : 0));
     return r;
 }
 

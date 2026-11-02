@@ -1,4 +1,4 @@
-﻿#pragma once
+#pragma once
 
 #include <juce_gui_basics/juce_gui_basics.h>
 #include "../../../app/EventBus.h"
@@ -15,7 +15,9 @@ namespace samplar {
 class SModeMidiLearnOverlay : public juce::Component
 {
 public:
-    SModeMidiLearnOverlay(EventBus& bus);
+    /** `registry` = the owning plugin instance's registry (from the page's
+     *  ServiceLocator::Context). Never re-read from the global locator. */
+    SModeMidiLearnOverlay(EventBus& bus, class ServiceRegistry* registry = nullptr);
     ~SModeMidiLearnOverlay() override;
 
     void paint(juce::Graphics& g) override;
@@ -32,6 +34,10 @@ public:
 
 private:
     EventBus& bus_;
+    // Registry of the plugin instance that built this overlay (captured at
+    // construction, when the editor has claimed the locator for THIS
+    // instance) - never re-read from the global locator later (review A2).
+    class ServiceRegistry* registry_ { nullptr };
     EventBus::HandlerId learnSub_ { 0 };
 
     int pendingStemIndex_ { -1 };

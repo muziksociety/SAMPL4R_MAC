@@ -46,8 +46,7 @@ public:
 
         // Validate: exe dir should contain known sub-folders
         if (exeDir.getChildFile("data").isDirectory()
-            || exeDir.getChildFile("models").isDirectory()
-            || exeDir.getChildFile("python").isDirectory())
+            || exeDir.getChildFile("models").isDirectory())
         {
             return exeDir;
         }
@@ -71,43 +70,6 @@ public:
     static juce::File getModelsDirectory()
     {
         return getAppDirectory().getChildFile("models");
-    }
-
-    /** python/ directory — embedded Python + packages. */
-    static juce::File getPythonDirectory()
-    {
-        return getAppDirectory().getChildFile("python");
-    }
-
-    /** BACKGROUNDS/ directory — large image assets (GIFs, PNGs).
-     *  Resolution: appDir → walk up tree (dev) → UserData (VST3/installer). */
-    static juce::File getBackgroundsDirectory()
-    {
-        // 1. Next to the app (portable / installed)
-        auto appDir = getAppDirectory();
-        auto bg = appDir.getChildFile("BACKGROUNDS");
-        if (bg.isDirectory())
-            return bg;
-
-        // 2. Walk up from exe (dev builds inside build/ sub-dirs)
-        auto dir = juce::File::getSpecialLocation(
-                       juce::File::currentExecutableFile)
-                       .getParentDirectory();
-        for (int i = 0; i < 10; ++i)
-        {
-            auto candidate = dir.getChildFile("BACKGROUNDS");
-            if (candidate.isDirectory())
-                return candidate;
-            dir = dir.getParentDirectory();
-        }
-
-        // 3. AppData fallback (VST3 / installer)
-        auto userBg = getUserDataDirectory().getChildFile("BACKGROUNDS");
-        if (userBg.isDirectory())
-            return userBg;
-
-        // Last resort: return the appDir version (caller will log if missing)
-        return appDir.getChildFile("BACKGROUNDS");
     }
 
     // ── User-writable directories (safe in both standalone & VST3) ──

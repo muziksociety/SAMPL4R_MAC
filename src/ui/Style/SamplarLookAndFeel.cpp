@@ -164,9 +164,11 @@ void SamplarLookAndFeel::drawButtonText(
                      juce::Justification::centred, 2);
 }
 
-juce::Font SamplarLookAndFeel::getTextButtonFont(juce::TextButton&, int /*buttonHeight*/)
+juce::Font SamplarLookAndFeel::getTextButtonFont(juce::TextButton&, int buttonHeight)
 {
-    return juce::Font(juce::FontOptions().withHeight(13.5f).withStyle("Bold"));
+    // Scale down only for small buttons (S/M/L at 20 px); 22 px and taller keep 13.5 bold.
+    const float h = juce::jlimit(10.0f, 13.5f, (float) buttonHeight * 0.62f);
+    return juce::Font(juce::FontOptions().withHeight(h).withStyle("Bold"));
 }
 
 //==============================================================================
@@ -224,7 +226,9 @@ void SamplarLookAndFeel::drawRotarySlider(
 {
     juce::ignoreUnused(slider);
 
-    const float radius = (float)juce::jmin(width / 2, height / 2) - 6.0f;
+    // Inset scales with the knob so small (20-40 px) knobs still draw an arc.
+    const float half   = (float)juce::jmin(width / 2, height / 2);
+    const float radius = juce::jmax(3.0f, half - juce::jmin(6.0f, half * 0.2f));
     const float centreX = (float)x + (float)width  * 0.5f;
     const float centreY = (float)y + (float)height * 0.5f;
     const float rx = centreX - radius;
@@ -280,6 +284,29 @@ void SamplarLookAndFeel::drawLinearSlider(
     const juce::Slider::SliderStyle style, juce::Slider& slider)
 {
     juce::ignoreUnused(maxSliderPos, minSliderPos);
+
+    if (style == juce::Slider::LinearBar)
+    {
+        // Compact value bar (chop inspector): panel background, fill from the
+        // zero point for bipolar ranges (pitch / pan / gain) or from the left,
+        // value text is the slider's own label drawn on top.
+        auto r = juce::Rectangle<float>((float) x, (float) y, (float) width, (float) height);
+        const bool on = slider.isEnabled();
+        g.setColour(bgPanelAlt.withAlpha(on ? 1.0f : 0.5f));
+        g.fillRoundedRectangle(r, 3.0f);
+        const double lo = slider.getMinimum(), hi = slider.getMaximum();
+        const float zeroX = (lo < 0.0 && hi > 0.0)
+            ? (float) slider.getPositionOfValue(0.0) : (float) x;
+        const float x0 = juce::jmin(zeroX, sliderPos), x1 = juce::jmax(zeroX, sliderPos);
+        if (x1 - x0 >= 0.5f)
+        {
+            g.setColour(cyan.withAlpha(on ? 0.40f : 0.15f));
+            g.fillRoundedRectangle(juce::Rectangle<float>(x0, (float) y, x1 - x0, (float) height).reduced(0.0f, 1.0f), 2.0f);
+        }
+        g.setColour(borderSoft.withAlpha(on ? 1.0f : 0.5f));
+        g.drawRoundedRectangle(r.reduced(0.5f), 3.0f, 1.0f);
+        return;
+    }
 
     if (style == juce::Slider::LinearVertical)
     {

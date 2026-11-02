@@ -1,4 +1,5 @@
 #include "TempoRefiner.h"
+#include "AnalysisDsp.h"
 
 #include <juce_dsp/juce_dsp.h>
 #include <algorithm>
@@ -7,113 +8,10 @@
 
 namespace samplar {
 
-namespace {
-
-//==============================================================================
-// Spectral-flux ODF — same recipe as OctaveCorrection.cpp (FFT 2048 / hop 512 /
-// Hann / half-wave-rectified diff). Replicated locally so this module is
-// self-contained; cost is one FFT pass.
-//==============================================================================
-static std::vector<float> computeSpectralFluxEnvelope(
-    const juce::AudioBuffer<float>& monoBuf,
-    double sampleRate,
-    int fftSize,
-    int hopSize,
-    double& outEnvSR)
-{
-    outEnvSR = 0.0;
-    std::vector<float> envelope;
-
-    if (monoBuf.getNumChannels() == 0) return envelope;
-    if (monoBuf.getNumSamples() < fftSize) return envelope;
-    (void) sampleRate;
-
-    const int numSamples = monoBuf.getNumSamples();
-    const float* samples = monoBuf.getReadPointer(0);
-
-    const int fftOrder = static_cast<int>(std::log2(static_cast<double>(fftSize)));
-    juce::dsp::FFT fft(fftOrder);
-
-    // Hann window
-    std::vector<float> window(static_cast<size_t>(fftSize));
-    for (int i = 0; i < fftSize; ++i)
-        window[static_cast<size_t>(i)] =
-            0.5f * (1.0f - std::cos(2.0f * juce::MathConstants<float>::pi
-                                    * static_cast<float>(i)
-                                    / static_cast<float>(fftSize - 1)));
-
-    // Band-limit bins: [50, 4000] Hz
-    const double binHz = sampleRate / static_cast<double>(fftSize);
-    const int binLow  = std::max(1, static_cast<int>(std::floor(50.0  / binHz)));
-    const int binHigh = std::min(fftSize / 2,
-                                 static_cast<int>(std::ceil(4000.0 / binHz)));
-
-    std::vector<float> fftBuf(static_cast<size_t>(fftSize) * 2, 0.0f);
-    std::vector<float> prevMag(static_cast<size_t>(fftSize / 2), 0.0f);
-    std::vector<float> curMag(static_cast<size_t>(fftSize / 2), 0.0f);
-
-    bool first = true;
-    for (int pos = 0; pos + fftSize <= numSamples; pos += hopSize)
-    {
-        for (int i = 0; i < fftSize; ++i)
-        {
-            fftBuf[static_cast<size_t>(i) * 2]     = samples[pos + i] * window[static_cast<size_t>(i)];
-            fftBuf[static_cast<size_t>(i) * 2 + 1] = 0.0f;
-        }
-
-        fft.performRealOnlyForwardTransform(fftBuf.data());
-
-        for (int k = 0; k < fftSize / 2; ++k)
-        {
-            const float re = fftBuf[static_cast<size_t>(k) * 2];
-            const float im = fftBuf[static_cast<size_t>(k) * 2 + 1];
-            curMag[static_cast<size_t>(k)] = std::sqrt(re * re + im * im);
-        }
-
-        if (first)
-        {
-            envelope.push_back(0.0f);
-            first = false;
-        }
-        else
-        {
-            float flux = 0.0f;
-            for (int k = binLow; k < binHigh; ++k)
-            {
-                const float d = curMag[static_cast<size_t>(k)] - prevMag[static_cast<size_t>(k)];
-                if (d > 0.0f) flux += d; // half-wave rectified spectral flux
-            }
-            envelope.push_back(flux);
-        }
-        prevMag.swap(curMag);
-    }
-
-    outEnvSR = sampleRate / static_cast<double>(hopSize);
-    return envelope;
-}
-
-// Downmix to mono. If already mono, copies a reference view.
-static juce::AudioBuffer<float> downmixToMono(const juce::AudioBuffer<float>& src)
-{
-    const int n = src.getNumSamples();
-    juce::AudioBuffer<float> mono(1, n);
-    mono.clear();
-
-    if (src.getNumChannels() == 1)
-    {
-        mono.copyFrom(0, 0, src, 0, 0, n);
-        return mono;
-    }
-
-    const int nCh = src.getNumChannels();
-    if (nCh <= 0) return mono;
-    const float scale = 1.0f / static_cast<float>(nCh);
-    for (int ch = 0; ch < nCh; ++ch)
-        mono.addFrom(0, 0, src, ch, 0, n, scale);
-    return mono;
-}
-
-} // anonymous namespace
+// C11 fix: the ODF now comes from analysis::spectralFluxEnvelope(), which
+// uses the correct juce::dsp::FFT real-only layout (the old local copy wrote
+// interleaved complex data into the real-only input, so the FFT only saw
+// the first half of each frame and every bin measured 2x its frequency).
 
 //==============================================================================
 // Public API
@@ -136,13 +34,15 @@ TempoRefinementResult refineTempoNearBPM(const juce::AudioBuffer<float>& drumSte
     }
 
     // 1) Downmix to mono
-    juce::AudioBuffer<float> mono = downmixToMono(drumStem);
+    const std::vector<float> mono = analysis::downmixToMono(drumStem);
 
     // 2) Compute ODF (spectral flux)
     constexpr int kFftSize = 2048;
     constexpr int kHopSize = 512;
     double envSR = 0.0;
-    auto env = computeSpectralFluxEnvelope(mono, sampleRate, kFftSize, kHopSize, envSR);
+    auto env = analysis::spectralFluxEnvelope(mono.data(), static_cast<int>(mono.size()),
+                                              sampleRate, kFftSize, kHopSize,
+                                              50.0, 4000.0, envSR);
 
     if (env.size() < 8 || envSR <= 0.0)
     {

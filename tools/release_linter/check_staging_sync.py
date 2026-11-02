@@ -1,189 +1,151 @@
 #!/usr/bin/env python3
 """
-SM5 Release Linter — Check #8: Staging directory sync.
+SAMPLAR Release Linter - Check #8: build bundle vs sources vs installer (staleness).
 
-The installer ships from SM5_Portable/, NOT from build/. If nobody copies
-the build output into SM5_Portable/ before running ISCC, the installer
-packages a STALE binary — silently shipping an old exe with different
-dependencies, missing features, or security holes.
+SAMPLAR's installer packages the build-tree bundle directly (no separate staging
+folder like SM5_Portable/), so "staging drift" means one of:
 
-This check caught the v1.2.2 "c10.dll not found" crash where the installer
-shipped a pre-refactor exe that still imported LibTorch, while the build
-output was correctly torch-free.
+  1. STALE BUILD - a compiled source / CMake file / NOTICE.md is newer than the
+     bundle's SAMPLAR.vst3 -> the installer would package an old binary.
+  2. STALE STAGED RESOURCE - a runtime file in the bundle differs from the repo file
+     it is staged from (onnxruntime.dll, DirectML.dll, models, NOTICE.md, licences).
+  3. VERSION - the binary's FileVersion differs from CMake project(VERSION).
+  4. STALE INSTALLER - release_assets/installer/output/SAMPLAR-Setup-<version>.exe
+     exists but is older than the bundle (an old build carrying the current
+     version number must never be uploaded).
 
-Strategy:
-  - Compare SM5_Portable/Sample Monsta.exe against
-    build/SM5App_artefacts/Release/Sample Monsta.exe
-  - Compare SM5_Portable/VST3/.../Sample Monsta.vst3 against
-    build/SM5Plugin_artefacts/Release/VST3/.../Sample Monsta.vst3
-  - Flag as DRIFT if:
-      (a) sizes differ (different binary)
-      (b) staging copy is OLDER than build copy (stale)
-      (c) build artifact doesn't exist (not built yet)
-      (d) staging artifact doesn't exist (never copied)
-
-Usage:
-    python tools/release_linter/check_staging_sync.py
-    python tools/release_linter/check_staging_sync.py --json report.json
-
-Exit codes:
-    0 = clean (staging matches build)
-    1 = drift (stale or missing staging artifacts)
-    2 = tool error
+Exit codes: 0 clean, 1 drift, 2 tool error.
 """
 from __future__ import annotations
+
 import argparse
 import json
-import os
 import sys
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[2]
-ALLOWLIST_FILE = Path(__file__).resolve().parent / "intentional_staging_skips.txt"
+try:
+    import pefile
+except ImportError:
+    pefile = None
 
-# Pairs of (build_path, staging_path) relative to REPO_ROOT.
-# Each pair represents a binary that MUST be synced before building the installer.
-SYNC_PAIRS = [
-    {
-        "name": "Standalone EXE",
-        "build":   "build/SM5App_artefacts/Release/Sample Monsta.exe",
-        "staging": "SM5_Portable/Sample Monsta.exe",
-    },
-    {
-        "name": "VST3 Plugin",
-        "build":   "build/SM5Plugin_artefacts/Release/VST3/Sample Monsta.vst3/Contents/x86_64-win/Sample Monsta.vst3",
-        "staging": "SM5_Portable/VST3/Sample Monsta.vst3/Contents/x86_64-win/Sample Monsta.vst3",
-    },
-]
+from linter_common import (INSTALLER_ISS, REPO_ROOT, bundle_bin_dir, bundle_binary, cmake_files, cmake_project_version,
+                           cmake_source_refs, common_args, default_bundle, rel, sha256)
 
-
-def load_allowlist() -> set[str]:
-    if not ALLOWLIST_FILE.exists():
-        return set()
-    out: set[str] = set()
-    for line in ALLOWLIST_FILE.read_text(encoding="utf-8").splitlines():
-        line = line.split("#", 1)[0].strip()
-        if line:
-            out.add(line)
-    return out
+LIC = "Contents/Resources/licenses"
+# bundle-relative file -> repo source it is staged from (sha256 compared when < 64 MB, else size)
+STAGED_FROM = {
+    "Contents/x86_64-win/onnxruntime.dll": "third_party/onnxruntime-directml/lib/onnxruntime.dll",
+    "Contents/x86_64-win/DirectML.dll": "third_party/onnxruntime-directml/lib/DirectML.dll",
+    "Contents/x86_64-win/models/htdemucs_body.onnx": "models/htdemucs_body.onnx",
+    "Contents/x86_64-win/models/beat_this.onnx": "third_party/beat_this/models/beat_this.onnx",
+    f"{LIC}/NOTICE.md": "NOTICE.md",
+    f"{LIC}/pffft-LICENSE.txt": "third_party/pffft/LICENSE.txt",
+    f"{LIC}/DirectML-LICENSE.txt": "third_party/onnxruntime-directml/DirectML-LICENSE.txt",
+    f"{LIC}/onnxruntime-LICENSE.txt": "third_party/onnxruntime-directml/LICENSE",
+    f"{LIC}/signalsmith-stretch-LICENSE.txt": "third_party/signalsmith-stretch/LICENSE.txt",
+    f"{LIC}/signalsmith-linear-LICENSE.txt": "third_party/signalsmith-linear/LICENSE.txt",
+}
+SOURCE_DIRS = ["src", "third_party/beat_this/src", "third_party/pffft/src"]
 
 
-def check_pair(pair: dict) -> dict:
-    build_path = REPO_ROOT / pair["build"]
-    staging_path = REPO_ROOT / pair["staging"]
-
-    result = {
-        "name": pair["name"],
-        "build_path": pair["build"],
-        "staging_path": pair["staging"],
-        "build_exists": build_path.exists(),
-        "staging_exists": staging_path.exists(),
-        "build_size": 0,
-        "staging_size": 0,
-        "build_mtime": 0.0,
-        "staging_mtime": 0.0,
-        "status": "OK",
-        "issue": "",
-    }
-
-    if not build_path.exists():
-        result["status"] = "DRIFT"
-        result["issue"] = "Build artifact not found — run cmake --build first"
-        return result
-
-    if not staging_path.exists():
-        result["status"] = "DRIFT"
-        result["issue"] = "Staging artifact not found — copy build output to SM5_Portable/"
-        return result
-
-    build_stat = build_path.stat()
-    staging_stat = staging_path.stat()
-
-    result["build_size"] = build_stat.st_size
-    result["staging_size"] = staging_stat.st_size
-    result["build_mtime"] = build_stat.st_mtime
-    result["staging_mtime"] = staging_stat.st_mtime
-
-    if build_stat.st_size != staging_stat.st_size:
-        result["status"] = "DRIFT"
-        result["issue"] = (
-            f"Size mismatch: build={build_stat.st_size:,} bytes vs "
-            f"staging={staging_stat.st_size:,} bytes — staging has a DIFFERENT binary"
-        )
-        return result
-
-    if staging_stat.st_mtime < build_stat.st_mtime - 1.0:
-        result["status"] = "DRIFT"
-        result["issue"] = "Staging is OLDER than build — copy the fresh build to SM5_Portable/"
-        return result
-
-    return result
+def file_version(binary: Path) -> str:
+    if pefile is None:
+        return ""
+    pe = pefile.PE(str(binary), fast_load=True)
+    pe.parse_data_directories(directories=[pefile.DIRECTORY_ENTRY["IMAGE_DIRECTORY_ENTRY_RESOURCE"]])
+    for fi in getattr(pe, "FileInfo", None) or []:
+        for e in fi:
+            for st in getattr(e, "StringTable", []):
+                v = st.entries.get(b"FileVersion")
+                if v:
+                    return v.decode("utf-8", "replace")
+    return ""
 
 
-def analyze() -> dict:
-    allow = load_allowlist()
-    results = []
-    drift_items: list[str] = []
-
-    for pair in SYNC_PAIRS:
-        r = check_pair(pair)
-        if r["name"] in allow:
-            r["status"] = "ALLOWED"
-        if r["status"] == "DRIFT":
-            drift_items.append(r["name"])
-        results.append(r)
-
-    return {
-        "pairs_checked": len(results),
-        "results": results,
-        "missing": drift_items,
-    }
+def newest_inputs(limit: int = 5) -> list[tuple[float, str]]:
+    files: list[Path] = list(cmake_files())
+    refs = cmake_source_refs()
+    for d in SOURCE_DIRS:
+        base = REPO_ROOT / d
+        if base.is_dir():
+            files += [f for f in base.rglob("*") if f.suffix in (".cpp", ".c", ".h", ".hpp", ".in")
+                      and (f.suffix != ".cpp" or f.relative_to(REPO_ROOT).as_posix() in refs)]
+    files.append(REPO_ROOT / "NOTICE.md")
+    stamped = sorted(((f.stat().st_mtime, rel(f)) for f in files if f.exists()), reverse=True)
+    return stamped[:limit]
 
 
-def print_report(report: dict) -> None:
+def analyze(bundle: Path) -> dict:
+    binary = bundle_binary(bundle)
+    problems: list[str] = []
+    info: dict = {"bundle": str(bundle)}
+    if not binary.exists():
+        return {"bundle": str(bundle), "missing": [f"bundle binary not found: {binary} (build SamplarPlugin_VST3)"]}
+    bmt = binary.stat().st_mtime
+    info["binary_mtime"] = bmt
+
+    newer = [(t, f) for t, f in newest_inputs(1_000_000) if t > bmt + 2.0]
+    info["inputs_newer_than_binary"] = [f for _, f in newer]
+    if newer:
+        problems.append(f"STALE BUILD: {len(newer)} input(s) changed after SAMPLAR.vst3 was linked "
+                        f"(newest: {', '.join(f for _, f in newer[:5])}) - rebuild before packaging")
+
+    for b_rel, src_rel in STAGED_FROM.items():
+        b, s = bundle / b_rel, REPO_ROOT / src_rel
+        if not s.exists():
+            continue
+        if not b.exists():
+            problems.append(f"STALE STAGED RESOURCE: {b_rel} missing in bundle (source {src_rel} exists)")
+            continue
+        same = (b.stat().st_size == s.stat().st_size and
+                (s.stat().st_size > 64 * 1048576 or sha256(b) == sha256(s)))
+        if not same:
+            problems.append(f"STALE STAGED RESOURCE: {b_rel} differs from {src_rel}")
+
+    ver, cm = file_version(binary), cmake_project_version()
+    info["binary_version"], info["cmake_version"] = ver, cm
+    if ver and cm and ver.split(".")[:3] != cm.split(".")[:3]:
+        problems.append(f"VERSION: SAMPLAR.vst3 FileVersion {ver} != CMake project VERSION {cm}")
+
+    setup = INSTALLER_ISS.parent / "output" / f"SAMPLAR-Setup-{cm}.exe"
+    info["installer"] = rel(setup) if setup.exists() else None
+    if setup.exists() and setup.stat().st_mtime + 2.0 < bmt:
+        problems.append(f"STALE INSTALLER: {rel(setup)} is older than the bundle binary - "
+                        f"rebuild it (release_assets/build_installer.ps1) and never upload the old one")
+    info["missing"] = problems
+    return info
+
+
+def print_report(r: dict) -> None:
     print("=" * 70)
-    print("SM5 RELEASE LINTER — Staging Directory Sync")
+    print("SAMPLAR RELEASE LINTER - Build Bundle / Installer Staleness")
     print("=" * 70)
-    print(f"Artifacts checked: {report['pairs_checked']}")
+    print(f"Bundle:    {r['bundle']}")
+    if "binary_version" in r:
+        print(f"Versions:  binary {r['binary_version'] or '?'}  /  CMake {r['cmake_version'] or '?'}")
+        print(f"Installer: {r.get('installer') or '(not built for this version)'}")
     print()
-
-    for r in report["results"]:
-        marker = "OK " if r["status"] == "OK" else ("!! " if r["status"] == "DRIFT" else "-- ")
-        print(f"  {marker}{r['name']}")
-        if r["status"] == "DRIFT":
-            print(f"      {r['issue']}")
-            print(f"      build:   {r['build_path']}")
-            print(f"      staging: {r['staging_path']}")
-        elif r["status"] == "OK":
-            print(f"      {r['build_size']:,} bytes, staging is current")
-    print()
-
-    if report["missing"]:
-        print(f"[DRIFT] {len(report['missing'])} artifact(s) out of sync:")
-        for name in report["missing"]:
-            print(f"  - {name}")
-        print()
-        print("  Fix: copy build output to SM5_Portable/ before running ISCC:")
-        print('    cp "build/SM5App_artefacts/Release/Sample Monsta.exe" "SM5_Portable/"')
-        print('    cp -r "build/SM5Plugin_artefacts/Release/VST3/Sample Monsta.vst3" "SM5_Portable/VST3/"')
+    if r["missing"]:
+        print(f"[DRIFT] {len(r['missing'])} problem(s):")
+        for p in r["missing"]:
+            print(f"  - {p}")
     else:
-        print("OK: SM5_Portable/ matches the build output. Installer will ship the correct binaries.")
+        print("OK: bundle is current with its sources and the installer output.")
     print("=" * 70)
 
 
 def main() -> int:
-    ap = argparse.ArgumentParser(description="SM5 staging directory sync linter")
-    ap.add_argument("--json", type=Path)
-    ap.add_argument("--quiet", action="store_true")
+    ap = common_args(argparse.ArgumentParser(description="SAMPLAR bundle/installer staleness linter"), bundle=True)
     args = ap.parse_args()
-
-    report = analyze()
+    try:
+        report = analyze(args.bundle or default_bundle())
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        return 2
     if not args.quiet:
         print_report(report)
     if args.json:
         args.json.write_text(json.dumps(report, indent=2), encoding="utf-8")
-        print(f"Wrote JSON: {args.json}")
-
     return 1 if report["missing"] else 0
 
 

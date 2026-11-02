@@ -1,31 +1,10 @@
-﻿# SAMPLAR Release Linter — Intentional Unregistered Services Allowlist
+# SAMPLAR Release Linter - Intentional Unregistered Services (check_services.py)
 #
-# These classes inherit samplar::IService for the lifecycle interface
-# (initialise/shutdown) but are NOT registered with the ServiceRegistry.
-# They are instantiated directly as C++ objects by their owner and
-# passed around via raw pointer or reference.
+# IService subclasses that are deliberately neither registered with the
+# ServiceRegistry nor owned by another compiled service. One class name per
+# line, with a reason. Services owned by another service (SModeService ->
+# SModeSeparationService -> FullSongService) are detected automatically.
 #
-# This is an intentional architectural pattern for services that have
-# a single owner and don't need global resolution via services.get().
-# Triaged 2026-04-10 via release_linter check #5.
-#
-# ---------------------------------------------------------------------------
-
-# Passed into audio::ProcessingAudioSource as raw pointer in the realtime path.
-# Single owner, no need for global registry lookup.
-PreSliceProcessingService
-
-# Owned directly by UI pages (SampleBrowserPage / LibraryPage). The IService
-# interface gives it a consistent lifecycle hook but it is not a shared service.
-DrumLibraryService
-
-# Single-owner analysis service used by WaveEditor + BeatGridOverlay.
-# Instantiated per-editor-instance rather than as a shared singleton.
-BeatAnalysisService
-
-# Per-file analyzer created on demand by the sample browser.
-# Short-lived; does not belong in the long-lived ServiceRegistry.
-SampleAnalysisService
-
-# Deprecated; moved to src/deprecated/ in the 2026-04-21 release. Delete after next release.
-ChatService
+# Pruned 2026-10-21: PreSliceProcessingService, DrumLibraryService,
+# BeatAnalysisService, SampleAnalysisService, ChatService no longer exist.
+# (no entries)

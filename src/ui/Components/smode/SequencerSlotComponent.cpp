@@ -357,11 +357,13 @@ void SequencerSlotComponent::mouseDown(const juce::MouseEvent& e)
         menu.addSeparator();
         menu.addItem(40, "Clear Slot");
 
-        menu.showMenuAsync(juce::PopupMenu::Options().withTargetScreenArea(
-            localAreaToGlobal(getLocalBounds()).toFloat().toNearestInt()),
-            [this](int result)
+        // U-M7: the lane may rebuild its slots while the menu is open: the
+        // callback only touches `this` if this slot component still exists.
+        menu.showMenuAsync(juce::PopupMenu::Options().withTargetComponent(this)
+                                                     .withDeletionCheck(*this),
+            [this, safe = juce::Component::SafePointer<SequencerSlotComponent>(this)](int result)
         {
-            if (result == 0) return;
+            if (safe == nullptr || result == 0) return;
             switch (result)
             {
                 case 1:  slot_.reverse = !slot_.reverse; break;
@@ -698,94 +700,33 @@ void SequencerSlotComponent::mouseDoubleClick(const juce::MouseEvent&)
 {
     if (slot_.empty || !model_) return;
 
-    // Play the trimmed/speed-adjusted portion directly
     auto* stem = model_->getStem(slot_.stemIndex);
     auto* seg = model_->getSegment(slot_.stemIndex, slot_.segmentIndex);
-    if (!stem || !seg) return;
+    if (!stem || !seg || seg->getLengthSamples() <= 0) return;
 
-    // Realtime pitch path: read raw stem buffer; pitch is applied via
-    // SoundTouch in the voice rendering loop when we pass stemIdx below.
-    const auto& srcBuf = stem->audioBuffer;
+    // Audition through the realtime engine with the SAME parameters the
+    // sequencer uses (trim, speed, reverse, slot pitch + stem pitch knob,
+    // velocity, fades) - no buffer is copied on the message thread (B26).
+    auto* reg = registry_;   // this instance's registry (review A2), not the global locator
+    auto* midiSvc = reg != nullptr ? dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping")) : nullptr;
+    if (midiSvc == nullptr) return;
 
-    juce::Logger::writeToLog("[SequencerSlot] playSegment stem=" + juce::String(slot_.stemIndex)
-        + " (realtime pitch via voice)");
+    midiSvc->stopAllVoices();
+    midiSvc->auditionSlot(slot_);
+    juce::Logger::writeToLog("[SequencerSlot] audition slot " + juce::String(slotIndex)
+        + " stem=" + juce::String(slot_.stemIndex) + " seg=" + juce::String(slot_.segmentIndex));
 
-    int64_t segStart = juce::jlimit((int64_t)0, (int64_t)srcBuf.getNumSamples(), (int64_t) seg->startSample);
-    int64_t segEnd   = juce::jlimit(segStart,   (int64_t)srcBuf.getNumSamples(), (int64_t) seg->endSample);
-    int64_t segLen = segEnd - segStart;
-    if (segLen <= 0) return;
-
-    // Apply trim
-    int64_t trimStart = segStart + static_cast<int64_t>(slot_.trimStart * segLen);
-    int64_t trimEnd = segStart + static_cast<int64_t>(slot_.trimEnd * segLen);
-    trimStart = juce::jlimit(segStart, segEnd, trimStart);
-    trimEnd = juce::jlimit(trimStart + 1, segEnd, trimEnd);
-    int inLen = static_cast<int>(trimEnd - trimStart);
-
-    int numCh = srcBuf.getNumChannels();
-
-    // Apply speed: resample if speed != 1.0
-    int outLen = inLen;
-    if (std::abs(slot_.speed - 1.0f) > 0.01f && slot_.speed > 0.0f)
-        outLen = static_cast<int>(inLen / slot_.speed);
-    if (outLen <= 0) outLen = inLen;
-
-    auto buf = std::make_shared<juce::AudioBuffer<float>>(numCh, outLen);
-    buf->clear();
-
-    if (outLen != inLen)
-    {
-        double ratio = static_cast<double>(inLen) / static_cast<double>(outLen);
-        for (int ch = 0; ch < numCh; ++ch)
-        {
-            const float* rd = srcBuf.getReadPointer(ch, static_cast<int>(trimStart));
-            float* wr = buf->getWritePointer(ch);
-            for (int j = 0; j < outLen; ++j)
-            {
-                double sp = j * ratio;
-                int i0 = juce::jmin(static_cast<int>(sp), inLen - 1);
-                int i1 = juce::jmin(i0 + 1, inLen - 1);
-                float f = static_cast<float>(sp - i0);
-                wr[j] = rd[i0] * (1.0f - f) + rd[i1] * f;
-            }
-        }
-    }
-    else
-    {
-        for (int ch = 0; ch < numCh; ++ch)
-            buf->copyFrom(ch, 0, srcBuf, ch, static_cast<int>(trimStart), inLen);
-    }
-
-    // Apply reverse
-    if (slot_.reverse)
-        for (int ch = 0; ch < numCh; ++ch)
-            std::reverse(buf->getWritePointer(ch), buf->getWritePointer(ch) + outLen);
-
-    // Apply velocity (volume)
-    if (std::abs(slot_.velocity - 1.0f) > 0.01f)
-        buf->applyGain(slot_.velocity);
-
-    // Play via MidiMappingService
-    auto* reg = samplar::ServiceLocator::getRegistry();
-    if (reg)
-    {
-        auto* midiSvc = dynamic_cast<samplar::MidiMappingService*>(reg->get("midi.mapping"));
-        if (midiSvc)
-        {
-            midiSvc->stopAllVoices();
-            // Sequencer slot playback: do NOT pass stemIndex. The slot's
-            // waveform thumbnail is rendered from untransposed audio; passing
-            // stemIndex would route through realtime signalsmith pitch and
-            // make the playback diverge from the visual.
-            midiSvc->playBufferDirect(buf, sampleRate_, 1.0f, false);
-        }
-    }
-
-    // Trigger play animation
+    // Play animation for the auditioned duration (trimmed length / speed).
+    const double len = (double) seg->getLengthSamples() * juce::jmax(0.0f, slot_.trimEnd - slot_.trimStart);
+    const double speed = slot_.speed > 0.0f ? (double) slot_.speed : 1.0;
+    const double srate = sampleRate_ > 0.0 ? sampleRate_ : 44100.0;
     setPlaying(true);
-    juce::Timer::callAfterDelay(static_cast<int>(1000.0 * outLen / sampleRate_), [this]()
+    // B6: Shuffle / lane rebuild can delete this slot before the audition ends.
+    juce::Timer::callAfterDelay(juce::jmax(1, static_cast<int>(1000.0 * len / speed / srate)),
+                                [safeThis = juce::Component::SafePointer<SequencerSlotComponent>(this)]()
     {
-        setPlaying(false);
+        if (safeThis != nullptr)
+            safeThis->setPlaying(false);
     });
 }
 

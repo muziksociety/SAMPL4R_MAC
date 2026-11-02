@@ -46,7 +46,7 @@ UpdateDialog::UpdateDialog(const UpdateCheckService::UpdateInfo& updateInfo,
     upgradeBtn_.setColour(juce::TextButton::textColourOffId, juce::Colours::white);
     upgradeBtn_.onClick = [this] {
         juce::Logger::writeToLog("[UpdateDialog] Upgrade to PRO clicked - opening browser");
-        juce::URL("https://samplemonsta.com/portal").launchInDefaultBrowser();
+        juce::URL("https://www.samplemonsta.com/portal").launchInDefaultBrowser();
     };
 
     // Only show upgrade button for trial or expired

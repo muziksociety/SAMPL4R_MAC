@@ -8,9 +8,10 @@ namespace samplar {
 /**
  * Global toggle for anti-click micro-fades on sample playback and export.
  *
- * Read by the voice render loops of SequencerAudioSource and MidiMappingService
- * to apply a short (default 2 ms) linear fade-in at voice start and fade-out
- * at voice end. Written by the Fade checkbox in SModePage.
+ * Read by the realtime engine (src/audio/engine/PlaybackEngine) to apply a
+ * short (default 2 ms) linear fade-in at a chop's start and fade-out at its
+ * end. The same engine renders exports, so exports match playback.
+ * Written by the Fade checkbox in SModePage.
  *
  * Thread-safe via std::atomic. Default: ON.
  *
@@ -26,6 +27,15 @@ inline std::atomic<bool>& microFadeEnabledFlag()
 /** Fade length in milliseconds. Short enough to be inaudible (<= attack
     perception threshold) but long enough to neutralize discontinuity clicks. */
 inline constexpr double kMicroFadeMs = 2.0;
+
+/** Release fade used whenever a voice is stopped early (note-off in GATE,
+    voice steal, sequencer step end, stop / all-notes-off). Always applied -
+    a hard cut always clicks. */
+inline constexpr double kReleaseFadeMs = 3.0;
+
+/** Loop wrap crossfade, and the crossfade used when a voice switches from the
+    direct path to the pitch shifter. */
+inline constexpr double kLoopCrossfadeMs = 5.0;
 
 /** Compute the per-sample fade gain for a voice currently at samplePosition
     within a source buffer of length srcSamples. Returns 1.0 in the interior
