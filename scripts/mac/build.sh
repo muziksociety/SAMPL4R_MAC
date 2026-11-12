@@ -97,6 +97,11 @@ if [[ "$TESTS" == "ON" ]]; then
     cmake --build "$BUILD_DIR" --config "$CONFIG" --parallel --target EngineTests SamplarTests ${NATIVE_ARGS[@]+"${NATIVE_ARGS[@]}"}
 fi
 
+# Plugin ID drift guard: the built bundle must carry exactly the cmake/identity.cmake codes.
+echo "[build] plugin identity check"
+python3 "$REPO_ROOT/tools/release_linter/check_plugin_ids.py" \
+    --bundle "$BUILD_DIR/SamplarPlugin_artefacts/$CONFIG/VST3/SAMPLAR.vst3"
+
 echo "[build] done."
 echo "[build] artifacts under: $BUILD_DIR/SamplarPlugin_artefacts/$CONFIG/"
 find "$BUILD_DIR/SamplarPlugin_artefacts/$CONFIG" -maxdepth 2 -name "*.vst3" 2>/dev/null | sed 's/^/  /'

@@ -20,6 +20,10 @@ endif()
 # C is enabled here for samplar_pffft: MSVC tolerated JUCE enabling it in its subdirectory, Clang/Ninja does not.
 project(samplar VERSION 1.0.1 LANGUAGES C CXX)
 
+# Plugin identity (manufacturer/plugin codes, VST3 class ID, bundle ids). Never write
+# these codes anywhere else: the build check compares the built bundle to this file.
+include("${CMAKE_CURRENT_SOURCE_DIR}/cmake/identity.cmake")
+
 option(SAMPLAR_BUILD_TESTS "Build SAMPLAR unit tests" OFF)
 option(SAMPLAR_BUILD_STANDALONE "Build the SamplarApp standalone target (dev only)" OFF)
 
@@ -395,10 +399,10 @@ message(STATUS "SAMPLAR_BUILD_STANDALONE=ON — SamplarApp standalone target ena
 
 juce_add_gui_app(SamplarApp
     PRODUCT_NAME "SAMPLAR"
-    COMPANY_NAME "Muziksociety"
+    COMPANY_NAME "${SAMPLAR_COMPANY_NAME}"
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
-    BUNDLE_ID "com.muziksociety.samplar"
+    BUNDLE_ID "${SAMPLAR_BUNDLE_ID}"
     VERSION "${SAMPLAR_VERSION_STRING}"
     ICON_BIG "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_512.png"
     ICON_SMALL "${CMAKE_CURRENT_SOURCE_DIR}/assets/samplar_icon_64.png"
@@ -537,10 +541,10 @@ endif()
 # -----------------------------------------------------------------------
 # Apple bundle settings. No AU: there is no Apple developer account (MM-024).
 # Ad-hoc signed, so the hardened runtime stays off until a Developer ID is wired.
-set(SAMPLAR_PLUGIN_BUNDLE_ID "com.muziksociety.samplar.vst3")
+set(SAMPLAR_PLUGIN_BUNDLE_ID "${SAMPLAR_BUNDLE_ID_NON_APPLE}")
 set(SAMPLAR_PLUGIN_APPLE_ARGS)
 if(APPLE)
-    set(SAMPLAR_PLUGIN_BUNDLE_ID "com.muziksociety.samplar")
+    set(SAMPLAR_PLUGIN_BUNDLE_ID "${SAMPLAR_BUNDLE_ID}")
     set(SAMPLAR_PLUGIN_APPLE_ARGS
         HARDENED_RUNTIME_ENABLED FALSE
         MICROPHONE_PERMISSION_ENABLED FALSE)
@@ -548,13 +552,13 @@ endif()
 
 juce_add_plugin(SamplarPlugin
     PRODUCT_NAME "SAMPLAR"
-    COMPANY_NAME "Muziksociety"
+    COMPANY_NAME "${SAMPLAR_COMPANY_NAME}"
     COMPANY_WEBSITE "https://samplemonsta.com/samplar"
     COMPANY_EMAIL "muziksociety@gmail.com"
     BUNDLE_ID "${SAMPLAR_PLUGIN_BUNDLE_ID}"
     VERSION "${SAMPLAR_VERSION_STRING}"
-    PLUGIN_MANUFACTURER_CODE Mzks
-    PLUGIN_CODE Smpl
+    PLUGIN_MANUFACTURER_CODE "${SAMPLAR_PLUGIN_MANUFACTURER_CODE}"
+    PLUGIN_CODE "${SAMPLAR_PLUGIN_CODE}"
     IS_SYNTH TRUE
     NEEDS_MIDI_INPUT TRUE
     NEEDS_MIDI_OUTPUT FALSE

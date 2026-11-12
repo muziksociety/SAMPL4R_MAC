@@ -94,6 +94,7 @@ _deps/
 *.cmake
 !CMakeLists.txt
 !cmake/
+!cmake/*.cmake
 !*.cmake.in
 
 # JUCE

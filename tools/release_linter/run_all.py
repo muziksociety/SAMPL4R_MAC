@@ -2,7 +2,7 @@
 """
 SAMPLAR Release Linter - Unified runner.
 
-Executes all 8 checks, collects their JSON reports, and emits:
+Executes all 9 checks, collects their JSON reports, and emits:
   - combined_report.json      (single machine-readable report)
   - release_linter.dot        (Obsidian-style vault map, Graphviz DOT)
   - release_linter.html       (self-contained HTML summary, no server needed)
@@ -46,6 +46,8 @@ CHECKS = [
      "summary": "Absolute dev-machine paths in src/ or baked into the shipped binary", "bundle": True},
     {"id": "staging_sync", "title": "Bundle/installer staleness", "script": LINTER_DIR / "check_staging_sync.py",
      "summary": "Bundle older than sources, staged resources out of date, stale installer output", "bundle": True},
+    {"id": "plugin_ids", "title": "Plugin identity (ID drift)", "script": LINTER_DIR / "check_plugin_ids.py",
+     "summary": "Built VST3 class ID / vendor / bundle id (and AU codes if built) match cmake/identity.cmake", "bundle": True},
 ]
 
 
@@ -83,7 +85,7 @@ def count_findings(result: dict) -> int:
     n = 0
     for key in ("orphans", "phantoms", "missing_backend", "missing_ui",
                 "missing_dirs", "missing_bins", "published_only",
-                "subscribed_only", "missing",
+                "subscribed_only", "missing", "mismatches",
                 "source_findings", "binary_findings"):
         v = r.get(key)
         if isinstance(v, list):

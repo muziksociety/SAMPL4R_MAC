@@ -80,6 +80,20 @@ if(SAMPLAR_BUILD_TESTS)
   target_compile_features(SamplarTests PRIVATE cxx_std_17)
 
   add_test(NAME SamplarTests COMMAND SamplarTests)
+
+  # Plugin identity guard: reads the BUILT SAMPLAR.vst3 (moduleinfo.json class ID /
+  # vendor, macOS Info.plist bundle id, AU codes if a .component is built) and fails
+  # when it differs from cmake/identity.cmake. Build SamplarPlugin_VST3 before ctest.
+  find_package(Python3 COMPONENTS Interpreter)
+  if(Python3_Interpreter_FOUND)
+    add_test(NAME PluginIdCheck
+      COMMAND "${Python3_EXECUTABLE}" "${_SAMPLAR_QA_ROOT}/tools/release_linter/check_plugin_ids.py"
+              --bundle "${CMAKE_BINARY_DIR}/SamplarPlugin_artefacts/$<CONFIG>/VST3/SAMPLAR.vst3"
+              --identity "${_SAMPLAR_QA_ROOT}/cmake/identity.cmake"
+      WORKING_DIRECTORY "${_SAMPLAR_QA_ROOT}/tools/release_linter")
+  else()
+    message(WARNING "SAMPLAR: Python3 not found - ctest PluginIdCheck (plugin ID drift guard) not added")
+  endif()
 endif()
 
 # ---- 2. Release hygiene of the shipped binary ---------------------------------------
